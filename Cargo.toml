@@ -9,5 +9,8 @@ name = "rottnest_rs"
 crate-type = ["cdylib"]
 
 [dependencies]
-pyo3 = "0.19.0"
+pyo3 = "0.20.0"
+arrow = { version = "50.0.0", features = ["pyarrow"] }
 tantivy = "0.15"
+tantivy-jieba = "0.8.0"
+# tantivy-tokenizer-api= "0.2.0"
