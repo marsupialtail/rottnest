@@ -258,14 +258,16 @@ async fn search_lava_async(operator: &mut Operator, file: &str, query: &str) -> 
 #[pyfunction]
 fn search_lava(file: &str, query: &str) -> PyResult<Vec<u64>> {
 
+    let mut filename: String = file.to_string();
     let mut operator: Operator = match file.starts_with("s3://") {
         true => {
             let mut builder = S3::default();
             builder.bucket(file[5..].split("/").next().expect("malformed path"));
+            filename = file[5..].split("/").skip(1).collect::<Vec<&str>>().join("/");
             // Set the region. This is required for some services, if you don't care about it, for example Minio service, just set it to "auto", it will be ignored.
             builder.region("us-west-2");
             builder.enable_virtual_host_style();
-            builder.endpoint("https://tos-s3-cn-beijing.volces.com");
+            builder.endpoint("");
             Operator::new(builder).map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("S3 builder construction error: {}", e)))?.finish()
         },
         false => {
@@ -276,7 +278,7 @@ fn search_lava(file: &str, query: &str) -> PyResult<Vec<u64>> {
         }
     };
 
-    let result: Result<Vec<u64>, anyhow::Error> = search_lava_async(&mut operator, file, query);
+    let result: Result<Vec<u64>, anyhow::Error> = search_lava_async(&mut operator, &filename, query);
 
     Ok(result.map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("searching error: {}", e)))?)
 }
