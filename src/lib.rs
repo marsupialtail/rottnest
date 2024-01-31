@@ -1,5 +1,6 @@
 use pyo3::prelude::*;
 use pyo3::exceptions::PyValueError;
+use pyo3::types::PyString;
 
 use arrow::array::{make_array, Array, ArrayData, UInt64Array, StringArray};
 use arrow::error::ArrowError;
@@ -62,9 +63,16 @@ impl TokenizerEnum {
     }
 }
 
+/*
+Structure of the lava file
+
+8 bytes indicating length of compressed term dictionary | compressed term dictionary | compressed posting lists line by line |
+     compressed posting list offsets, starting from 0 (need to add 8 + compressed term dict size) | 8 bytes indicating offset of compressed posting list offsets
+*/
+
 /// Function that tokenizes the input text and returns a list of tokens.
 #[pyfunction]
-fn tokenize_natural_language(array: &PyAny, uid: &PyAny, language: Option<&PyAny>, py: Python) -> PyResult<()> {
+fn build_lava_natural_language(array: &PyAny, uid: &PyAny, language: Option<&PyAny>, py: Python) -> PyResult<()> {
     let array = make_array(ArrayData::from_pyarrow(array)?);
     let uid = make_array(ArrayData::from_pyarrow(uid)?);
 
@@ -184,6 +192,120 @@ fn tokenize_natural_language(array: &PyAny, uid: &PyAny, language: Option<&PyAny
 }
 
 #[tokio::main]
+async fn hoa(operator: &mut Operator, lava_files: Vec<&str>) -> Result<()> // hawaiian for lava condensation
+{
+    // instantiate a list of readers from lava_files
+    let mut readers: Vec<Reader> = Vec::with_capacity(lava_files.len());
+    let mut compressed_term_dictionary_sizes: Vec<u64> = Vec::with_capacity(lava_files.len());
+    let mut decompressed_term_dictionaries: Vec<BufReader<Cursor<Vec<u8>>>> = Vec::with_capacity(lava_files.len());
+    let mut file_sizes: Vec<u64> = Vec::with_capacity(lava_files.len());
+    let mut plist_offsets: Vec<Vec<u64>> = Vec::with_capacity(lava_files.len());
+
+    // read in and decompress all the term dictionaries in memory. The term dictionaries corresponding to English language should be small.
+
+    for file in lava_files {
+        
+        let file_size: u64 = operator.stat(file).await?.content_length();
+        let mut reader: Reader = operator.clone().reader(file).await?;
+        let mut buffer: [u8; 8] = [0u8; 8];
+        reader.read(&mut buffer[..]).await?;
+        let compressed_term_dictionary_size = u64::from_le_bytes(buffer);
+        let mut compressed_term_dictionary: Vec<u8> = vec![0u8; compressed_term_dictionary_size as usize];
+        reader.read(&mut compressed_term_dictionary[..]).await?;
+        let mut decompressed_term_dictionary: Vec<u8> = Vec::with_capacity(compressed_term_dictionary_size as usize);
+        let mut decompressor: Decoder<'_, BufReader<&[u8]>> = Decoder::new(&compressed_term_dictionary[..])?;
+        decompressor.read_to_end(&mut decompressed_term_dictionary)?;
+        let cursor = Cursor::new(decompressed_term_dictionary);
+        let buf_reader: BufReader<Cursor<Vec<u8>>> = BufReader::new(cursor);
+
+        // now do the plist_offsets
+
+        reader.seek(SeekFrom::End(-8)).await?;
+        let mut buffer1 = [0u8; 8];
+        reader.read(&mut buffer1).await?;
+        let offset = u64::from_le_bytes(buffer1);
+
+        // seek to the offset
+        reader.seek(SeekFrom::Start(offset)).await?;
+        let mut buffer2: Vec<u8> = vec![0u8; (file_size - offset - 8) as usize];
+        reader.read(&mut buffer2).await?;
+        decompressor = Decoder::new(&buffer2[..])?;
+        let mut decompressed_serialized_plist_offsets: Vec<u8> = Vec::with_capacity(buffer2.len() as usize);
+        decompressor.read_to_end(&mut decompressed_serialized_plist_offsets)?;
+        let this_plist_offsets: Vec<u64> = bincode::deserialize(&decompressed_serialized_plist_offsets)
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("Bincode deserialization error: {}", e)))?;
+    
+        plist_offsets.push(this_plist_offsets);
+        decompressed_term_dictionaries.push(buf_reader);
+        compressed_term_dictionary_sizes.push(compressed_term_dictionary_size);
+        file_sizes.push(file_size);
+        readers.push(reader);
+    }
+
+    // now do the merge sort
+
+    let mut term_dictionary = String::new();
+    let mut current_lines: Vec<String> = Vec::with_capacity(readers.len());
+
+    let mut line = String::new();
+
+    // Initialize the current line for each reader
+    for (i, reader) in decompressed_term_dictionaries.iter_mut().enumerate() {
+        if reader.read_line(&mut line)? > 0 {
+            current_lines[i] = line.clone();
+        }
+    }
+
+    while current_lines.len() > 0 {
+        let mut smallest: Option<usize> = None;
+
+        // Find the smallest current line
+        for (i, line_option) in current_lines.iter().enumerate() {
+            if let Some(line) = line_option {
+                if smallest.is_none() || line < current_lines[smallest.unwrap()].as_ref().unwrap() {
+                    smallest = Some(i);
+                }
+            }
+        }
+
+        // Append the smallest line to the result
+        if let Some(smallest_index) = smallest {
+            if let Some(smallest_line) = &current_lines[smallest_index] {
+                term_dictionary.push_str(smallest_line);
+                term_dictionary.push('\n');
+            }
+
+            // Move to the next line for the reader that had the smallest line
+            if let Some(line) = decompressed_term_dictionaries[smallest_index].lines().next() {
+                current_lines[smallest_index] = line.ok();
+            } else {
+                current_lines[smallest_index] = None; // This reader is exhausted
+            }
+        }
+    }
+
+    
+    
+    Ok(())
+}
+
+#[pyfunction]
+fn merge_lava(lava_files: Vec<&PyString>) -> PyResult<()> 
+{
+    // you should only merge them on local disk. It's not worth random accessing S3 for this because of the request costs. 
+    // worry about running out of disk later. Assume you have a fast SSD for now.
+    let mut builder = Fs::default();
+    let current_path = env::current_dir()?;
+    builder.root(current_path.to_str().expect("no path"));
+    let mut operator = Operator::new(builder).map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("Fs Builder construction error: {}", e)))?.finish();
+
+    let result = hoa(&mut operator, lava_files.into_iter().map(|x| x.to_str().unwrap()).collect::<Vec<&str>>());
+
+    Ok(result.map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("searching error: {}", e)))?)
+}
+
+
+#[tokio::main]
 async fn search_lava_async(operator: &mut Operator, file: &str, query: &str) -> Result<Vec<u64>> {
 
     let file_size: u64 = operator.stat(file).await?.content_length();
@@ -202,8 +324,6 @@ async fn search_lava_async(operator: &mut Operator, file: &str, query: &str) -> 
     decompressor.read_to_end(&mut decompressed_term_dictionary)?;
 
     let cursor = Cursor::new(decompressed_term_dictionary);
-
-    // Use a BufReader to read lines from the Cursor
     let buf_reader: BufReader<Cursor<Vec<u8>>> = BufReader::new(cursor);
     let mut matched: Vec<u64> = Vec::new();
     let re: Regex = Regex::new(query).unwrap();
@@ -267,7 +387,7 @@ fn search_lava(file: &str, query: &str) -> PyResult<Vec<u64>> {
             // Set the region. This is required for some services, if you don't care about it, for example Minio service, just set it to "auto", it will be ignored.
             builder.region("us-west-2");
             builder.enable_virtual_host_style();
-            builder.endpoint("");
+            builder.endpoint("https://tos-s3-cn-beijing.volces.com");
             Operator::new(builder).map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("S3 builder construction error: {}", e)))?.finish()
         },
         false => {
@@ -278,6 +398,7 @@ fn search_lava(file: &str, query: &str) -> PyResult<Vec<u64>> {
         }
     };
 
+    println!("{}", filename);
     let result: Result<Vec<u64>, anyhow::Error> = search_lava_async(&mut operator, &filename, query);
 
     Ok(result.map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("searching error: {}", e)))?)
@@ -286,7 +407,7 @@ fn search_lava(file: &str, query: &str) -> PyResult<Vec<u64>> {
 /// This module is a python module implemented in Rust.
 #[pymodule]
 fn rottnest_rs(py: Python, m: &PyModule) -> PyResult<()> {
-    m.add_function(wrap_pyfunction!(tokenize_natural_language, m)?)?;
+    m.add_function(wrap_pyfunction!(build_lava_natural_language, m)?)?;
     m.add_function(wrap_pyfunction!(search_lava, m)?)?;
     Ok(())
 }
