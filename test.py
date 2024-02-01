@@ -29,7 +29,7 @@ def merge_test():
 
     rottnest_rs.merge_lava("merged.lava", ["1.lava", "2.lava"])
 
-    print(rottnest_rs.search_lava("merged.lava", "a"))
+    print(rottnest_rs.search_lava("merged.lava", "d"))
 
 basic_test()
 merge_test()

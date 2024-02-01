@@ -277,6 +277,7 @@ async fn hoa(condensed_lava_file: &str, operator: &mut Operator, lava_files: Vec
             .clone(); // Find the minimum line
     
         term_dictionary += &smallest_line;
+        term_dictionary += "\n";
 
         // Progress the BufReaders whose last output was smallest line
 
