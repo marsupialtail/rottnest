@@ -1,7 +1,7 @@
 # Rottnest : Machine Data -> LLMs
 Rottnest aims to be the missing link between machine data (metrics, logs, traces) and large language models. The goal is to **empower** users to build retrieval-augmented generation (RAG) applications based off observability and cybersecurity data, such as root-cause debugging agent or AI SOC agent. While it's primarily focused on machine data, users might find it useful for other applications, like data curation for training LLMs.
 
-**It is currently a work in progress, expected release date Q2/Q3 2024**
+**It is currently a work in progress, expected release date Q2/Q3 2024** Slowly migrating from https://github.com/marsupialtail/rottnest-cpp and https://github.com/marsupialtail/quokka, a lot of the motivations can be found [here](https://github.com/marsupialtail/quokka/blob/master/blog/time.md).
 
 ## The Indexing Story
 
