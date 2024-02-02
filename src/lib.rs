@@ -323,7 +323,6 @@ async fn hoa(condensed_lava_file: &str, operator: &mut Operator, lava_files: Vec
         
     }
 
-    println!("{:?}", term_dictionary);
     let bytes = term_dictionary.as_bytes();
     let compressed_term_dictionary = encode_all(bytes, 0).expect("Compression failed");
     let compressed_term_dict_offset = output_file.seek(SeekFrom::Current(0))?;
@@ -454,7 +453,7 @@ fn search_lava(file: &str, query: &str) -> PyResult<Vec<u64>> {
             // Set the region. This is required for some services, if you don't care about it, for example Minio service, just set it to "auto", it will be ignored.
             builder.region("us-west-2");
             builder.enable_virtual_host_style();
-            builder.endpoint("");
+            builder.endpoint("https://tos-s3-cn-beijing.volces.com");
             Operator::new(builder)
                 .map_err(|e| {
                     pyo3::exceptions::PyValueError::new_err(format!(
