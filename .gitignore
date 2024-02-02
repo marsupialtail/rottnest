@@ -1,3 +1,6 @@
 .venv
 target
 Cargo.lock
+*.lava
+output_file.bin
+python/rottnest_rs
