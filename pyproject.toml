@@ -15,3 +15,6 @@ dynamic = ["version"]
 [tool.maturin]
 python-source = "python"
 features = ["pyo3/extension-module"]
+
+[project.optional-dependencies]
+test = ["pyarrow", "polars"]
