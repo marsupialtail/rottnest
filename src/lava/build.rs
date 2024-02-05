@@ -1,15 +1,10 @@
-use pyo3::exceptions::PyValueError;
-use pyo3::prelude::*;
-use pyo3::types::PyString;
-
+use anyhow::{anyhow, Result};
 use arrow::array::{make_array, Array, ArrayData, StringArray, UInt64Array};
-use arrow::error::ArrowError;
-
-use arrow::pyarrow::{FromPyArrow, PyArrowException};
 
 use tantivy::tokenizer::*;
 use tantivy_jieba::JiebaTokenizer;
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 
@@ -22,9 +17,7 @@ use whatlang::{detect, Lang};
 
 use lazy_static::lazy_static;
 
-fn to_py_err(err: ArrowError) -> PyErr {
-    PyArrowException::new_err(err.to_string())
-}
+use crate::lava::error::LavaError;
 
 #[derive(Clone)]
 enum TokenizerEnum {
@@ -68,53 +61,49 @@ It is important to put the posting lists first. Just trust me bro.
 */
 
 /// Function that tokenizes the input text and returns a list of tokens.
-#[pyfunction]
+
 pub fn build_lava_natural_language(
-    output_file_name: &PyString,
-    array: &PyAny,
-    uid: &PyAny,
-    language: Option<&PyAny>,
-) -> PyResult<()> {
-    let array = make_array(ArrayData::from_pyarrow(array)?);
-    let uid = make_array(ArrayData::from_pyarrow(uid)?);
+    output_file_name: Cow<str>,
+    array: ArrayData,
+    uid: ArrayData,
+    language: Option<ArrayData>,
+) -> Result<()> {
+    let array = make_array(array);
+    // let uid = make_array(ArrayData::from_pyarrow(uid)?);
+    let uid = make_array(uid);
 
     let array = array
         .as_any()
         .downcast_ref::<StringArray>()
-        .ok_or_else(|| ArrowError::ParseError("Expects string array as first argument".to_string()))
-        .map_err(to_py_err)?;
+        .ok_or(anyhow!(LavaError::Parse(
+            "Expects string array as first argument".to_string()
+        )))?;
 
     let uid = uid
         .as_any()
         .downcast_ref::<UInt64Array>()
-        .ok_or_else(|| {
-            ArrowError::ParseError("Expects uint64 array as second argument".to_string())
-        })
-        .map_err(to_py_err)?;
+        .ok_or(anyhow!(LavaError::Parse(
+            "Expects uint64 array as second argument".to_string()
+        )))?;
 
     if array.len() != uid.len() {
-        return Err(PyErr::new::<PyValueError, _>(
-            "The length of the array and the uid array must be the same".to_string(),
-        ));
+        return Err(anyhow!(LavaError::Parse(
+            "The length of the array and the uid array must be the same".to_string()
+        )));
     }
 
-    let language = match language {
-        Some(x) => {
-            let array = make_array(ArrayData::from_pyarrow(x)?);
+    let language =
+        match language {
+            Some(x) => {
+                let array = make_array(x);
 
-            let test = array
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .ok_or_else(|| {
-                    ArrowError::ParseError(
-                        "Expects string array as optional third argument".to_string(),
-                    )
-                })
-                .map_err(to_py_err)?;
-            Some(test.clone())
-        }
-        None => None,
-    };
+                let test = array.as_any().downcast_ref::<StringArray>().ok_or(anyhow!(
+                    LavaError::Parse("Expects string array as optional third argument".to_string())
+                ))?;
+                Some(test.clone())
+            }
+            None => None,
+        };
 
     // let mut tokens: Vec<Vec<String>> = Vec::new();
     let mut inverted_index: BTreeMap<String, Vec<u64>> = BTreeMap::new();
@@ -150,7 +139,7 @@ pub fn build_lava_natural_language(
         term_dictionary.push_str(key);
     }
 
-    let mut file = File::create(output_file_name.to_str()?)?;
+    let mut file = File::create(output_file_name.as_ref())?;
 
     let bytes = term_dictionary.as_bytes();
     let compressed_term_dictionary = encode_all(bytes, 0).expect("Compression failed");

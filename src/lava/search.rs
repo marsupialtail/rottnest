@@ -1,17 +1,18 @@
 use opendal::{services::S3, Operator};
-use pyo3::{pyfunction, PyResult};
 use regex::Regex;
 
 use std::io::{BufRead, BufReader, Cursor, Read, SeekFrom};
 
 use zstd::stream::read::Decoder;
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use opendal::raw::oio::ReadExt;
 use opendal::services::Fs;
 
 use opendal::Reader;
 use std::env;
+
+use crate::lava::error::LavaError;
 
 #[tokio::main]
 async fn search_lava_async(operator: &mut Operator, file: &str, query: &str) -> Result<Vec<u64>> {
@@ -70,9 +71,7 @@ async fn search_lava_async(operator: &mut Operator, file: &str, query: &str) -> 
         Vec::with_capacity(buffer2.len() as usize);
     decompressor.read_to_end(&mut decompressed_serialized_plist_offsets)?;
     let plist_offsets: Vec<u64> = bincode::deserialize(&decompressed_serialized_plist_offsets)
-        .map_err(|e| {
-            pyo3::exceptions::PyValueError::new_err(format!("Bincode deserialization error: {}", e))
-        })?;
+        .map_err(|e| anyhow!(LavaError::from(e)))?;
 
     // now read the plist offsets that you need, whose indices are in matched
 
@@ -87,13 +86,8 @@ async fn search_lava_async(operator: &mut Operator, file: &str, query: &str) -> 
         decompressor = Decoder::new(&buffer3[..])?;
         let mut decompressed_serialized_plist: Vec<u8> = Vec::with_capacity(buffer3.len() as usize);
         decompressor.read_to_end(&mut decompressed_serialized_plist)?;
-        let mut plist: Vec<u64> =
-            bincode::deserialize(&decompressed_serialized_plist).map_err(|e| {
-                pyo3::exceptions::PyValueError::new_err(format!(
-                    "Bincode deserialization error: {}",
-                    e
-                ))
-            })?;
+        let mut plist: Vec<u64> = bincode::deserialize(&decompressed_serialized_plist)
+            .map_err(|e| anyhow!(LavaError::from(e)))?;
         plist_result.append(&mut plist);
     }
 
@@ -155,8 +149,7 @@ impl From<FsBuilder> for Operators {
     }
 }
 
-#[pyfunction]
-pub fn search_lava(file: &str, query: &str) -> PyResult<Vec<u64>> {
+pub fn search_lava(file: &str, query: &str) -> Result<Vec<u64>> {
     let mut operator = if file.starts_with("s3://") {
         Operators::from(S3Builder::from(file)).into_inner()
     } else {
@@ -174,6 +167,5 @@ pub fn search_lava(file: &str, query: &str) -> PyResult<Vec<u64>> {
     let result: Result<Vec<u64>, anyhow::Error> =
         search_lava_async(&mut operator, &filename, query);
 
-    Ok(result
-        .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("searching error: {}", e)))?)
+    result
 }
