@@ -1,4 +1,5 @@
 mod build;
+pub mod error;
 mod merge;
 mod search;
 

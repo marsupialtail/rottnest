@@ -1,24 +1,24 @@
-use pyo3::prelude::*;
-use pyo3::types::PyString;
-
 use bincode;
+use std::borrow::Cow;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Cursor, Read, Seek, SeekFrom, Write};
 use zstd::stream::encode_all;
 use zstd::stream::read::Decoder;
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use opendal::raw::oio::ReadExt;
 use opendal::services::Fs;
 
 use opendal::{Operator, Reader};
 use std::env;
 
+use crate::lava::error::LavaError;
+
 #[tokio::main]
 async fn hoa(
     condensed_lava_file: &str,
     operator: &mut Operator,
-    lava_files: Vec<&str>,
+    lava_files: Vec<Cow<str>>,
 ) -> Result<()> // hawaiian for lava condensation
 {
     // instantiate a list of readers from lava_files
@@ -31,6 +31,7 @@ async fn hoa(
     // read in and decompress all the term dictionaries in memory. The term dictionaries corresponding to English language should be small.
 
     for file in lava_files {
+        let file = file.as_ref();
         let file_size: u64 = operator.stat(file).await?.content_length();
         let mut reader: Reader = operator.clone().reader(file).await?;
         reader.seek(SeekFrom::End(-16)).await?;
@@ -65,12 +66,8 @@ async fn hoa(
             Vec::with_capacity(buffer2.len() as usize);
         decompressor.read_to_end(&mut decompressed_serialized_plist_offsets)?;
         let this_plist_offsets: Vec<u64> =
-            bincode::deserialize(&decompressed_serialized_plist_offsets).map_err(|e| {
-                pyo3::exceptions::PyValueError::new_err(format!(
-                    "Bincode deserialization error: {}",
-                    e
-                ))
-            })?;
+            bincode::deserialize(&decompressed_serialized_plist_offsets)
+                .map_err(|e| anyhow!(LavaError::from(e)))?;
 
         plist_offsets.push(this_plist_offsets);
         decompressed_term_dictionaries.push(buf_reader);
@@ -128,12 +125,8 @@ async fn hoa(
                         Vec::with_capacity(compressed_plist.len() as usize);
                     decompressor.read_to_end(&mut decompressed_serialized_plist)?;
                     let mut this_plist: Vec<u64> =
-                        bincode::deserialize(&decompressed_serialized_plist).map_err(|e| {
-                            pyo3::exceptions::PyValueError::new_err(format!(
-                                "Bincode deserialization error: {}",
-                                e
-                            ))
-                        })?;
+                        bincode::deserialize(&decompressed_serialized_plist)
+                            .map_err(|e| anyhow!(LavaError::from(e)))?;
 
                     plist.append(&mut this_plist);
 
@@ -176,28 +169,17 @@ async fn hoa(
     Ok(())
 }
 
-#[pyfunction]
-pub fn merge_lava(condensed_lava_file: &PyString, lava_files: Vec<&PyString>) -> PyResult<()> {
+pub fn merge_lava(condensed_lava_file: Cow<str>, lava_files: Vec<Cow<str>>) -> Result<()> {
     // you should only merge them on local disk. It's not worth random accessing S3 for this because of the request costs.
     // worry about running out of disk later. Assume you have a fast SSD for now.
     let mut builder = Fs::default();
     let current_path = env::current_dir()?;
     builder.root(current_path.to_str().expect("no path"));
     let mut operator = Operator::new(builder)
-        .map_err(|e| {
-            pyo3::exceptions::PyValueError::new_err(format!("Fs Builder construction error: {}", e))
-        })?
+        .map_err(|e| anyhow!(LavaError::from(e)))?
         .finish();
 
-    let result = hoa(
-        condensed_lava_file.to_str()?,
-        &mut operator,
-        lava_files
-            .into_iter()
-            .map(|x| x.to_str().unwrap())
-            .collect::<Vec<&str>>(),
-    );
+    let result = hoa(condensed_lava_file.as_ref(), &mut operator, lava_files);
 
-    Ok(result
-        .map_err(|e| pyo3::exceptions::PyValueError::new_err(format!("merging error: {}", e)))?)
+    result
 }
