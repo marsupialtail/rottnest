@@ -31,3 +31,14 @@ However Rottnest aims to support more retrieval APIs to **support LLM use-cases*
 - **Pattern Matching**: retrieve sequences of log events like Splunk transactions or SQL Match Recognize, or detect patterns in metrics like spikes or dips
 - **Vector Search**: retrieve windows of logs based on embedding search (Rottnest will automatically embed logs based on a simple rule-based embedding model, but more complicated models could be used)
 - **Metrics to text**: come up with a natural language description for a time window of metrics to feed into LLM, e.g. service XYZ saw a spike in CPU utilization around 19:00 from the metrics data.
+
+## HowTo
+### Build Rust library
+```bash
+cargo build
+```
+
+### Build Python wheel
+```bash
+maturin develop --features py
+```
