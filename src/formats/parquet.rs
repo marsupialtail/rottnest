@@ -33,7 +33,7 @@ use itertools::{izip, Itertools};
 use std::collections::HashMap;
 use std::{env, usize};
 use tokio::{self};
-
+use std::fmt;
 use regex::Regex;
 
 #[derive(Debug)]
@@ -43,6 +43,19 @@ enum MyError {
     ThriftError(thrift::Error),
     // Add more variants for other errors or general cases
 }
+
+impl fmt::Display for MyError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            MyError::ParquetError(e) => write!(f, "Parquet error: {}", e),
+            MyError::OpendalError(e) => write!(f, "Opendal error: {}", e),
+            MyError::ThriftError(e) => write!(f, "Thrift error: {}", e),
+            // Handle other cases appropriately
+        }
+    }
+}
+
+impl std::error::Error for MyError {}
 
 impl From<ParquetError> for MyError{
     fn from(e: ParquetError) -> Self {

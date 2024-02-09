@@ -1,7 +1,7 @@
 use arrow::array::ArrayData;
 use arrow::pyarrow::FromPyArrow;
 use pyo3::prelude::*;
-use pyo3::{pyfunction, types::PyString, PyAny};
+use pyo3::{pyfunction, types::PyString, PyAny, types::PyDict};
 
 use crate::formats::{parquet, ParquetLayout, MatchResult};
 
@@ -11,10 +11,32 @@ struct ParquetLayoutWrapper {
     internal: ParquetLayout,
 }
 
+#[pymethods]
+impl ParquetLayoutWrapper {
+
+    // Example method converting to PyObject
+    fn to_py_object(&self, py: Python) -> PyObject {
+        let dict = PyDict::new(py);
+        dict.set_item("name", &self.internal.num_row_groups).unwrap();
+        dict.into()
+    }
+}
+
 #[pyclass]
 struct MatchResultWrapper {
     #[pyo3(get, set)]
-    internal: MatchResult,
+    internal: Vec<MatchResult>,
+}
+
+#[pymethods]
+impl MatchResultWrapper {
+
+    // Example method converting to PyObject
+    fn to_py_object(&self, py: Python) -> PyObject {
+        let dict = PyDict::new(py);
+        dict.set_item("name", &self.internal.file_path).unwrap();
+        dict.into()
+    }
 }
 
 #[pyfunction]
@@ -26,11 +48,11 @@ pub fn get_parquet_layout( column_index: usize, file: &str) -> PyResult<ParquetL
 
 #[pyfunction]
 pub fn search_indexed_pages(query: &PyString, column_index: usize, file_paths: Vec<&PyString>,
-    row_groups: Vec<usize>, page_offsets: Vec<usize>, page_sizes: Vec<usize>, dict_page_sizes: Vec<usize>) -> PyResult<(MatchResultWrapper)> {
+    row_groups: Vec<usize>, page_offsets: Vec<u64>, page_sizes: Vec<usize>, dict_page_sizes: Vec<usize>) -> PyResult<MatchResultWrapper> {
     let match_result = parquet::search_indexed_pages(
-        query.to_string_lossy(),
+        query.to_string(),
         column_index,
-        file_paths.iter().map(|x| x.to_string_lossy()).collect(),
+        file_paths.iter().map(|x| x.to_string()).collect(),
         row_groups,
         page_offsets,
         page_sizes,
