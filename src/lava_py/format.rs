@@ -34,17 +34,6 @@ impl From<ParquetLayout> for ParquetLayoutWrapper {
     }
 }
 
-#[pymethods]
-impl ParquetLayoutWrapper {
-
-    // Example method converting to PyObject
-    fn to_py_object(&self, py: Python) -> PyObject {
-        let dict = PyDict::new(py);
-        dict.set_item("name", &self.internal.num_row_groups).unwrap();
-        dict.into()
-    }
-}
-
 #[pyclass]
 pub struct MatchResultWrapper {
     #[pyo3(get, set)]
