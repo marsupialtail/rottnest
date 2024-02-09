@@ -1,4 +1,4 @@
-use opendal::{services::S3, Operator};
+use opendal::{services::{Fs,S3}, Operator};
 use regex::Regex;
 
 use std::io::{BufRead, BufReader, Cursor, Read, SeekFrom};
@@ -7,7 +7,6 @@ use zstd::stream::read::Decoder;
 
 use anyhow::{anyhow, Result};
 use opendal::raw::oio::ReadExt;
-use opendal::services::Fs;
 
 use opendal::Reader;
 use std::env;
