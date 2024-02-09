@@ -21,12 +21,15 @@ use parquet::{
 use thrift::protocol::TCompactInputProtocol;
 
 use opendal::raw::oio::ReadExt;
-use opendal::services::{S3,Fs};
+use opendal::services::{Fs, S3};
 use opendal::{Operator, Reader};
 
 use bytes::Bytes;
-use std::io::{self, Read, SeekFrom};
 use std::{convert::TryFrom, time::Instant};
+use std::{
+    fmt::Display,
+    io::{self, Read, SeekFrom},
+};
 
 use futures::stream::{self, StreamExt};
 use itertools::{izip, Itertools};
@@ -37,28 +40,38 @@ use tokio::{self};
 use regex::Regex;
 
 #[derive(Debug)]
-enum MyError {
+pub enum MyError {
     ParquetError(ParquetError),
     OpendalError(opendal::Error),
     ThriftError(thrift::Error),
     // Add more variants for other errors or general cases
 }
 
-impl From<ParquetError> for MyError{
+impl Display for MyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            MyError::ParquetError(err) => write!(f, "Parquet error: {}", err),
+            MyError::OpendalError(err) => write!(f, "Opendal error: {}", err),
+            MyError::ThriftError(err) => write!(f, "Thrift error: {}", err),
+        }
+    }
+}
+
+impl From<ParquetError> for MyError {
     fn from(e: ParquetError) -> Self {
         MyError::ParquetError(e)
     }
 }
 
-impl From<opendal::Error> for MyError{
+impl From<opendal::Error> for MyError {
     fn from(e: opendal::Error) -> Self {
         MyError::OpendalError(e)
     }
 }
 
-impl From<thrift::Error> for MyError{
+impl From<thrift::Error> for MyError {
     fn from(e: thrift::Error) -> Self {
-       MyError::ThriftError(e)
+        MyError::ThriftError(e)
     }
 }
 
@@ -185,7 +198,9 @@ pub(crate) fn decode_page(
             )?;
 
             if decompressed.len() != uncompressed_size {
-                return Err(MyError::from(ParquetError::General("messed decompression".to_string())));
+                return Err(MyError::from(ParquetError::General(
+                    "messed decompression".to_string(),
+                )));
             }
 
             Bytes::from(decompressed)
@@ -245,7 +260,10 @@ pub(crate) fn decode_page(
     Ok(result)
 }
 
-fn read_page_header<C: ChunkReader>(reader: &C, offset: u64) -> Result<(usize, PageHeader), MyError> {
+fn read_page_header<C: ChunkReader>(
+    reader: &C,
+    offset: u64,
+) -> Result<(usize, PageHeader), MyError> {
     struct TrackedRead<R>(R, usize);
 
     impl<R: Read> Read for TrackedRead<R> {
@@ -308,26 +326,24 @@ async fn parse_metadatas(
 
 #[derive(Debug, Clone)]
 pub struct ParquetLayout {
-    num_row_groups: usize,
-    dictionary_page_sizes: Vec<usize>, // 0 means no dict page
-    data_page_sizes: Vec<usize>,
-    data_page_offsets: Vec<usize>,
-    data_page_num_rows: Vec<usize>,
-    row_group_data_pages: Vec<usize>
+    pub num_row_groups: usize,
+    pub dictionary_page_sizes: Vec<usize>, // 0 means no dict page
+    pub data_page_sizes: Vec<usize>,
+    pub data_page_offsets: Vec<usize>,
+    pub data_page_num_rows: Vec<usize>,
+    pub row_group_data_pages: Vec<usize>,
 }
-
 
 #[tokio::main]
 pub async fn get_parquet_layout(
     column_index: usize,
-    file_path: &str
+    file_path: &str,
 ) -> Result<ParquetLayout, MyError> {
-
     let operator = get_operator_from_file(file_path)?;
     let file_size: u64 = operator.stat(file_path).await?.content_length();
     let mut reader: Reader = operator.clone().reader(file_path).await?;
     let metadata = parse_metadata(&mut reader, file_size as usize).await?;
-    
+
     let mut parquet_layout = ParquetLayout {
         num_row_groups: metadata.num_row_groups(),
         dictionary_page_sizes: vec![],
@@ -342,8 +358,7 @@ pub async fn get_parquet_layout(
         println!("{:?}", column.dictionary_page_offset());
         let mut start = column
             .dictionary_page_offset()
-            .unwrap_or_else(|| column.data_page_offset())
-            as u64;
+            .unwrap_or_else(|| column.data_page_offset()) as u64;
         let end = start + column.compressed_size() as u64;
 
         let mut total_data_pages: usize = 0;
@@ -357,41 +372,61 @@ pub async fn get_parquet_layout(
 
             // we don't actually know the header length so repeat until thrift can do its thing
             loop {
-                let mut attempt: Vec<u8> = vec![0; 5];   
+                let mut attempt: Vec<u8> = vec![0; 5];
                 reader.read(&mut attempt).await.unwrap();
                 dict_page_bytes.append(&mut attempt);
                 let result = read_page_header(&Bytes::from(dict_page_bytes.clone()), 0);
 
                 match result {
                     Ok(result) => {
-                        (header_len , header) = result;
+                        (header_len, header) = result;
                         break;
                     }
                     Err(e) => {
                         continue;
-                    },
+                    }
                 }
             }
-                
+
             let mut dictionary_page_size: usize = 0;
-            
-            
+
             if let Some(dictionary) = header.dictionary_page_header {
-                println!("0 {} {} {}", header.compressed_page_size, header.uncompressed_page_size, header_len);
+                println!(
+                    "0 {} {} {}",
+                    header.compressed_page_size, header.uncompressed_page_size, header_len
+                );
                 dictionary_page_size = header.compressed_page_size as usize + header_len;
             } else if let Some(data_page) = header.data_page_header {
-                println!("1 {} {} {}", header.compressed_page_size, header.uncompressed_page_size, header_len);
-                parquet_layout.data_page_sizes.push(header.compressed_page_size as usize + header_len);
+                println!(
+                    "1 {} {} {}",
+                    header.compressed_page_size, header.uncompressed_page_size, header_len
+                );
+                parquet_layout
+                    .data_page_sizes
+                    .push(header.compressed_page_size as usize + header_len);
                 parquet_layout.data_page_offsets.push(start as usize);
-                parquet_layout.data_page_num_rows.push(data_page.num_values as usize);
-                parquet_layout.dictionary_page_sizes.push(dictionary_page_size);
+                parquet_layout
+                    .data_page_num_rows
+                    .push(data_page.num_values as usize);
+                parquet_layout
+                    .dictionary_page_sizes
+                    .push(dictionary_page_size);
                 total_data_pages += 1;
             } else if let Some(data_page) = header.data_page_header_v2 {
-                println!("2 {} {} {}", header.compressed_page_size, header.uncompressed_page_size, header_len);
-                parquet_layout.data_page_sizes.push(header.compressed_page_size as usize + header_len);
+                println!(
+                    "2 {} {} {}",
+                    header.compressed_page_size, header.uncompressed_page_size, header_len
+                );
+                parquet_layout
+                    .data_page_sizes
+                    .push(header.compressed_page_size as usize + header_len);
                 parquet_layout.data_page_offsets.push(start as usize);
-                parquet_layout.data_page_num_rows.push(data_page.num_values as usize);
-                parquet_layout.dictionary_page_sizes.push(dictionary_page_size);
+                parquet_layout
+                    .data_page_num_rows
+                    .push(data_page.num_values as usize);
+                parquet_layout
+                    .dictionary_page_sizes
+                    .push(dictionary_page_size);
                 total_data_pages += 1;
             }
             start += header.compressed_page_size as u64 + header_len as u64;
@@ -401,16 +436,15 @@ pub async fn get_parquet_layout(
     }
 
     Ok(parquet_layout)
-
 }
 
 #[derive(Debug, Clone)]
 pub struct MatchResult {
-    file_path: String,
-    column_index: usize,
-    row_group: usize,
-    offset_in_row_group: usize,
-    matched: String    
+    pub file_path: String,
+    pub column_index: usize,
+    pub row_group: usize,
+    pub offset_in_row_group: usize,
+    pub matched: String,
 }
 
 #[tokio::main]
@@ -423,7 +457,6 @@ pub async fn search_indexed_pages(
     page_sizes: Vec<usize>,
     dict_page_sizes: Vec<usize>, // 0 means no dict page
 ) -> Result<Vec<MatchResult>, MyError> {
-
     // current implementation might re-read dictionary pages, this should be optimized
     // we are assuming that all the files are either on disk or cloud.
     let operator = get_operator_from_file(&file_paths[0])?;
@@ -520,17 +553,18 @@ pub async fn search_indexed_pages(
                             )
                         })
                         .unwrap();
-                
-                    let mut match_results : Vec<MatchResult> = vec![];
 
-                    for i in 0 .. new_array.len() {
+                    let mut match_results: Vec<MatchResult> = vec![];
+
+                    for i in 0..new_array.len() {
                         if re.is_match(new_array.value(i)) {
-                            match_results.push(MatchResult { 
-                                file_path: file_path.clone(), 
-                                column_index: column_index, 
-                                row_group: row_group, 
-                                offset_in_row_group: i, 
-                                matched: new_array.value(i).to_string() })
+                            match_results.push(MatchResult {
+                                file_path: file_path.clone(),
+                                column_index: column_index,
+                                row_group: row_group,
+                                offset_in_row_group: i,
+                                matched: new_array.value(i).to_string(),
+                            })
                         }
                     }
                     println!("{}", new_array.value(0));
@@ -545,10 +579,10 @@ pub async fn search_indexed_pages(
         .collect::<Vec<_>>()
         .await;
 
-
-    let _res: Vec<std::prelude::v1::Result<Vec<MatchResult>, tokio::task::JoinError>> = futures::future::join_all(iter).await;
-    let result: Result<Vec<MatchResult>, tokio::task::JoinError> = _res.into_iter()
-        .try_fold(Vec::new(), |mut acc, r| {
+    let _res: Vec<std::prelude::v1::Result<Vec<MatchResult>, tokio::task::JoinError>> =
+        futures::future::join_all(iter).await;
+    let result: Result<Vec<MatchResult>, tokio::task::JoinError> =
+        _res.into_iter().try_fold(Vec::new(), |mut acc, r| {
             r.map(|inner_vec| {
                 acc.extend(inner_vec);
                 acc
