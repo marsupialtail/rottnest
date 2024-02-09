@@ -1,7 +1,7 @@
 use arrow::array::ArrayData;
 use arrow::pyarrow::FromPyArrow;
 use pyo3::prelude::*;
-use pyo3::{pyfunction, types::PyString, PyAny};
+use pyo3::{pyfunction, types::PyString, PyAny, types::PyDict};
 
 use crate::formats::{parquet, MatchResult, ParquetLayout};
 
@@ -34,6 +34,17 @@ impl From<ParquetLayout> for ParquetLayoutWrapper {
     }
 }
 
+#[pymethods]
+impl ParquetLayoutWrapper {
+
+    // Example method converting to PyObject
+    fn to_py_object(&self, py: Python) -> PyObject {
+        let dict = PyDict::new(py);
+        dict.set_item("name", &self.internal.num_row_groups).unwrap();
+        dict.into()
+    }
+}
+
 #[pyclass]
 pub struct MatchResultWrapper {
     #[pyo3(get, set)]
@@ -57,6 +68,7 @@ impl From<MatchResult> for MatchResultWrapper {
             offset_in_row_group: match_result.offset_in_row_group,
             matched: match_result.matched,
         }
+
     }
 }
 
@@ -77,6 +89,7 @@ pub fn search_indexed_pages(
     page_sizes: Vec<usize>,
     dict_page_sizes: Vec<usize>,
 ) -> PyResult<Vec<MatchResultWrapper>> {
+
     let match_result = parquet::search_indexed_pages(
         query.to_string(),
         column_index,

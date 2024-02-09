@@ -36,7 +36,7 @@ use itertools::{izip, Itertools};
 use std::collections::HashMap;
 use std::{env, usize};
 use tokio::{self};
-
+use std::fmt;
 use regex::Regex;
 
 #[derive(Debug)]
@@ -58,6 +58,7 @@ impl Display for MyError {
 }
 
 impl From<ParquetError> for MyError {
+
     fn from(e: ParquetError) -> Self {
         MyError::ParquetError(e)
     }
