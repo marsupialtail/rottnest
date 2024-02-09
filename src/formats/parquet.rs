@@ -3,20 +3,12 @@ use arrow::datatypes::ToByteSlice;
 use arrow::error::ArrowError;
 use arrow_array::{Array, StringArray};
 use parquet::{
-    arrow::array_reader::make_byte_array_reader,
-    basic::{Encoding, Type},
-    column::page::Page,
-    compression::{create_codec, Codec, CodecOptionsBuilder},
-    errors::ParquetError,
-    file::{
+    arrow::array_reader::make_byte_array_reader, basic::{Encoding, Type}, column::page::Page, compression::{create_codec, Codec, CodecOptionsBuilder}, data_type::AsBytes, errors::ParquetError, file::{
         footer::{decode_footer, decode_metadata},
         metadata::ParquetMetaData,
         reader::*,
         statistics, FOOTER_SIZE,
-    },
-    format::{PageHeader, PageType},
-    thrift::TSerializable,
-    util::InMemoryPageIterator,
+    }, format::{PageHeader, PageType}, thrift::TSerializable, util::InMemoryPageIterator
 };
 use thrift::protocol::TCompactInputProtocol;
 
@@ -345,6 +337,10 @@ pub async fn get_parquet_layout(
     let mut reader: Reader = operator.clone().reader(file_path).await?;
     let metadata = parse_metadata(&mut reader, file_size as usize).await?;
 
+    let codec_options = CodecOptionsBuilder::default()
+        .set_backward_compatible_lz4(false)
+        .build();
+
     let mut parquet_layout = ParquetLayout {
         num_row_groups: metadata.num_row_groups(),
         dictionary_page_sizes: vec![],
@@ -356,81 +352,64 @@ pub async fn get_parquet_layout(
 
     for row_group in 0..metadata.num_row_groups() {
         let column = metadata.row_group(row_group).column(column_index);
-        println!("{:?}", column.dictionary_page_offset());
         let mut start = column
             .dictionary_page_offset()
             .unwrap_or_else(|| column.data_page_offset()) as u64;
         let end = start + column.compressed_size() as u64;
 
+        let compression_scheme = column.compression();
+        let mut codec = create_codec(compression_scheme, &codec_options)
+            .unwrap()
+            .unwrap();
+
         let mut total_data_pages: usize = 0;
 
+        let mut column_chunk_bytes: Vec<u8> = vec![0; (start - end) as usize];
+        reader.seek(SeekFrom::Start(start as u64)).await.unwrap();
+        reader.read(&mut column_chunk_bytes).await.unwrap(); // parallelize this please @Rain
+
         while start != end {
-            let mut dict_page_bytes: Vec<u8> = Vec::new();
-            reader.seek(SeekFrom::Start(start as u64)).await.unwrap();
 
-            let header_len;
-            let header;
-
-            // we don't actually know the header length so repeat until thrift can do its thing
-            loop {
-                let mut attempt: Vec<u8> = vec![0; 5];
-                reader.read(&mut attempt).await.unwrap();
-                dict_page_bytes.append(&mut attempt);
-                let result = read_page_header(&Bytes::from(dict_page_bytes.clone()), 0);
-
-                match result {
-                    Ok(result) => {
-                        (header_len, header) = result;
-                        break;
-                    }
-                    Err(e) => {
-                        continue;
-                    }
-                }
-            }
+            // this takes a slice of the entire thing for each page, granted it won't read the entire thing,
+            // the thrift will terminate after reading the necessary things. @Rain the alternative is to feed it 
+            // chunks at a time in a loop until a valid header is returned, like before how we are using the reader in rust-test
+            let bytes = column_chunk_bytes[start as usize .. end as usize].as_bytes().clone();
+            let (header_len, header) = read_page_header(&Bytes::from(bytes), start)?;
+            let page_header = header.clone();
 
             let mut dictionary_page_size: usize = 0;
 
-            if let Some(dictionary) = header.dictionary_page_header {
-                println!(
-                    "0 {} {} {}",
-                    header.compressed_page_size, header.uncompressed_page_size, header_len
-                );
-                dictionary_page_size = header.compressed_page_size as usize + header_len;
-            } else if let Some(data_page) = header.data_page_header {
-                println!(
-                    "1 {} {} {}",
-                    header.compressed_page_size, header.uncompressed_page_size, header_len
-                );
+            if let Some(dictionary) = page_header.dictionary_page_header {
+
+                dictionary_page_size = page_header.compressed_page_size as usize + header_len;
+                start += dictionary_page_size as u64 + header_len as u64;
+
+            } else {
+
+                let compressed_page_size = page_header.compressed_page_size;
                 parquet_layout
                     .data_page_sizes
-                    .push(header.compressed_page_size as usize + header_len);
+                    .push(compressed_page_size as usize + header_len);
                 parquet_layout.data_page_offsets.push(start as usize);
-                parquet_layout
-                    .data_page_num_rows
-                    .push(data_page.num_values as usize);
+                
                 parquet_layout
                     .dictionary_page_sizes
                     .push(dictionary_page_size);
                 total_data_pages += 1;
-            } else if let Some(data_page) = header.data_page_header_v2 {
-                println!(
-                    "2 {} {} {}",
-                    header.compressed_page_size, header.uncompressed_page_size, header_len
-                );
-                parquet_layout
-                    .data_page_sizes
-                    .push(header.compressed_page_size as usize + header_len);
-                parquet_layout.data_page_offsets.push(start as usize);
+                let page: Page = decode_page(
+                    page_header,
+                    Bytes::from(&column_chunk_bytes[(start as usize + header_len)  .. (start as usize + header_len + compressed_page_size as usize)]),
+                    Type::BYTE_ARRAY,
+                    Some(&mut codec),
+                )
+                .unwrap();
                 parquet_layout
                     .data_page_num_rows
-                    .push(data_page.num_values as usize);
-                parquet_layout
-                    .dictionary_page_sizes
-                    .push(dictionary_page_size);
-                total_data_pages += 1;
-            }
-            start += header.compressed_page_size as u64 + header_len as u64;
+                    .push(page.num_values() as usize);
+                start += compressed_page_size as u64 + header_len as u64;
+
+            } 
+
         }
 
         parquet_layout.row_group_data_pages.push(total_data_pages);
@@ -479,7 +458,6 @@ pub async fn search_indexed_pages(
     let iter: Vec<tokio::task::JoinHandle<Vec<MatchResult>>> = stream::iter(iter)
         .map(
             |(file_path, row_group, page_offset, page_size, dict_page_size)| {
-                // println!("{}", file_path);
                 let column_descriptor = metadatas[&file_path]
                     .row_group(row_group)
                     .schema_descr()
@@ -500,7 +478,6 @@ pub async fn search_indexed_pages(
                 let re = re.clone();
 
                 let handle = tokio::spawn(async move {
-                    // println!("thread: {:?}", thread::current().id());
                     let mut pages: Vec<parquet::column::page::Page> = Vec::new();
                     let mut reader: Reader = operator.reader(&file_path).await.unwrap();
                     if dict_page_size > 0 {
@@ -568,7 +545,6 @@ pub async fn search_indexed_pages(
                             })
                         }
                     }
-                    println!("{}", new_array.value(0));
                     // format!("{}", new_array.value(0))
 
                     match_results
