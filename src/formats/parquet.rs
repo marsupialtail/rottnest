@@ -3,20 +3,12 @@ use arrow::datatypes::ToByteSlice;
 use arrow::error::ArrowError;
 use arrow_array::{Array, StringArray};
 use parquet::{
-    arrow::array_reader::make_byte_array_reader,
-    basic::{Encoding, Type},
-    column::page::Page,
-    compression::{create_codec, Codec, CodecOptionsBuilder},
-    errors::ParquetError,
-    file::{
+    arrow::array_reader::make_byte_array_reader, basic::{Encoding, Type}, column::page::Page, compression::{create_codec, Codec, CodecOptionsBuilder}, data_type::AsBytes, errors::ParquetError, file::{
         footer::{decode_footer, decode_metadata},
         metadata::ParquetMetaData,
         reader::*,
         statistics, FOOTER_SIZE,
-    },
-    format::{PageHeader, PageType},
-    thrift::TSerializable,
-    util::InMemoryPageIterator,
+    }, format::{PageHeader, PageType}, thrift::TSerializable, util::InMemoryPageIterator
 };
 use thrift::protocol::TCompactInputProtocol;
 
@@ -24,7 +16,7 @@ use opendal::raw::oio::ReadExt;
 use opendal::services::{Fs, S3};
 use opendal::{Operator, Reader};
 
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use std::{convert::TryFrom, time::Instant};
 use std::{
     fmt::Display,
@@ -88,7 +80,7 @@ impl From<&str> for S3Builder {
         // Set the region. This is required for some services, if you don't care about it, for example Minio service, just set it to "auto", it will be ignored.
         builder.region("us-west-2");
         builder.enable_virtual_host_style();
-        builder.endpoint("");
+        builder.endpoint("https://tos-s3-cn-beijing.volces.com");
         S3Builder(builder)
     }
 }
@@ -132,15 +124,24 @@ impl From<FsBuilder> for Operators {
     }
 }
 
-fn get_operator_from_file(file: &str) -> Result<Operator, MyError> {
-    let mut operator = if file.starts_with("s3://") {
+async fn get_reader_and_size_from_file(file: &str) -> Result<(usize, Reader), MyError> {
+    let mut file_name = file.to_string();
+    let operator = if file.starts_with("s3://") {
+        file_name = file_name.replace("s3://", "");
+        let mut iter = file_name.split("/");
+        let bucket = iter.next().expect("malformed s3 path");
+        file_name = file_name[bucket.len() + 1 ..].to_string();
+
         Operators::from(S3Builder::from(file)).into_inner()
     } else {
         let current_path = env::current_dir().unwrap();
         Operators::from(FsBuilder::from(current_path.to_str().expect("no path"))).into_inner()
     };
 
-    Ok(operator)
+    let file_size: usize = operator.stat(&file_name).await?.content_length() as usize;
+    let reader: Reader = operator.clone().reader(&file_name).await?;
+
+    Ok((file_size, reader))
 }
 
 async fn parse_metadata(reader: &mut Reader, file_size: usize) -> Result<ParquetMetaData, MyError> {
@@ -284,24 +285,16 @@ fn read_page_header<C: ChunkReader>(
 
 async fn parse_metadatas(
     file_paths: &Vec<String>,
-    operator: Operator,
 ) -> HashMap<String, ParquetMetaData> {
     let iter = file_paths.iter().dedup();
 
     let handles = stream::iter(iter)
         .map(|file_path: &String| {
-            let operator = operator.clone();
-            let file_path = file_path.clone();
-            tokio::spawn(async move {
-                let file_size: u64 = operator
-                    .clone()
-                    .stat(&file_path)
-                    .await
-                    .map_err(|e| anyhow!("{:?}", e))
-                    .unwrap()
-                    .content_length();
-                let mut reader: Reader = operator.clone().reader(&file_path).await.unwrap();
 
+            let file_path = file_path.clone();
+            
+            tokio::spawn(async move {
+                let (file_size, mut reader) = get_reader_and_size_from_file(&file_path).await.unwrap();
                 let metadata = parse_metadata(&mut reader, file_size as usize)
                     .await
                     .unwrap();
@@ -339,11 +332,13 @@ pub struct ParquetLayout {
 pub async fn get_parquet_layout(
     column_index: usize,
     file_path: &str,
-) -> Result<ParquetLayout, MyError> {
-    let operator = get_operator_from_file(file_path)?;
-    let file_size: u64 = operator.stat(file_path).await?.content_length();
-    let mut reader: Reader = operator.clone().reader(file_path).await?;
+) -> Result<(arrow::array::ArrayData, ParquetLayout), MyError> {
+    let (file_size, mut reader) = get_reader_and_size_from_file(file_path).await?;
     let metadata = parse_metadata(&mut reader, file_size as usize).await?;
+
+    let codec_options = CodecOptionsBuilder::default()
+        .set_backward_compatible_lz4(false)
+        .build();
 
     let mut parquet_layout = ParquetLayout {
         num_row_groups: metadata.num_row_groups(),
@@ -354,89 +349,138 @@ pub async fn get_parquet_layout(
         row_group_data_pages: vec![],
     };
 
+    let mut pages: Vec<Vec<parquet::column::page::Page>> = Vec::new();
+    let mut total_values = 0;
+
+    // we should probably parallelize across the row groups, they are completely independent.
+    // @Rain?
+
     for row_group in 0..metadata.num_row_groups() {
         let column = metadata.row_group(row_group).column(column_index);
-        println!("{:?}", column.dictionary_page_offset());
         let mut start = column
             .dictionary_page_offset()
             .unwrap_or_else(|| column.data_page_offset()) as u64;
         let end = start + column.compressed_size() as u64;
 
+        let compression_scheme = column.compression();
+        let mut codec = create_codec(compression_scheme, &codec_options)
+            .unwrap()
+            .unwrap();
+
         let mut total_data_pages: usize = 0;
 
-        while start != end {
-            let mut dict_page_bytes: Vec<u8> = Vec::new();
-            reader.seek(SeekFrom::Start(start as u64)).await.unwrap();
-
-            let header_len;
-            let header;
-
-            // we don't actually know the header length so repeat until thrift can do its thing
-            loop {
-                let mut attempt: Vec<u8> = vec![0; 5];
-                reader.read(&mut attempt).await.unwrap();
-                dict_page_bytes.append(&mut attempt);
-                let result = read_page_header(&Bytes::from(dict_page_bytes.clone()), 0);
-
-                match result {
-                    Ok(result) => {
-                        (header_len, header) = result;
-                        break;
-                    }
-                    Err(e) => {
-                        continue;
-                    }
-                }
+        // let mut column_chunk_bytes = BytesMut::with_capacity((end - start) as usize);
+        let mut column_chunk_bytes = vec![0u8; (end - start) as usize];
+        reader.seek(SeekFrom::Start(start as u64)).await.unwrap();
+        // parallelize this please @Rain
+        let mut total_read: usize = 0; 
+        while total_read < (end - start) as usize {
+            let read = reader.read(&mut column_chunk_bytes[total_read..]).await?;
+            if read == 0 {
+                // If read returns 0, it means EOF is reached
+                break;
             }
+            total_read += read; // Update total bytes read
+        }
+        let column_chunk_bytes = Bytes::from(column_chunk_bytes);
+
+        let mut column_chunk_pages: Vec<parquet::column::page::Page> = Vec::new();
+
+        let end = end - start;
+        start = 0;
+
+        while start != end {
+
+            // this takes a slice of the entire thing for each page, granted it won't read the entire thing,
+            // the thrift will terminate after reading the necessary things. @Rain the alternative is to feed it 
+            // chunks at a time in a loop until a valid header is returned, like before how we are using the reader in rust-test
+
+            let (header_len, header) = read_page_header(&column_chunk_bytes, start)?;
+            // println!("{} {} {:?}", start, header_len, header);
+            
+            let page_header = header.clone();
 
             let mut dictionary_page_size: usize = 0;
 
-            if let Some(dictionary) = header.dictionary_page_header {
-                println!(
-                    "0 {} {} {}",
-                    header.compressed_page_size, header.uncompressed_page_size, header_len
-                );
-                dictionary_page_size = header.compressed_page_size as usize + header_len;
-            } else if let Some(data_page) = header.data_page_header {
-                println!(
-                    "1 {} {} {}",
-                    header.compressed_page_size, header.uncompressed_page_size, header_len
-                );
-                parquet_layout
-                    .data_page_sizes
-                    .push(header.compressed_page_size as usize + header_len);
-                parquet_layout.data_page_offsets.push(start as usize);
-                parquet_layout
-                    .data_page_num_rows
-                    .push(data_page.num_values as usize);
-                parquet_layout
-                    .dictionary_page_sizes
-                    .push(dictionary_page_size);
-                total_data_pages += 1;
-            } else if let Some(data_page) = header.data_page_header_v2 {
-                println!(
-                    "2 {} {} {}",
-                    header.compressed_page_size, header.uncompressed_page_size, header_len
-                );
-                parquet_layout
-                    .data_page_sizes
-                    .push(header.compressed_page_size as usize + header_len);
-                parquet_layout.data_page_offsets.push(start as usize);
-                parquet_layout
-                    .data_page_num_rows
-                    .push(data_page.num_values as usize);
-                parquet_layout
-                    .dictionary_page_sizes
-                    .push(dictionary_page_size);
-                total_data_pages += 1;
-            }
-            start += header.compressed_page_size as u64 + header_len as u64;
+            let page: Page = match page_header.type_ {
+                PageType::DICTIONARY_PAGE => {
+                    dictionary_page_size = page_header.compressed_page_size as usize + header_len;
+                    let page: Page = decode_page(
+                        page_header,
+                        column_chunk_bytes.slice((start as usize + header_len)  .. (start as usize + dictionary_page_size as usize)),
+                        Type::BYTE_ARRAY,
+                        Some(&mut codec),
+                    )
+                    .unwrap();
+                    start += dictionary_page_size as u64;
+                    page
+                }
+                PageType::DATA_PAGE | PageType::DATA_PAGE_V2 => {
+                    let compressed_page_size = page_header.compressed_page_size;
+                    parquet_layout
+                        .data_page_sizes
+                        .push(compressed_page_size as usize + header_len);
+                    parquet_layout.data_page_offsets.push(start as usize);
+                    
+                    parquet_layout
+                        .dictionary_page_sizes
+                        .push(dictionary_page_size);
+                    total_data_pages += 1;
+                    
+                    let page = decode_page(
+                            page_header,
+                            column_chunk_bytes.slice((start as usize + header_len)  .. (start as usize + header_len + compressed_page_size as usize)),
+                            Type::BYTE_ARRAY,
+                            Some(&mut codec),
+                        )
+                        .unwrap();
+                    
+                    parquet_layout
+                        .data_page_num_rows
+                        .push(page.num_values() as usize);
+                    total_values += page.num_values() as usize;
+
+                    start += compressed_page_size as u64 + header_len as u64;
+                    page
+                }
+                _ => {
+                    // For unknown page type (e.g., INDEX_PAGE), skip and read next.
+                    unimplemented!("Page type {:?} is not supported", page_header.type_)
+                }
+            };
+
+            column_chunk_pages.push(page);
+
         }
 
+        pages.push(column_chunk_pages);
         parquet_layout.row_group_data_pages.push(total_data_pages);
     }
 
-    Ok(parquet_layout)
+    let page_iterator = InMemoryPageIterator::new(pages);
+    let mut array_reader = make_byte_array_reader(
+        Box::new(page_iterator),
+        metadata.row_group(0)
+                .schema_descr()
+                .column(column_index),
+        None,
+    )
+    .unwrap();
+    let array = array_reader.next_batch(total_values as usize).unwrap();
+
+    let new_array: &arrow_array::GenericByteArray<arrow_array::types::GenericStringType<i32>> = array
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .ok_or_else(|| {
+            ArrowError::ParseError(
+                "Expects string array as first argument".to_string(),
+            )
+        })
+        .unwrap();
+
+    let data: arrow::array::ArrayData = new_array.to_data();
+    
+    Ok((data, parquet_layout))
 }
 
 #[derive(Debug, Clone)]
@@ -460,13 +504,13 @@ pub async fn search_indexed_pages(
 ) -> Result<Vec<MatchResult>, MyError> {
     // current implementation might re-read dictionary pages, this should be optimized
     // we are assuming that all the files are either on disk or cloud.
-    let operator = get_operator_from_file(&file_paths[0])?;
+    
     let codec_options = CodecOptionsBuilder::default()
         .set_backward_compatible_lz4(false)
         .build();
     let re = Regex::new(&query).unwrap();
 
-    let metadatas = parse_metadatas(&file_paths, operator.clone()).await;
+    let metadatas = parse_metadatas(&file_paths).await;
 
     let iter = izip!(
         file_paths,
@@ -479,7 +523,6 @@ pub async fn search_indexed_pages(
     let iter: Vec<tokio::task::JoinHandle<Vec<MatchResult>>> = stream::iter(iter)
         .map(
             |(file_path, row_group, page_offset, page_size, dict_page_size)| {
-                // println!("{}", file_path);
                 let column_descriptor = metadatas[&file_path]
                     .row_group(row_group)
                     .schema_descr()
@@ -496,13 +539,13 @@ pub async fn search_indexed_pages(
                     .unwrap()
                     .unwrap();
 
-                let operator = operator.clone();
+                
                 let re = re.clone();
 
                 let handle = tokio::spawn(async move {
-                    // println!("thread: {:?}", thread::current().id());
+
+                    let (file_size, mut reader) = get_reader_and_size_from_file(&file_path).await.unwrap();
                     let mut pages: Vec<parquet::column::page::Page> = Vec::new();
-                    let mut reader: Reader = operator.reader(&file_path).await.unwrap();
                     if dict_page_size > 0 {
                         let start = dict_page_offset.unwrap();
                         let mut dict_page_bytes = vec![0; dict_page_size];
@@ -568,8 +611,6 @@ pub async fn search_indexed_pages(
                             })
                         }
                     }
-                    println!("{}", new_array.value(0));
-                    // format!("{}", new_array.value(0))
 
                     match_results
                 });
