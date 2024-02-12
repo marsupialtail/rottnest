@@ -1,6 +1,7 @@
 import pyarrow
 import polars
 import rottnest_rs
+import pyarrow.parquet as pq
 
 def basic_test():
     a = polars.from_dict({"a":["你是一只小猪","hello you are happy", "hello, et tu, brutes?"]}).to_arrow()
@@ -38,5 +39,13 @@ def merge_test():
 
     print(rottnest_rs.search_lava("merged.lava", "d"))
 
-basic_test()
-merge_test()
+# basic_test()
+# merge_test()
+    
+def index_natural_language(file_paths, column_name):
+
+    # first make sure that the column exists in each file, and is the same index (restriction for now)
+
+    column_index = None
+    for file in file_paths:
+        pq_file = pq.ParquetFile(file)

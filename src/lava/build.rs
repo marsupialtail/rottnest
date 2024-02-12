@@ -72,7 +72,7 @@ pub fn build_lava_natural_language(
     // let uid = make_array(ArrayData::from_pyarrow(uid)?);
     let uid = make_array(uid);
 
-    let array = array
+    let array: &arrow_array::GenericByteArray<arrow_array::types::GenericStringType<i32>> = array
         .as_any()
         .downcast_ref::<StringArray>()
         .ok_or(anyhow!(LavaError::Parse(

@@ -1,8 +1,7 @@
 use arrow::array::ArrayData;
-use arrow::pyarrow::FromPyArrow;
 use pyo3::prelude::*;
 use pyo3::{pyfunction, types::PyString, PyAny, types::PyDict};
-
+use arrow::pyarrow::{FromPyArrow, PyArrowException, PyArrowType, ToPyArrow};
 use crate::formats::{parquet, MatchResult, ParquetLayout};
 
 #[pyclass]
@@ -21,8 +20,8 @@ pub struct ParquetLayoutWrapper {
     pub row_group_data_pages: Vec<usize>,
 }
 
-impl From<ParquetLayout> for ParquetLayoutWrapper {
-    fn from(parquet_layout: ParquetLayout) -> Self {
+impl ParquetLayoutWrapper {
+    fn from_parquet_layout(parquet_layout: ParquetLayout) -> Self {
         ParquetLayoutWrapper {
             num_row_groups: parquet_layout.num_row_groups,
             dictionary_page_sizes: parquet_layout.dictionary_page_sizes,
@@ -62,10 +61,10 @@ impl From<MatchResult> for MatchResultWrapper {
 }
 
 #[pyfunction]
-pub fn get_parquet_layout(column_index: usize, file: &str) -> PyResult<ParquetLayoutWrapper> {
-    let parquet_layout = parquet::get_parquet_layout(column_index, file)
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()));
-    Ok(parquet_layout.unwrap().into())
+pub fn get_parquet_layout(column_index: usize, file: &str, py: Python) -> PyResult<(PyObject, ParquetLayoutWrapper)> {
+    let (arr, parquet_layout) = parquet::get_parquet_layout(column_index, file)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())).unwrap();
+    Ok((arr.to_pyarrow(py).unwrap(), ParquetLayoutWrapper::from_parquet_layout(parquet_layout)))
 }
 
 #[pyfunction]
