@@ -128,12 +128,16 @@ async fn get_reader_and_size_from_file(file: &str) -> Result<(usize, Reader), My
     let mut file_name = file.to_string();
     let operator = if file.starts_with("s3://") {
         file_name = file_name.replace("s3://", "");
+        let mut iter = file_name.split("/");
+        let bucket = iter.next().expect("malformed s3 path");
+        file_name = file_name[bucket.len() + 1 ..].to_string();
+
         Operators::from(S3Builder::from(file)).into_inner()
     } else {
         let current_path = env::current_dir().unwrap();
         Operators::from(FsBuilder::from(current_path.to_str().expect("no path"))).into_inner()
     };
-    
+
     let file_size: usize = operator.stat(&file_name).await?.content_length() as usize;
     let reader: Reader = operator.clone().reader(&file_name).await?;
 
@@ -286,10 +290,10 @@ async fn parse_metadatas(
 
     let handles = stream::iter(iter)
         .map(|file_path: &String| {
+
+            let file_path = file_path.clone();
             
             tokio::spawn(async move {
-                
-                let file_path = file_path.clone();
                 let (file_size, mut reader) = get_reader_and_size_from_file(&file_path).await.unwrap();
                 let metadata = parse_metadata(&mut reader, file_size as usize)
                     .await
