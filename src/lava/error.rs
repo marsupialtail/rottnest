@@ -1,5 +1,7 @@
 use std::fmt::Display;
 
+use zstd::stream::write;
+
 #[derive(Debug, thiserror::Error)]
 pub enum LavaError {
     Io(#[from] std::io::Error),
@@ -9,7 +11,11 @@ pub enum LavaError {
     Arrow(#[from] arrow::error::ArrowError),
     OpenDAL(#[from] opendal::Error),
     Parse(String),
+    Parquet(#[from] parquet::errors::ParquetError),
+    Thrift(#[from] thrift::Error),
     Unknown,
+    #[cfg(feature = "py")]
+    Pyo3(#[from] pyo3::PyErr),
 }
 
 impl Display for LavaError {
@@ -23,6 +29,17 @@ impl Display for LavaError {
             LavaError::OpenDAL(err) => write!(f, "OpenDAL error: {}", err),
             LavaError::Parse(err) => write!(f, "Parse error: {}", err),
             LavaError::Unknown => write!(f, "Unkown error"),
+            LavaError::Parquet(err) => write!(f, "Parquet error: {}", err),
+            LavaError::Thrift(err) => write!(f, "Thrift error: {}", err),
+            #[cfg(feature = "py")]
+            LavaError::Pyo3(err) => write!(f, "Pyo3 error: {}", err),
         }
+    }
+}
+
+#[cfg(feature = "py")]
+impl From<LavaError> for pyo3::PyErr {
+    fn from(e: LavaError) -> pyo3::PyErr {
+        pyo3::exceptions::PyOSError::new_err(e.to_string())
     }
 }

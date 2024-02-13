@@ -1,8 +1,9 @@
-use arrow::array::ArrayData;
-use pyo3::prelude::*;
-use pyo3::{pyfunction, types::PyString, PyAny, types::PyDict};
-use arrow::pyarrow::{FromPyArrow, PyArrowException, PyArrowType, ToPyArrow};
 use crate::formats::{parquet, MatchResult, ParquetLayout};
+use crate::lava::error::LavaError;
+use arrow::array::ArrayData;
+use arrow::pyarrow::{FromPyArrow, PyArrowException, PyArrowType, ToPyArrow};
+use pyo3::prelude::*;
+use pyo3::{pyfunction, types::PyDict, types::PyString, PyAny};
 
 #[pyclass]
 pub struct ParquetLayoutWrapper {
@@ -56,15 +57,20 @@ impl From<MatchResult> for MatchResultWrapper {
             offset_in_row_group: match_result.offset_in_row_group,
             matched: match_result.matched,
         }
-
     }
 }
 
 #[pyfunction]
-pub fn get_parquet_layout(column_name: &PyString, file: &str, py: Python) -> PyResult<(PyObject, ParquetLayoutWrapper)> {
-    let (arr, parquet_layout) = parquet::get_parquet_layout(&column_name.to_string(), file)
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())).unwrap();
-    Ok((arr.to_pyarrow(py).unwrap(), ParquetLayoutWrapper::from_parquet_layout(parquet_layout)))
+pub fn get_parquet_layout(
+    column_name: &PyString,
+    file: &str,
+    py: Python,
+) -> Result<(PyObject, ParquetLayoutWrapper), LavaError> {
+    let (arr, parquet_layout) = parquet::get_parquet_layout(&column_name.to_string(), file)?;
+    Ok((
+        arr.to_pyarrow(py).unwrap(),
+        ParquetLayoutWrapper::from_parquet_layout(parquet_layout),
+    ))
 }
 
 #[pyfunction]
@@ -76,8 +82,7 @@ pub fn search_indexed_pages(
     page_offsets: Vec<usize>,
     page_sizes: Vec<usize>,
     dict_page_sizes: Vec<usize>,
-) -> PyResult<Vec<MatchResultWrapper>> {
-
+) -> Result<Vec<MatchResultWrapper>, LavaError> {
     let match_result = parquet::search_indexed_pages(
         query.to_string(),
         &column_name.to_string(),
@@ -86,11 +91,6 @@ pub fn search_indexed_pages(
         page_offsets.iter().map(|x| *x as u64).collect(),
         page_sizes,
         dict_page_sizes, // 0 means no dict page
-    )
-    .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()));
-    Ok(match_result
-        .unwrap()
-        .into_iter()
-        .map(|x| x.into())
-        .collect())
+    )?;
+    Ok(match_result.into_iter().map(|x| x.into()).collect())
 }

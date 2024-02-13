@@ -1,7 +1,7 @@
 use pyo3::prelude::*;
 
-mod lava;
 mod format;
+mod lava;
 
 #[pymodule]
 fn rottnest_rs(_py: Python, m: &PyModule) -> PyResult<()> {

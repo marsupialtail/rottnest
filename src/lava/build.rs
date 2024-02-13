@@ -1,14 +1,13 @@
-use anyhow::{anyhow, Result};
 use arrow::array::{make_array, Array, ArrayData, StringArray, UInt64Array};
 
 use tantivy::tokenizer::*;
 use tantivy_jieba::JiebaTokenizer;
 
+use bincode;
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::HashSet;
-use bincode;
 use std::fs::File;
 use std::io::{Seek, SeekFrom, Write};
 use zstd::stream::encode_all;
@@ -68,7 +67,7 @@ pub fn build_lava_natural_language(
     array: ArrayData,
     uid: ArrayData,
     language: Option<ArrayData>,
-) -> Result<()> {
+) -> Result<(), LavaError> {
     let array = make_array(array);
     // let uid = make_array(ArrayData::from_pyarrow(uid)?);
     let uid = make_array(uid);
@@ -76,17 +75,17 @@ pub fn build_lava_natural_language(
     let array: &arrow_array::GenericByteArray<arrow_array::types::GenericStringType<i32>> = array
         .as_any()
         .downcast_ref::<StringArray>()
-        .ok_or(anyhow!(LavaError::Parse(
-            "Expects string array as first argument".to_string()
-        )))?;
+        .ok_or(LavaError::Parse(
+            "Expects string array as first argument".to_string(),
+        ))?;
 
     let uid = uid
         .as_any()
         .downcast_ref::<UInt64Array>()
-        .ok_or(anyhow!(LavaError::Parse(
-            "Expects uint64 array as second argument".to_string()
-        )))?;
-    
+        .ok_or(LavaError::Parse(
+            "Expects uint64 array as second argument".to_string(),
+        ))?;
+
     let mut unique_uids: HashSet<u64> = HashSet::new();
     for i in 0..uid.len() {
         unique_uids.insert(uid.value(i));
@@ -94,23 +93,25 @@ pub fn build_lava_natural_language(
     let num_unique_uids = unique_uids.len() as u64;
 
     if array.len() != uid.len() {
-        return Err(anyhow!(LavaError::Parse(
-            "The length of the array and the uid array must be the same".to_string()
-        )));
+        return Err(LavaError::Parse(
+            "The length of the array and the uid array must be the same".to_string(),
+        ));
     }
 
-    let language =
-        match language {
-            Some(x) => {
-                let array = make_array(x);
+    let language = match language {
+        Some(x) => {
+            let array = make_array(x);
 
-                let test = array.as_any().downcast_ref::<StringArray>().ok_or(anyhow!(
-                    LavaError::Parse("Expects string array as optional third argument".to_string())
+            let test = array
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .ok_or(LavaError::Parse(
+                    "Expects string array as optional third argument".to_string(),
                 ))?;
-                Some(test.clone())
-            }
-            None => None,
-        };
+            Some(test.clone())
+        }
+        None => None,
+    };
 
     // let mut tokens: Vec<Vec<String>> = Vec::new();
     let mut inverted_index: BTreeMap<String, HashSet<u64>> = BTreeMap::new();

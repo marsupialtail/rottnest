@@ -1,11 +1,13 @@
-use opendal::{services::{Fs,S3}, Operator};
+use opendal::{
+    services::{Fs, S3},
+    Operator,
+};
 use regex::Regex;
 
 use std::{collections::HashMap, io::{self, BufRead, BufReader, Cursor, Read, SeekFrom}};
 
 use zstd::stream::read::Decoder;
 
-use anyhow::{anyhow, Result};
 use opendal::raw::oio::ReadExt;
 
 use opendal::Reader;
@@ -15,7 +17,11 @@ use crate::lava::error::LavaError;
 use crate::lava::plist::PList;
 
 #[tokio::main]
-async fn search_lava_async(operator: &mut Operator, file: &str, query: &str) -> Result<Vec<u64>> {
+async fn search_lava_async(
+    operator: &mut Operator,
+    file: &str,
+    query: &str,
+) -> Result<Vec<u64>, LavaError> {
     let file_size: u64 = operator.stat(file).await?.content_length();
     let mut reader: Reader = operator.clone().reader(file).await?;
 
@@ -71,8 +77,7 @@ async fn search_lava_async(operator: &mut Operator, file: &str, query: &str) -> 
     let mut decompressed_serialized_plist_offsets: Vec<u8> =
         Vec::with_capacity(buffer2.len() as usize);
     decompressor.read_to_end(&mut decompressed_serialized_plist_offsets)?;
-    let plist_offsets: Vec<u64> = bincode::deserialize(&decompressed_serialized_plist_offsets)
-        .map_err(|e| anyhow!(LavaError::from(e)))?;
+    let plist_offsets: Vec<u64> = bincode::deserialize(&decompressed_serialized_plist_offsets)?;
 
     // plist_offsets is the byte offsets of the chunks followed by the cum count of the items in each plist chunk 
     if plist_offsets.len() % 2 != 0 {
@@ -110,6 +115,7 @@ async fn search_lava_async(operator: &mut Operator, file: &str, query: &str) -> 
             .into_iter().flatten().collect();
 
         plist_result.append(&mut result);
+
     }
 
     Ok(plist_result)
@@ -170,7 +176,7 @@ impl From<FsBuilder> for Operators {
     }
 }
 
-pub fn search_lava(file: &str, query: &str) -> Result<Vec<u64>> {
+pub fn search_lava(file: &str, query: &str) -> Result<Vec<u64>, LavaError> {
     let mut operator = if file.starts_with("s3://") {
         Operators::from(S3Builder::from(file)).into_inner()
     } else {
@@ -185,8 +191,5 @@ pub fn search_lava(file: &str, query: &str) -> Result<Vec<u64>> {
     };
 
     println!("Searching {}", filename);
-    let result: Result<Vec<u64>, anyhow::Error> =
-        search_lava_async(&mut operator, &filename, query);
-
-    result
+    search_lava_async(&mut operator, &filename, query)
 }

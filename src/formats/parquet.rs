@@ -1,14 +1,22 @@
-use anyhow::anyhow;
 use arrow::datatypes::ToByteSlice;
 use arrow::error::ArrowError;
 use arrow_array::{Array, StringArray};
 use parquet::{
-    arrow::array_reader::make_byte_array_reader, basic::{Encoding, Type}, column::page::Page, compression::{create_codec, Codec, CodecOptionsBuilder}, data_type::AsBytes, errors::ParquetError, file::{
+    arrow::array_reader::make_byte_array_reader,
+    basic::{Encoding, Type},
+    column::page::Page,
+    compression::{create_codec, Codec, CodecOptionsBuilder},
+    data_type::AsBytes,
+    errors::ParquetError,
+    file::{
         footer::{decode_footer, decode_metadata},
         metadata::ParquetMetaData,
         reader::*,
         statistics, FOOTER_SIZE,
-    }, format::{PageHeader, PageType}, thrift::TSerializable, util::InMemoryPageIterator
+    },
+    format::{PageHeader, PageType},
+    thrift::TSerializable,
+    util::InMemoryPageIterator,
 };
 use thrift::protocol::TCompactInputProtocol;
 
@@ -25,11 +33,13 @@ use std::{
 
 use futures::stream::{self, StreamExt};
 use itertools::{izip, Itertools};
+use regex::Regex;
 use std::collections::HashMap;
+use std::fmt;
 use std::{env, usize};
 use tokio::{self};
-use std::fmt;
-use regex::Regex;
+
+use crate::lava::error::LavaError;
 
 #[derive(Debug)]
 pub enum MyError {
@@ -50,7 +60,6 @@ impl Display for MyError {
 }
 
 impl From<ParquetError> for MyError {
-
     fn from(e: ParquetError) -> Self {
         MyError::ParquetError(e)
     }
@@ -124,13 +133,13 @@ impl From<FsBuilder> for Operators {
     }
 }
 
-async fn get_reader_and_size_from_file(file: &str) -> Result<(usize, Reader), MyError> {
+async fn get_reader_and_size_from_file(file: &str) -> Result<(usize, Reader), LavaError> {
     let mut file_name = file.to_string();
     let operator = if file.starts_with("s3://") {
         file_name = file_name.replace("s3://", "");
         let mut iter = file_name.split("/");
         let bucket = iter.next().expect("malformed s3 path");
-        file_name = file_name[bucket.len() + 1 ..].to_string();
+        file_name = file_name[bucket.len() + 1..].to_string();
 
         Operators::from(S3Builder::from(file)).into_inner()
     } else {
@@ -144,7 +153,10 @@ async fn get_reader_and_size_from_file(file: &str) -> Result<(usize, Reader), My
     Ok((file_size, reader))
 }
 
-async fn parse_metadata(reader: &mut Reader, file_size: usize) -> Result<ParquetMetaData, MyError> {
+async fn parse_metadata(
+    reader: &mut Reader,
+    file_size: usize,
+) -> Result<ParquetMetaData, LavaError> {
     // check file is large enough to hold footer
 
     let mut footer = [0_u8; 8];
@@ -156,7 +168,7 @@ async fn parse_metadata(reader: &mut Reader, file_size: usize) -> Result<Parquet
     let footer_metadata_len = FOOTER_SIZE + metadata_len;
 
     if footer_metadata_len > file_size as usize {
-        return Err(MyError::from(ParquetError::General(
+        return Err(LavaError::from(ParquetError::General(
             "Invalid Parquet file. Size is smaller than footer".to_string(),
         )));
     }
@@ -166,7 +178,7 @@ async fn parse_metadata(reader: &mut Reader, file_size: usize) -> Result<Parquet
     reader.seek(SeekFrom::Start(start)).await.unwrap();
     reader.read(&mut bytes).await.unwrap();
 
-    decode_metadata(bytes.to_byte_slice()).map_err(|e| MyError::from(e))
+    decode_metadata(bytes.to_byte_slice()).map_err(LavaError::from)
 }
 
 pub(crate) fn decode_page(
@@ -265,7 +277,7 @@ pub(crate) fn decode_page(
 fn read_page_header<C: ChunkReader>(
     reader: &C,
     offset: u64,
-) -> Result<(usize, PageHeader), MyError> {
+) -> Result<(usize, PageHeader), LavaError> {
     struct TrackedRead<R>(R, usize);
 
     impl<R: Read> Read for TrackedRead<R> {
@@ -283,18 +295,16 @@ fn read_page_header<C: ChunkReader>(
     Ok((tracked.1, header))
 }
 
-async fn parse_metadatas(
-    file_paths: &Vec<String>,
-) -> HashMap<String, ParquetMetaData> {
+async fn parse_metadatas(file_paths: &Vec<String>) -> HashMap<String, ParquetMetaData> {
     let iter = file_paths.iter().dedup();
 
     let handles = stream::iter(iter)
         .map(|file_path: &String| {
-
             let file_path = file_path.clone();
-            
+
             tokio::spawn(async move {
-                let (file_size, mut reader) = get_reader_and_size_from_file(&file_path).await.unwrap();
+                let (file_size, mut reader) =
+                    get_reader_and_size_from_file(&file_path).await.unwrap();
                 let metadata = parse_metadata(&mut reader, file_size as usize)
                     .await
                     .unwrap();
@@ -332,7 +342,7 @@ pub struct ParquetLayout {
 pub async fn get_parquet_layout(
     column_name: &str,
     file_path: &str,
-) -> Result<(arrow::array::ArrayData, ParquetLayout), MyError> {
+) -> Result<(arrow::array::ArrayData, ParquetLayout), LavaError> {
     let (file_size, mut reader) = get_reader_and_size_from_file(file_path).await?;
     let metadata = parse_metadata(&mut reader, file_size as usize).await?;
 
@@ -352,10 +362,17 @@ pub async fn get_parquet_layout(
     let mut pages: Vec<Vec<parquet::column::page::Page>> = Vec::new();
     let mut total_values = 0;
 
-    let column_index = metadata.file_metadata().schema_descr().columns().iter()
+    let column_index = metadata
+        .file_metadata()
+        .schema_descr()
+        .columns()
+        .iter()
         .position(|column| column.name() == column_name)
-        .expect(&format!("column {} not found in parquet file {}", column_name, file_path));
-    
+        .expect(&format!(
+            "column {} not found in parquet file {}",
+            column_name, file_path
+        ));
+
     // @rain we should parallelize this across row groups using tokio
 
     for row_group in 0..metadata.num_row_groups() {
@@ -376,7 +393,7 @@ pub async fn get_parquet_layout(
         let mut column_chunk_bytes = vec![0u8; (end - start) as usize];
         reader.seek(SeekFrom::Start(start as u64)).await.unwrap();
         // parallelize this please @Rain
-        let mut total_read: usize = 0; 
+        let mut total_read: usize = 0;
         while total_read < (end - start) as usize {
             let read = reader.read(&mut column_chunk_bytes[total_read..]).await?;
             if read == 0 {
@@ -393,14 +410,13 @@ pub async fn get_parquet_layout(
         start = 0;
 
         while start != end {
-
             // this takes a slice of the entire thing for each page, granted it won't read the entire thing,
-            // the thrift will terminate after reading the necessary things. @Rain the alternative is to feed it 
+            // the thrift will terminate after reading the necessary things. @Rain the alternative is to feed it
             // chunks at a time in a loop until a valid header is returned, like before how we are using the reader in rust-test
 
             let (header_len, header) = read_page_header(&column_chunk_bytes, start)?;
             // println!("{} {} {:?}", start, header_len, header);
-            
+
             let page_header = header.clone();
 
             let mut dictionary_page_size: usize = 0;
@@ -410,7 +426,10 @@ pub async fn get_parquet_layout(
                     dictionary_page_size = page_header.compressed_page_size as usize + header_len;
                     let page: Page = decode_page(
                         page_header,
-                        column_chunk_bytes.slice((start as usize + header_len)  .. (start as usize + dictionary_page_size as usize)),
+                        column_chunk_bytes.slice(
+                            (start as usize + header_len)
+                                ..(start as usize + dictionary_page_size as usize),
+                        ),
                         Type::BYTE_ARRAY,
                         Some(&mut codec),
                     )
@@ -424,20 +443,23 @@ pub async fn get_parquet_layout(
                         .data_page_sizes
                         .push(compressed_page_size as usize + header_len);
                     parquet_layout.data_page_offsets.push(start as usize);
-                    
+
                     parquet_layout
                         .dictionary_page_sizes
                         .push(dictionary_page_size);
                     total_data_pages += 1;
-                    
+
                     let page = decode_page(
-                            page_header,
-                            column_chunk_bytes.slice((start as usize + header_len)  .. (start as usize + header_len + compressed_page_size as usize)),
-                            Type::BYTE_ARRAY,
-                            Some(&mut codec),
-                        )
-                        .unwrap();
-                    
+                        page_header,
+                        column_chunk_bytes.slice(
+                            (start as usize + header_len)
+                                ..(start as usize + header_len + compressed_page_size as usize),
+                        ),
+                        Type::BYTE_ARRAY,
+                        Some(&mut codec),
+                    )
+                    .unwrap();
+
                     parquet_layout
                         .data_page_num_rows
                         .push(page.num_values() as usize);
@@ -453,7 +475,6 @@ pub async fn get_parquet_layout(
             };
 
             column_chunk_pages.push(page);
-
         }
 
         pages.push(column_chunk_pages);
@@ -463,26 +484,23 @@ pub async fn get_parquet_layout(
     let page_iterator = InMemoryPageIterator::new(pages);
     let mut array_reader = make_byte_array_reader(
         Box::new(page_iterator),
-        metadata.row_group(0)
-                .schema_descr()
-                .column(column_index),
+        metadata.row_group(0).schema_descr().column(column_index),
         None,
     )
     .unwrap();
     let array = array_reader.next_batch(total_values as usize).unwrap();
 
-    let new_array: &arrow_array::GenericByteArray<arrow_array::types::GenericStringType<i32>> = array
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .ok_or_else(|| {
-            ArrowError::ParseError(
-                "Expects string array as first argument".to_string(),
-            )
-        })
-        .unwrap();
+    let new_array: &arrow_array::GenericByteArray<arrow_array::types::GenericStringType<i32>> =
+        array
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .ok_or_else(|| {
+                ArrowError::ParseError("Expects string array as first argument".to_string())
+            })
+            .unwrap();
 
     let data: arrow::array::ArrayData = new_array.to_data();
-    
+
     Ok((data, parquet_layout))
 }
 
@@ -504,10 +522,10 @@ pub async fn search_indexed_pages(
     page_offsets: Vec<u64>,
     page_sizes: Vec<usize>,
     dict_page_sizes: Vec<usize>, // 0 means no dict page
-) -> Result<Vec<MatchResult>, MyError> {
+) -> Result<Vec<MatchResult>, LavaError> {
     // current implementation might re-read dictionary pages, this should be optimized
     // we are assuming that all the files are either on disk or cloud.
-    
+
     let codec_options = CodecOptionsBuilder::default()
         .set_backward_compatible_lz4(false)
         .build();
@@ -526,10 +544,16 @@ pub async fn search_indexed_pages(
     let iter: Vec<tokio::task::JoinHandle<Vec<MatchResult>>> = stream::iter(iter)
         .map(
             |(file_path, row_group, page_offset, page_size, dict_page_size)| {
-
-                let column_index = metadatas[&file_path].file_metadata().schema_descr().columns().iter()
+                let column_index = metadatas[&file_path]
+                    .file_metadata()
+                    .schema_descr()
+                    .columns()
+                    .iter()
                     .position(|column| column.name() == column_name)
-                    .expect(&format!("column {} not found in parquet file {}", column_name, file_path));
+                    .expect(&format!(
+                        "column {} not found in parquet file {}",
+                        column_name, file_path
+                    ));
                 let column_descriptor = metadatas[&file_path]
                     .row_group(row_group)
                     .schema_descr()
@@ -546,12 +570,11 @@ pub async fn search_indexed_pages(
                     .unwrap()
                     .unwrap();
 
-                
                 let re = re.clone();
 
                 let handle = tokio::spawn(async move {
-
-                    let (file_size, mut reader) = get_reader_and_size_from_file(&file_path).await.unwrap();
+                    let (file_size, mut reader) =
+                        get_reader_and_size_from_file(&file_path).await.unwrap();
                     let mut pages: Vec<parquet::column::page::Page> = Vec::new();
                     if dict_page_size > 0 {
                         let start = dict_page_offset.unwrap();
@@ -640,6 +663,6 @@ pub async fn search_indexed_pages(
 
     result.map_err(|e| {
         // Here, you can convert `e` (a JoinError) into your custom error type.
-        MyError::from(ParquetError::General(e.to_string()))
+        LavaError::from(ParquetError::General(e.to_string()))
     })
 }
