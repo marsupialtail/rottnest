@@ -1,11 +1,13 @@
-use opendal::{services::{Fs,S3}, Operator};
+use opendal::{
+    services::{Fs, S3},
+    Operator,
+};
 use regex::Regex;
 
 use std::io::{BufRead, BufReader, Cursor, Read, SeekFrom};
 
 use zstd::stream::read::Decoder;
 
-use anyhow::{anyhow, Result};
 use opendal::raw::oio::ReadExt;
 
 use opendal::Reader;
@@ -14,7 +16,11 @@ use std::env;
 use crate::lava::error::LavaError;
 
 #[tokio::main]
-async fn search_lava_async(operator: &mut Operator, file: &str, query: &str) -> Result<Vec<u64>> {
+async fn search_lava_async(
+    operator: &mut Operator,
+    file: &str,
+    query: &str,
+) -> Result<Vec<u64>, LavaError> {
     let file_size: u64 = operator.stat(file).await?.content_length();
     let mut reader: Reader = operator.clone().reader(file).await?;
 
@@ -70,8 +76,7 @@ async fn search_lava_async(operator: &mut Operator, file: &str, query: &str) -> 
     let mut decompressed_serialized_plist_offsets: Vec<u8> =
         Vec::with_capacity(buffer2.len() as usize);
     decompressor.read_to_end(&mut decompressed_serialized_plist_offsets)?;
-    let plist_offsets: Vec<u64> = bincode::deserialize(&decompressed_serialized_plist_offsets)
-        .map_err(|e| anyhow!(LavaError::from(e)))?;
+    let plist_offsets: Vec<u64> = bincode::deserialize(&decompressed_serialized_plist_offsets)?;
 
     // now read the plist offsets that you need, whose indices are in matched
 
@@ -86,8 +91,7 @@ async fn search_lava_async(operator: &mut Operator, file: &str, query: &str) -> 
         decompressor = Decoder::new(&buffer3[..])?;
         let mut decompressed_serialized_plist: Vec<u8> = Vec::with_capacity(buffer3.len() as usize);
         decompressor.read_to_end(&mut decompressed_serialized_plist)?;
-        let mut plist: Vec<u64> = bincode::deserialize(&decompressed_serialized_plist)
-            .map_err(|e| anyhow!(LavaError::from(e)))?;
+        let mut plist: Vec<u64> = bincode::deserialize(&decompressed_serialized_plist)?;
         plist_result.append(&mut plist);
     }
 
@@ -149,7 +153,7 @@ impl From<FsBuilder> for Operators {
     }
 }
 
-pub fn search_lava(file: &str, query: &str) -> Result<Vec<u64>> {
+pub fn search_lava(file: &str, query: &str) -> Result<Vec<u64>, LavaError> {
     let mut operator = if file.starts_with("s3://") {
         Operators::from(S3Builder::from(file)).into_inner()
     } else {
@@ -164,8 +168,5 @@ pub fn search_lava(file: &str, query: &str) -> Result<Vec<u64>> {
     };
 
     println!("Searching {}", filename);
-    let result: Result<Vec<u64>, anyhow::Error> =
-        search_lava_async(&mut operator, &filename, query);
-
-    result
+    search_lava_async(&mut operator, &filename, query)
 }
