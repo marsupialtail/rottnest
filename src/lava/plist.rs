@@ -56,7 +56,7 @@ impl<'a> PList<'a> {
     }
 
     pub fn add_plist(&mut self, plist: &[u64]) -> Result<usize> {
-        println!("{:?}", plist);
+        // println!("{:?}", plist);
         self.elems += plist.len() as u64;
         // serialize first
         let serialized = bincode::serialize(&plist).unwrap();
