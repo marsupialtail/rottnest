@@ -330,7 +330,7 @@ pub struct ParquetLayout {
 
 #[tokio::main]
 pub async fn get_parquet_layout(
-    column_index: usize,
+    column_name: &str,
     file_path: &str,
 ) -> Result<(arrow::array::ArrayData, ParquetLayout), MyError> {
     let (file_size, mut reader) = get_reader_and_size_from_file(file_path).await?;
@@ -352,8 +352,11 @@ pub async fn get_parquet_layout(
     let mut pages: Vec<Vec<parquet::column::page::Page>> = Vec::new();
     let mut total_values = 0;
 
-    // we should probably parallelize across the row groups, they are completely independent.
-    // @Rain?
+    let column_index = metadata.file_metadata().schema_descr().columns().iter()
+        .position(|column| column.name() == column_name)
+        .expect(&format!("column {} not found in parquet file {}", column_name, file_path));
+    
+    // @rain we should parallelize this across row groups using tokio
 
     for row_group in 0..metadata.num_row_groups() {
         let column = metadata.row_group(row_group).column(column_index);
@@ -495,7 +498,7 @@ pub struct MatchResult {
 #[tokio::main]
 pub async fn search_indexed_pages(
     query: String,
-    column_index: usize,
+    column_name: &str,
     file_paths: Vec<String>,
     row_groups: Vec<usize>,
     page_offsets: Vec<u64>,
@@ -523,6 +526,10 @@ pub async fn search_indexed_pages(
     let iter: Vec<tokio::task::JoinHandle<Vec<MatchResult>>> = stream::iter(iter)
         .map(
             |(file_path, row_group, page_offset, page_size, dict_page_size)| {
+
+                let column_index = metadatas[&file_path].file_metadata().schema_descr().columns().iter()
+                    .position(|column| column.name() == column_name)
+                    .expect(&format!("column {} not found in parquet file {}", column_name, file_path));
                 let column_descriptor = metadatas[&file_path]
                     .row_group(row_group)
                     .schema_descr()

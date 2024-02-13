@@ -61,8 +61,8 @@ impl From<MatchResult> for MatchResultWrapper {
 }
 
 #[pyfunction]
-pub fn get_parquet_layout(column_index: usize, file: &str, py: Python) -> PyResult<(PyObject, ParquetLayoutWrapper)> {
-    let (arr, parquet_layout) = parquet::get_parquet_layout(column_index, file)
+pub fn get_parquet_layout(column_name: &PyString, file: &str, py: Python) -> PyResult<(PyObject, ParquetLayoutWrapper)> {
+    let (arr, parquet_layout) = parquet::get_parquet_layout(&column_name.to_string(), file)
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())).unwrap();
     Ok((arr.to_pyarrow(py).unwrap(), ParquetLayoutWrapper::from_parquet_layout(parquet_layout)))
 }
@@ -70,7 +70,7 @@ pub fn get_parquet_layout(column_index: usize, file: &str, py: Python) -> PyResu
 #[pyfunction]
 pub fn search_indexed_pages(
     query: &PyString,
-    column_index: usize,
+    column_name: &PyString,
     file_paths: Vec<&PyString>,
     row_groups: Vec<usize>,
     page_offsets: Vec<usize>,
@@ -80,7 +80,7 @@ pub fn search_indexed_pages(
 
     let match_result = parquet::search_indexed_pages(
         query.to_string(),
-        column_index,
+        &column_name.to_string(),
         file_paths.iter().map(|x| x.to_string()).collect(),
         row_groups,
         page_offsets.iter().map(|x| *x as u64).collect(),

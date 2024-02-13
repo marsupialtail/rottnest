@@ -7,7 +7,7 @@ use tantivy_jieba::JiebaTokenizer;
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
-
+use std::collections::HashSet;
 use bincode;
 use std::fs::File;
 use std::io::{Seek, SeekFrom, Write};
@@ -85,6 +85,12 @@ pub fn build_lava_natural_language(
         .ok_or(anyhow!(LavaError::Parse(
             "Expects uint64 array as second argument".to_string()
         )))?;
+    
+    let mut unique_uids: HashSet<u64> = HashSet::new();
+    for i in 0..uid.len() {
+        unique_uids.insert(uid.value(i));
+    }
+    let num_unique_uids = unique_uids.len() as u64;
 
     if array.len() != uid.len() {
         return Err(anyhow!(LavaError::Parse(
@@ -106,7 +112,7 @@ pub fn build_lava_natural_language(
         };
 
     // let mut tokens: Vec<Vec<String>> = Vec::new();
-    let mut inverted_index: BTreeMap<String, Vec<u64>> = BTreeMap::new();
+    let mut inverted_index: BTreeMap<String, HashSet<u64>> = BTreeMap::new();
 
     for i in 0..array.len() {
         let text = array.value(i);
@@ -127,8 +133,8 @@ pub fn build_lava_natural_language(
             // this_tokens.push(token.text.to_string());
             inverted_index
                 .entry(format!("{}\n", token.text))
-                .or_insert_with(Vec::new)
-                .push(uid.value(i));
+                .or_insert_with(HashSet::new)
+                .insert(uid.value(i));
         }
         // tokens.push(this_tokens);
     }
@@ -154,10 +160,19 @@ pub fn build_lava_natural_language(
     plist_offsets.push(0);
 
     for (_, value) in inverted_index.iter() {
-        let serialized = bincode::serialize(&value).unwrap();
-        let compressed_plist = encode_all(&serialized[..], 0).expect("Compression failed");
-        plist_offsets.push(plist_offsets[plist_offsets.len() - 1] + compressed_plist.len() as u64);
-        file.write_all(&compressed_plist)?;
+        //@Rain can we get rid of this clone
+        let mut value: Vec<u64> = value.clone().into_iter().collect();
+        // if value.len() < (num_unique_uids / 4) as usize {
+        if true {
+            value.sort();
+            let serialized = bincode::serialize(&value).unwrap();
+            let compressed_plist = encode_all(&serialized[..], 0).expect("Compression failed");
+            plist_offsets.push(plist_offsets[plist_offsets.len() - 1] + compressed_plist.len() as u64);
+            file.write_all(&compressed_plist)?;
+        } else {
+            plist_offsets.push(plist_offsets[plist_offsets.len() - 1] + 1 as u64);
+            file.write_all(&(u8::MAX).to_le_bytes())?;
+        }
     }
 
     let compressed_term_dict_offset = file.seek(SeekFrom::Current(0))?;

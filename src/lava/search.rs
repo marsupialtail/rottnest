@@ -26,6 +26,7 @@ async fn search_lava_async(operator: &mut Operator, file: &str, query: &str) -> 
     let mut buffer: [u8; 8] = [0u8; 8];
     reader.read(&mut buffer[..]).await?;
     let compressed_plist_offsets_offset: u64 = u64::from_le_bytes(buffer);
+    println!("{}", compressed_plist_offsets_offset);
 
     // now read the term dictionary
     let mut compressed_term_dictionary: Vec<u8> =
