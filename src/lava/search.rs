@@ -81,7 +81,7 @@ async fn search_lava_async(
 
     // plist_offsets is the byte offsets of the chunks followed by the cum count of the items in each plist chunk 
     if plist_offsets.len() % 2 != 0 {
-        let err = anyhow!(LavaError::Parse("data corruption".to_string()));
+        let err = LavaError::Parse("data corruption".to_string());
         return Err(err);
     } 
 

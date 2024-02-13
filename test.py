@@ -81,10 +81,10 @@ def search_index_natural_language(metadata_path: str, index_path: str, query):
 # from rottnest_rs import tokenize
 # import pyarrow
        
-index_name = "test"
-index_file_natural_language("train.parquet","raw_content", name = index_name)
-search_index_natural_language(f"{index_name}.parquet", f"{index_name}.lava", "Helsinki")
+# index_name = "test"
+# index_file_natural_language("train.parquet","raw_content", name = index_name)
+# search_index_natural_language(f"{index_name}.parquet", f"{index_name}.lava", "Helsinki")
 
-# index_name = "content_split"
-# # index_file_natural_language("ecom_orig.parquet","content_split", name = index_name)
-# search_index_natural_language(f"{index_name}.parquet", f"{index_name}.lava", "helsinki")
+index_name = "content_split"
+# index_file_natural_language("ecom_orig.parquet","content_split", name = index_name)
+search_index_natural_language(f"{index_name}.parquet", f"{index_name}.lava", "helsinki")
