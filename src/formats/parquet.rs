@@ -24,58 +24,19 @@ use opendal::raw::oio::ReadExt;
 use opendal::services::{Fs, S3};
 use opendal::{Operator, Reader};
 
-use bytes::{Bytes, BytesMut};
-use std::{convert::TryFrom, time::Instant};
-use std::{
-    fmt::Display,
-    io::{self, Read, SeekFrom},
-};
+use bytes::Bytes;
+use std::convert::TryFrom;
+use std::io::{Read, SeekFrom};
 
 use futures::stream::{self, StreamExt};
 use itertools::{izip, Itertools};
 use regex::Regex;
 use std::collections::HashMap;
-use std::fmt;
+
 use std::{env, usize};
 use tokio::{self};
 
 use crate::lava::error::LavaError;
-
-#[derive(Debug)]
-pub enum MyError {
-    ParquetError(ParquetError),
-    OpendalError(opendal::Error),
-    ThriftError(thrift::Error),
-    // Add more variants for other errors or general cases
-}
-
-impl Display for MyError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            MyError::ParquetError(err) => write!(f, "Parquet error: {}", err),
-            MyError::OpendalError(err) => write!(f, "Opendal error: {}", err),
-            MyError::ThriftError(err) => write!(f, "Thrift error: {}", err),
-        }
-    }
-}
-
-impl From<ParquetError> for MyError {
-    fn from(e: ParquetError) -> Self {
-        MyError::ParquetError(e)
-    }
-}
-
-impl From<opendal::Error> for MyError {
-    fn from(e: opendal::Error) -> Self {
-        MyError::OpendalError(e)
-    }
-}
-
-impl From<thrift::Error> for MyError {
-    fn from(e: thrift::Error) -> Self {
-        MyError::ThriftError(e)
-    }
-}
 
 //dupilcate code for now
 struct S3Builder(S3);
@@ -186,7 +147,7 @@ pub(crate) fn decode_page(
     buffer: Bytes,
     physical_type: Type,
     decompressor: Option<&mut Box<dyn Codec>>,
-) -> Result<Page, MyError> {
+) -> Result<Page, LavaError> {
     let mut offset: usize = 0;
     let mut can_decompress = true;
 
@@ -212,7 +173,7 @@ pub(crate) fn decode_page(
             )?;
 
             if decompressed.len() != uncompressed_size {
-                return Err(MyError::from(ParquetError::General(
+                return Err(LavaError::from(ParquetError::General(
                     "messed decompression".to_string(),
                 )));
             }

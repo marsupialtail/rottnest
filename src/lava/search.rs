@@ -4,7 +4,10 @@ use opendal::{
 };
 use regex::Regex;
 
-use std::{collections::HashMap, io::{self, BufRead, BufReader, Cursor, Read, SeekFrom}};
+use std::{
+    collections::HashMap,
+    io::{BufRead, BufReader, Cursor, Read, SeekFrom},
+};
 
 use zstd::stream::read::Decoder;
 
@@ -36,12 +39,20 @@ async fn search_lava_async(
     // println!("{}", compressed_plist_offsets_offset);
 
     // now read the term dictionary
-    let mut compressed_term_dictionary: Vec<u8> =
-        vec![0u8; (compressed_plist_offsets_offset - compressed_term_dictionary_offset) as usize];
-    reader
-        .seek(SeekFrom::Start(compressed_term_dictionary_offset))
-        .await?;
-    reader.read(&mut compressed_term_dictionary[..]).await?;
+    let total_len = (compressed_plist_offsets_offset - compressed_term_dictionary_offset) as usize;
+    let mut compressed_term_dictionary: Vec<u8> = vec![0u8; total_len];
+    let mut current = 0;
+    while current < total_len {
+        reader
+            .seek(SeekFrom::Start(
+                compressed_term_dictionary_offset + current as u64,
+            ))
+            .await?;
+        let size = reader
+            .read(&mut compressed_term_dictionary[current..])
+            .await?;
+        current += size;
+    }
 
     let mut decompressed_term_dictionary: Vec<u8> = Vec::new();
     let mut decompressor: Decoder<'_, BufReader<&[u8]>> =
@@ -79,22 +90,21 @@ async fn search_lava_async(
     decompressor.read_to_end(&mut decompressed_serialized_plist_offsets)?;
     let plist_offsets: Vec<u64> = bincode::deserialize(&decompressed_serialized_plist_offsets)?;
 
-    // plist_offsets is the byte offsets of the chunks followed by the cum count of the items in each plist chunk 
+    // plist_offsets is the byte offsets of the chunks followed by the cum count of the items in each plist chunk
     if plist_offsets.len() % 2 != 0 {
         let err = LavaError::Parse("data corruption".to_string());
         return Err(err);
-    } 
+    }
 
     let num_chunks: usize = plist_offsets.len() / 2;
-    let term_dict_len: &[u64] = &plist_offsets[num_chunks .. ];
+    let term_dict_len: &[u64] = &plist_offsets[num_chunks..];
 
     let mut plist_result: Vec<u64> = Vec::new();
     let mut chunks_to_search: HashMap<usize, Vec<u64>> = HashMap::new();
     for i in matched {
-
         let (idx, offset) = match term_dict_len.binary_search(&i) {
             Ok(idx) => (idx, 0),
-            Err(idx) => {(idx - 1, i - term_dict_len[idx - 1])},
+            Err(idx) => (idx - 1, i - term_dict_len[idx - 1]),
         };
 
         chunks_to_search
@@ -104,18 +114,19 @@ async fn search_lava_async(
     }
 
     for (idx, offsets) in chunks_to_search.into_iter() {
-
         reader
             .seek(SeekFrom::Start(plist_offsets[idx as usize]))
             .await?;
         let mut buffer3: Vec<u8> =
             vec![0u8; (plist_offsets[(idx + 1) as usize] - plist_offsets[idx as usize]) as usize];
         reader.read(&mut buffer3).await?;
-        let mut result: Vec<u64> = PList::search_compressed(buffer3, offsets).unwrap()
-            .into_iter().flatten().collect();
+        let mut result: Vec<u64> = PList::search_compressed(buffer3, offsets)
+            .unwrap()
+            .into_iter()
+            .flatten()
+            .collect();
 
         plist_result.append(&mut result);
-
     }
 
     Ok(plist_result)
@@ -192,4 +203,19 @@ pub fn search_lava(file: &str, query: &str) -> Result<Vec<u64>, LavaError> {
 
     println!("Searching {}", filename);
     search_lava_async(&mut operator, &filename, query)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::search_lava;
+
+    #[test]
+    pub fn test_search_lava() {
+        let file = "content_split.lava";
+        let query = "helsinki";
+
+        let res = search_lava(file, query).unwrap();
+
+        println!("{:?}", res);
+    }
 }

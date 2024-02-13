@@ -1,7 +1,5 @@
 use std::fmt::Display;
 
-use zstd::stream::write;
-
 #[derive(Debug, thiserror::Error)]
 pub enum LavaError {
     Io(#[from] std::io::Error),
