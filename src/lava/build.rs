@@ -6,6 +6,7 @@ use tantivy_jieba::JiebaTokenizer;
 use bincode;
 use std::borrow::Cow;
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fs::File;
@@ -114,7 +115,7 @@ pub fn build_lava_natural_language(
     };
 
     // let mut tokens: Vec<Vec<String>> = Vec::new();
-    let mut inverted_index: BTreeMap<String, HashSet<u64>> = BTreeMap::new();
+    let mut inverted_index: BTreeMap<String, BTreeSet<u64>> = BTreeMap::new();
 
     for i in 0..array.len() {
         let text = array.value(i);
@@ -137,7 +138,7 @@ pub fn build_lava_natural_language(
             // this_tokens.push(token.text.to_string());
             inverted_index
                 .entry(format!("{}\n", token.text))
-                .or_insert_with(HashSet::new)
+                .or_insert_with(BTreeSet::new)
                 .insert(uid.value(i));
         }
         // tokens.push(this_tokens);
@@ -165,22 +166,21 @@ pub fn build_lava_natural_language(
     let mut plist = PList::new()?;
     let mut counter: u64 = 0;
 
-    for (key, value) in inverted_index.iter() {
-
+    for (_, value) in inverted_index.iter() {
         // this usually saves around 20% of the space. Don't remember things that happen more than 1/4 of the time.
-        let mut value_vec = if value.len() < (num_unique_uids / 4) as usize {
-            //@Rain can we get rid of this clone
-            value.clone().into_iter().collect()
-        } else {
-            vec![u64::MAX]
-        };  
+        // let mut value_vec = if value.len() < (num_unique_uids / 4) as usize {
+        //     //@Rain can we get rid of this clone
+        //     value.clone().into_iter().collect()
+        // } else {
+        //     vec![u64::MAX]
+        // };
 
         counter += 1;
 
-        value_vec.sort();
+        // value_vec.sort();
         // println!("{}", key);
-        let written = plist.add_plist(&value_vec)?;
-        if written > 1024 * 1024 || counter == inverted_index.len() as u64  {
+        let written = plist.add_plist(value)?;
+        if written > 1024 * 1024 || counter == inverted_index.len() as u64 {
             let bytes = plist.finalize_compression()?;
             file.write_all(&bytes)?;
             plist_offsets.push(plist_offsets[plist_offsets.len() - 1] + bytes.len() as u64);
