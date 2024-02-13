@@ -1,7 +1,7 @@
 use opendal::{services::{Fs,S3}, Operator};
 use regex::Regex;
 
-use std::io::{BufRead, BufReader, Cursor, Read, SeekFrom};
+use std::{collections::HashMap, io::{self, BufRead, BufReader, Cursor, Read, SeekFrom}};
 
 use zstd::stream::read::Decoder;
 
@@ -12,6 +12,7 @@ use opendal::Reader;
 use std::env;
 
 use crate::lava::error::LavaError;
+use crate::lava::plist::PList;
 
 #[tokio::main]
 async fn search_lava_async(operator: &mut Operator, file: &str, query: &str) -> Result<Vec<u64>> {
@@ -26,7 +27,7 @@ async fn search_lava_async(operator: &mut Operator, file: &str, query: &str) -> 
     let mut buffer: [u8; 8] = [0u8; 8];
     reader.read(&mut buffer[..]).await?;
     let compressed_plist_offsets_offset: u64 = u64::from_le_bytes(buffer);
-    println!("{}", compressed_plist_offsets_offset);
+    // println!("{}", compressed_plist_offsets_offset);
 
     // now read the term dictionary
     let mut compressed_term_dictionary: Vec<u8> =
@@ -73,22 +74,42 @@ async fn search_lava_async(operator: &mut Operator, file: &str, query: &str) -> 
     let plist_offsets: Vec<u64> = bincode::deserialize(&decompressed_serialized_plist_offsets)
         .map_err(|e| anyhow!(LavaError::from(e)))?;
 
-    // now read the plist offsets that you need, whose indices are in matched
+    // plist_offsets is the byte offsets of the chunks followed by the cum count of the items in each plist chunk 
+    if plist_offsets.len() % 2 != 0 {
+        let err = anyhow!(LavaError::Parse("data corruption".to_string()));
+        return Err(err);
+    } 
+
+    let num_chunks: usize = plist_offsets.len() / 2;
+    let term_dict_len: &[u64] = &plist_offsets[num_chunks .. ];
 
     let mut plist_result: Vec<u64> = Vec::new();
+    let mut chunks_to_search: HashMap<usize, Vec<u64>> = HashMap::new();
     for i in matched {
+
+        let (idx, offset) = match term_dict_len.binary_search(&i) {
+            Ok(idx) => (idx, 0),
+            Err(idx) => {(idx - 1, i - term_dict_len[idx - 1])},
+        };
+
+        chunks_to_search
+            .entry(idx)
+            .or_insert_with(Vec::new)
+            .push(offset as u64);
+    }
+
+    for (idx, offsets) in chunks_to_search.into_iter() {
+
         reader
-            .seek(SeekFrom::Start(plist_offsets[i as usize]))
+            .seek(SeekFrom::Start(plist_offsets[idx as usize]))
             .await?;
         let mut buffer3: Vec<u8> =
-            vec![0u8; (plist_offsets[(i + 1) as usize] - plist_offsets[i as usize]) as usize];
+            vec![0u8; (plist_offsets[(idx + 1) as usize] - plist_offsets[idx as usize]) as usize];
         reader.read(&mut buffer3).await?;
-        decompressor = Decoder::new(&buffer3[..])?;
-        let mut decompressed_serialized_plist: Vec<u8> = Vec::with_capacity(buffer3.len() as usize);
-        decompressor.read_to_end(&mut decompressed_serialized_plist)?;
-        let mut plist: Vec<u64> = bincode::deserialize(&decompressed_serialized_plist)
-            .map_err(|e| anyhow!(LavaError::from(e)))?;
-        plist_result.append(&mut plist);
+        let mut result: Vec<u64> = PList::search_compressed(buffer3, offsets).unwrap()
+            .into_iter().flatten().collect();
+
+        plist_result.append(&mut result);
     }
 
     Ok(plist_result)

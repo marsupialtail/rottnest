@@ -18,6 +18,7 @@ use whatlang::{detect, Lang};
 use lazy_static::lazy_static;
 
 use crate::lava::error::LavaError;
+use crate::lava::plist::PList;
 
 #[derive(Clone)]
 enum TokenizerEnum {
@@ -116,14 +117,16 @@ pub fn build_lava_natural_language(
 
     for i in 0..array.len() {
         let text = array.value(i);
-        let lang = if let Some(ref language) = language {
-            Lang::from_code(language.value(i))
-        } else {
-            detect(text).map(|info| info.lang())
-        }
-        .unwrap_or(Lang::Eng);
+        // let lang = if let Some(ref language) = language {
+        //     Lang::from_code(language.value(i))
+        // } else {
+        //     detect(text).map(|info| info.lang())
+        // }
+        // .unwrap_or(Lang::Eng);
 
-        let mut tokenizer = TOKENIZERS.get(&lang).unwrap_or(&DEFAULT_TOKENIZER).clone();
+        // let mut tokenizer = TOKENIZERS.get(&lang).unwrap_or(&DEFAULT_TOKENIZER).clone();
+
+        let mut tokenizer = DEFAULT_TOKENIZER.clone();
         // println!("text: {} {}", text, detect(text).unwrap_or(Info::new(Script::Latin, Lang::Eng, 0.0)).lang());
 
         // The following code can be optimized as multiple threads https://docs.rs/futures/0.3.30/futures/executor/struct.ThreadPool.html
@@ -156,24 +159,39 @@ pub fn build_lava_natural_language(
         compressed_term_dictionary.len()
     );
 
-    let mut plist_offsets: Vec<u64> = Vec::with_capacity(inverted_index.len() + 1);
-    plist_offsets.push(0);
+    let mut plist_offsets: Vec<u64> = vec![0];
+    let mut plist_elems: Vec<u64> = vec![0];
+    let mut plist = PList::new()?;
+    let mut counter: u64 = 0;
 
-    for (_, value) in inverted_index.iter() {
-        //@Rain can we get rid of this clone
-        let mut value: Vec<u64> = value.clone().into_iter().collect();
-        // if value.len() < (num_unique_uids / 4) as usize {
-        if true {
-            value.sort();
-            let serialized = bincode::serialize(&value).unwrap();
-            let compressed_plist = encode_all(&serialized[..], 0).expect("Compression failed");
-            plist_offsets.push(plist_offsets[plist_offsets.len() - 1] + compressed_plist.len() as u64);
-            file.write_all(&compressed_plist)?;
+    for (key, value) in inverted_index.iter() {
+
+        // this usually saves around 20% of the space. Don't remember things that happen more than 1/4 of the time.
+        let mut value_vec = if value.len() < (num_unique_uids / 4) as usize {
+            //@Rain can we get rid of this clone
+            value.clone().into_iter().collect()
         } else {
-            plist_offsets.push(plist_offsets[plist_offsets.len() - 1] + 1 as u64);
-            file.write_all(&(u8::MAX).to_le_bytes())?;
+            vec![u64::MAX]
+        };  
+
+        counter += 1;
+
+        value_vec.sort();
+        // println!("{}", key);
+        let written = plist.add_plist(&value_vec)?;
+        if written > 1024 * 1024 || counter == inverted_index.len() as u64  {
+            let bytes = plist.finalize_compression()?;
+            file.write_all(&bytes)?;
+            plist_offsets.push(plist_offsets[plist_offsets.len() - 1] + bytes.len() as u64);
+            plist_elems.push(counter);
+            plist = PList::new()?;
         }
     }
+
+    println!("{:?}", plist_offsets);
+    println!("{:?}", plist_elems);
+
+    plist_offsets.append(&mut plist_elems);
 
     let compressed_term_dict_offset = file.seek(SeekFrom::Current(0))?;
     file.write_all(&compressed_term_dictionary)?;

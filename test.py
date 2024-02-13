@@ -69,8 +69,8 @@ def index_file_natural_language(file_path: List[str], column_name: str, name: Op
 def search_index_natural_language(metadata_path: str, index_path: str, query):
 
     uids = rottnest_rs.search_lava(index_path, query)
-
-    rottnest_rs.search_indexed_pages(query, )
+    print(uids)
+    # rottnest_rs.search_indexed_pages(query, )
 
 
 
@@ -83,7 +83,8 @@ def search_index_natural_language(metadata_path: str, index_path: str, query):
        
 index_name = "test"
 index_file_natural_language("train.parquet","raw_content", name = index_name)
-search_index_natural_language(f"{index_name}.parquet", f"{index_name}.lava", "helsinki")
+search_index_natural_language(f"{index_name}.parquet", f"{index_name}.lava", "Helsinki")
 
 # index_name = "content_split"
-# index_file_natural_language("ecom_orig.parquet","content_split", name = index_name)
+# # index_file_natural_language("ecom_orig.parquet","content_split", name = index_name)
+# search_index_natural_language(f"{index_name}.parquet", f"{index_name}.lava", "helsinki")
