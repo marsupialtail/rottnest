@@ -5,3 +5,4 @@ Cargo.lock
 output_file.bin
 python/rottnest_rs
 .vscode
+*.parquet
