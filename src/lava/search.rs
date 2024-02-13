@@ -6,7 +6,7 @@ use regex::Regex;
 
 use std::{
     collections::HashMap,
-    io::{self, BufRead, BufReader, Cursor, Read, SeekFrom},
+    io::{BufRead, BufReader, Cursor, Read, SeekFrom},
 };
 
 use zstd::stream::read::Decoder;
