@@ -1,6 +1,7 @@
+use bytes::{Bytes, BytesMut};
 use opendal::{
     services::{Fs, S3},
-    Operator,
+    Operator, Reader,
 };
 use regex::Regex;
 
@@ -8,16 +9,15 @@ use std::{
     collections::HashMap,
     io::{BufRead, BufReader, Cursor, Read, SeekFrom},
 };
-
+use tokio::pin;
 use zstd::stream::read::Decoder;
 
-use opendal::raw::oio::ReadExt;
-
-use opendal::Reader;
 use std::env;
 
-use crate::lava::error::LavaError;
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
+
 use crate::lava::plist::PList;
+use crate::{formats::reader::AsyncReader, lava::error::LavaError};
 
 #[tokio::main]
 async fn search_lava_async(
@@ -26,33 +26,18 @@ async fn search_lava_async(
     query: &str,
 ) -> Result<Vec<u64>, LavaError> {
     let file_size: u64 = operator.stat(file).await?.content_length();
-    let mut reader: Reader = operator.clone().reader(file).await?;
+    let mut reader: AsyncReader = operator.clone().reader_with(file).await?.into();
 
-    reader.seek(SeekFrom::End(-16)).await?;
-    let mut buffer1 = [0u8; 8];
-    reader.read(&mut buffer1).await?;
-    let compressed_term_dictionary_offset = u64::from_le_bytes(buffer1);
-
-    let mut buffer: [u8; 8] = [0u8; 8];
-    reader.read(&mut buffer[..]).await?;
-    let compressed_plist_offsets_offset: u64 = u64::from_le_bytes(buffer);
-    // println!("{}", compressed_plist_offsets_offset);
+    let (compressed_term_dictionary_offset, compressed_plist_offsets_offset) =
+        reader.read_offsets().await?;
 
     // now read the term dictionary
-    let total_len = (compressed_plist_offsets_offset - compressed_term_dictionary_offset) as usize;
-    let mut compressed_term_dictionary: Vec<u8> = vec![0u8; total_len];
-    let mut current = 0;
-    while current < total_len {
-        reader
-            .seek(SeekFrom::Start(
-                compressed_term_dictionary_offset + current as u64,
-            ))
-            .await?;
-        let size = reader
-            .read(&mut compressed_term_dictionary[current..])
-            .await?;
-        current += size;
-    }
+    let compressed_term_dictionary = reader
+        .read_range(
+            compressed_term_dictionary_offset,
+            compressed_plist_offsets_offset,
+        )
+        .await?;
 
     let mut decompressed_term_dictionary: Vec<u8> = Vec::new();
     let mut decompressor: Decoder<'_, BufReader<&[u8]>> =
