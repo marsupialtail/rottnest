@@ -11,6 +11,7 @@ use opendal::services::Fs;
 use opendal::{Operator, Reader};
 use std::env;
 
+use crate::formats::reader::AsyncReader;
 use crate::lava::error::LavaError;
 
 #[tokio::main]
@@ -21,7 +22,7 @@ async fn hoa(
 ) -> Result<(), LavaError> // hawaiian for lava condensation
 {
     // instantiate a list of readers from lava_files
-    let mut readers: Vec<Reader> = Vec::with_capacity(lava_files.len());
+    let mut readers: Vec<AsyncReader> = Vec::with_capacity(lava_files.len());
     let mut decompressed_term_dictionaries: Vec<BufReader<Cursor<Vec<u8>>>> =
         Vec::with_capacity(lava_files.len());
     let mut file_sizes: Vec<u64> = Vec::with_capacity(lava_files.len());
@@ -32,21 +33,15 @@ async fn hoa(
     for file in lava_files {
         let file = file.as_ref();
         let file_size: u64 = operator.stat(file).await?.content_length();
-        let mut reader: Reader = operator.clone().reader(file).await?;
-        reader.seek(SeekFrom::End(-16)).await?;
-        let mut buffer1 = [0u8; 8];
-        reader.read(&mut buffer1).await?;
-        let compressed_term_dict_offset = u64::from_le_bytes(buffer1);
-        let mut buffer: [u8; 8] = [0u8; 8];
-        reader.read(&mut buffer[..]).await?;
-        let compressed_plist_offsets_offset = u64::from_le_bytes(buffer);
+        let mut reader: AsyncReader = operator.clone().reader(file).await?.into();
 
-        reader
-            .seek(SeekFrom::Start(compressed_term_dict_offset))
+        let (compressed_term_dict_offset, compressed_plist_offsets_offset) =
+            reader.read_offsets().await?;
+
+        let compressed_term_dictionary = reader
+            .read_range(compressed_term_dict_offset, compressed_plist_offsets_offset)
             .await?;
-        let mut compressed_term_dictionary: Vec<u8> =
-            vec![0u8; (compressed_plist_offsets_offset - compressed_term_dict_offset) as usize];
-        reader.read(&mut compressed_term_dictionary[..]).await?;
+
         let mut decompressed_term_dictionary: Vec<u8> = Vec::new();
         let mut decompressor: Decoder<'_, BufReader<&[u8]>> =
             Decoder::new(&compressed_term_dictionary[..])?;
@@ -54,12 +49,10 @@ async fn hoa(
         let cursor = Cursor::new(decompressed_term_dictionary);
         let buf_reader: BufReader<Cursor<Vec<u8>>> = BufReader::new(cursor);
 
-        reader
-            .seek(SeekFrom::Start(compressed_plist_offsets_offset))
+        let buffer2 = reader
+            .read_range(compressed_plist_offsets_offset, file_size - 16)
             .await?;
-        let mut buffer2: Vec<u8> =
-            vec![0u8; (file_size - compressed_plist_offsets_offset - 16) as usize];
-        reader.read(&mut buffer2).await?;
+
         decompressor = Decoder::new(&buffer2[..])?;
         let mut decompressed_serialized_plist_offsets: Vec<u8> =
             Vec::with_capacity(buffer2.len() as usize);
