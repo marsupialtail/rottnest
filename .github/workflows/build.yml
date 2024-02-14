@@ -17,5 +17,10 @@ jobs:
     - name: Build with Maturin
       run: |
         rustup default stable
-        maturin build --release --features py
+        maturin build --release --features py --out dist
+    
+    - uses: actions/upload-artifact@v2
+      with:
+        name: wheels
+        path: dist/*
 
