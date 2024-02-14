@@ -168,18 +168,24 @@ pub fn build_lava_natural_language(
 
     for (_, value) in inverted_index.iter() {
         // this usually saves around 20% of the space. Don't remember things that happen more than 1/4 of the time.
-        // let mut value_vec = if value.len() < (num_unique_uids / 4) as usize {
-        //     //@Rain can we get rid of this clone
-        //     value.clone().into_iter().collect()
-        // } else {
-        //     vec![u64::MAX]
-        // };
+        
+        let mut value_all = BTreeSet::new();
+        value_all.insert(u64::MAX);
+
+        let value_vec = if value.len() <= (num_unique_uids / 4) as usize {
+            //@Rain can we get rid of this clone
+            value
+        } else {
+            &value_all
+        };
+
+        // let value_vec = value;
 
         counter += 1;
 
         // value_vec.sort();
         // println!("{}", key);
-        let written = plist.add_plist(value)?;
+        let written = plist.add_plist(value_vec)?;
         if written > 1024 * 1024 || counter == inverted_index.len() as u64 {
             let bytes = plist.finalize_compression()?;
             file.write_all(&bytes)?;
@@ -189,8 +195,6 @@ pub fn build_lava_natural_language(
         }
     }
 
-    println!("{:?}", plist_offsets);
-    println!("{:?}", plist_elems);
 
     plist_offsets.append(&mut plist_elems);
 

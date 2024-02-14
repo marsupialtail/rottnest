@@ -38,13 +38,11 @@ impl<'a> PList<'a> {
                 .try_into()
                 .expect("data corruption"),
         );
-        println!("{}", compressed_plist_offsets_offset);
         let mut decompressed_plists: Vec<u8> = Vec::new();
         let mut decompressor =
             Decoder::new(&compressed[..compressed_plist_offsets_offset as usize])?;
         decompressor.read_to_end(&mut decompressed_plists)?;
 
-        println!("here");
 
         let mut decompressed_plist_offsets: Vec<u8> = Vec::new();
         let mut decompressor = Decoder::new(
@@ -63,6 +61,11 @@ impl<'a> PList<'a> {
                     [plist_offset as usize..plist_offset as usize + plist_size as usize],
             )
             .unwrap();
+            let test: BTreeSet<u64> = bincode::deserialize(
+                &decompressed_plists
+                    [plist_offset as usize..plist_offset as usize + plist_size as usize],
+            )
+            .unwrap();
             result.push(plist);
         }
 
@@ -70,7 +73,6 @@ impl<'a> PList<'a> {
     }
 
     pub fn add_plist(&mut self, plist: &BTreeSet<u64>) -> Result<usize> {
-        // println!("{:?}", plist);
         self.elems += plist.len() as u64;
         // serialize first
         let serialized = bincode::serialize(&plist).unwrap();
