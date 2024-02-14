@@ -8,7 +8,7 @@ jobs:
     runs-on: ubuntu-latest
 
     container:
-      image: ghcr.io/pyo3/maturin:latest
+      image: ghcr.io/pyo3/maturin
 
     steps:
     - uses: actions/checkout@v2
@@ -16,5 +16,6 @@ jobs:
 
     - name: Build with Maturin
       run: |
+        rustup default stable
         maturin build --release --features py
 
