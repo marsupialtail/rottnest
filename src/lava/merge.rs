@@ -61,7 +61,8 @@ impl PListChunkIterator {
             }
             let mut buffer3: Vec<u8> = vec![0u8; (self.plist_offsets[self.current_chunk_offset + 1] - self.plist_offsets[self.current_chunk_offset]) as usize];
             self.reader.read(&mut buffer3).await?;
-            self.current_chunk = PList::search_compressed(buffer3, (0..self.plist_elems[self.current_chunk_offset + 1]).collect()).unwrap();
+            self.current_chunk = PList::search_compressed(buffer3, 
+                (0..(self.plist_elems[self.current_chunk_offset + 1] - self.plist_elems[self.current_chunk_offset])).collect()).unwrap();
         }
 
         Ok(())
@@ -73,6 +74,7 @@ async fn hoa(
     condensed_lava_file: &str,
     operator: &mut Operator,
     lava_files: Vec<Cow<str>>,
+    uid_offsets: Vec<u64>
 ) -> Result<(), LavaError> // hawaiian for lava condensation
 {
     // instantiate a list of readers from lava_files
@@ -134,7 +136,6 @@ async fn hoa(
 
     let mut term_dictionary = String::new();
     let mut current_lines: Vec<Option<String>> = vec![None; decompressed_term_dictionaries.len()];
-    let mut plist_cursor: Vec<u64> = vec![0; decompressed_term_dictionaries.len()];
 
     // Initialize the current line for each reader
     for (i, reader) in decompressed_term_dictionaries.iter_mut().enumerate() {
@@ -172,9 +173,9 @@ async fn hoa(
                     // we need to read and decompress the plists
                     
                     let this_plist: Vec<u64> = plist_chunk_iterators[i].get_current();
-
+                    // println!("{:?} {:?}", this_plist, uid_offsets[i]);
                     for item in this_plist {
-                        plist.insert(item);
+                        plist.insert(item + uid_offsets[i]);
                     }
 
                     let _ = plist_chunk_iterators[i].increase_cursor().await;
@@ -209,6 +210,8 @@ async fn hoa(
     let compressed_term_dictionary = encode_all(bytes, 0).expect("Compression failed");
     let compressed_term_dict_offset = output_file.seek(SeekFrom::Current(0))?;
 
+    println!("merged compress dict size {:?} len {:?}", compressed_term_dictionary.len(), counter);
+
     output_file.write_all(&compressed_term_dictionary)?;
 
     let compressed_plist_offsets_offset = output_file.seek(SeekFrom::Current(0))?;
@@ -226,6 +229,7 @@ async fn hoa(
 pub fn merge_lava(
     condensed_lava_file: Cow<str>,
     lava_files: Vec<Cow<str>>,
+    uid_offsets: Vec<u64>
 ) -> Result<(), LavaError> {
     // you should only merge them on local disk. It's not worth random accessing S3 for this because of the request costs.
     // worry about running out of disk later. Assume you have a fast SSD for now.
@@ -234,5 +238,5 @@ pub fn merge_lava(
     builder.root(current_path.to_str().expect("no path"));
     let mut operator = Operator::new(builder)?.finish();
 
-    hoa(condensed_lava_file.as_ref(), &mut operator, lava_files)
+    hoa(condensed_lava_file.as_ref(), &mut operator, lava_files, uid_offsets)
 }

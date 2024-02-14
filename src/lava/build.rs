@@ -157,8 +157,9 @@ pub fn build_lava_natural_language(
 
     // Handle the compressed data (for example, saving to a file or sending over a network)
     println!(
-        "Compressed term dictionary length: {}",
-        compressed_term_dictionary.len()
+        "Compressed term dictionary size: {} len: {}",
+        compressed_term_dictionary.len(),
+        inverted_index.len()
     );
 
     let mut plist_offsets: Vec<u64> = vec![0];
@@ -166,11 +167,12 @@ pub fn build_lava_natural_language(
     let mut plist = PList::new()?;
     let mut counter: u64 = 0;
 
-    for (_, value) in inverted_index.iter() {
+    for (key, value) in inverted_index.iter() {
         // this usually saves around 20% of the space. Don't remember things that happen more than 1/4 of the time.
+        // but let's not do this because it makes everything else more complicated
         
         let mut value_all = BTreeSet::new();
-        value_all.insert(u64::MAX);
+        value_all.insert(0u64);
 
         let value_vec = if value.len() <= (num_unique_uids / 4) as usize {
             //@Rain can we get rid of this clone
@@ -184,7 +186,6 @@ pub fn build_lava_natural_language(
         counter += 1;
 
         // value_vec.sort();
-        // println!("{}", key);
         let written = plist.add_plist(value_vec)?;
         if written > 1024 * 1024 || counter == inverted_index.len() as u64 {
             let bytes = plist.finalize_compression()?;
@@ -194,6 +195,8 @@ pub fn build_lava_natural_language(
             plist = PList::new()?;
         }
     }
+
+
 
 
     plist_offsets.append(&mut plist_elems);

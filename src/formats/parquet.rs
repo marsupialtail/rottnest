@@ -368,7 +368,9 @@ pub async fn get_parquet_layout(
         let mut column_chunk_pages: Vec<parquet::column::page::Page> = Vec::new();
 
         let end = end - start;
+        let column_chunk_offset = start;
         start = 0;
+        
 
         while start != end {
             // this takes a slice of the entire thing for each page, granted it won't read the entire thing,
@@ -403,7 +405,7 @@ pub async fn get_parquet_layout(
                     parquet_layout
                         .data_page_sizes
                         .push(compressed_page_size as usize + header_len);
-                    parquet_layout.data_page_offsets.push(start as usize);
+                    parquet_layout.data_page_offsets.push((column_chunk_offset + start) as usize);
 
                     parquet_layout
                         .dictionary_page_sizes

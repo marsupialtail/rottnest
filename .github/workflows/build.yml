@@ -1,0 +1,20 @@
+name: Rust Build with Maturin
+
+on: [push, pull_request]
+
+jobs:
+  build:
+    name: Build Rust Project
+    runs-on: ubuntu-latest
+
+    container:
+      image: ghcr.io/pyo3/maturin:latest
+
+    steps:
+    - uses: actions/checkout@v2
+      name: Checkout code
+
+    - name: Build with Maturin
+      run: |
+        maturin build --release --features py
+

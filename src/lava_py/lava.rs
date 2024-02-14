@@ -14,10 +14,13 @@ pub fn search_lava(file: &str, query: &str) -> Result<Vec<u64>, LavaError> {
 pub fn merge_lava(
     condensed_lava_file: &PyString,
     lava_files: Vec<&PyString>,
+    uid_offsets: Vec<u64>
 ) -> Result<(), LavaError> {
+    println!("{:?}", uid_offsets);
     lava::merge_lava(
         condensed_lava_file.to_string_lossy(),
         lava_files.iter().map(|x| x.to_string_lossy()).collect(),
+        uid_offsets
     )
 }
 
