@@ -46,6 +46,17 @@ async fn read_buf(reader: &mut Reader, from: u64, to: u64) -> Result<Bytes, Lava
     Ok(res.freeze())
 }
 
+async fn read_offsets(reader: &mut Reader) -> Result<(u64, u64), LavaError> {
+    pin!(reader);
+    reader.seek(SeekFrom::End(-16)).await?;
+    let compressed_term_dictionary_offset = reader.read_u64_le().await?;
+    let compressed_plist_offsets_offset = reader.read_u64_le().await?;
+    Ok((
+        compressed_term_dictionary_offset,
+        compressed_plist_offsets_offset,
+    ))
+}
+
 #[tokio::main]
 async fn search_lava_async(
     operator: &mut Operator,
@@ -55,11 +66,8 @@ async fn search_lava_async(
     let file_size: u64 = operator.stat(file).await?.content_length();
     let mut reader = operator.clone().reader_with(file).await?;
 
-    let buffer = read_buf(&mut reader, file_size - 16, file_size - 8).await?;
-    let compressed_term_dictionary_offset = u64::from_le_bytes(buffer[..].try_into().unwrap());
-
-    let buffer = read_buf(&mut reader, file_size - 8, file_size).await?;
-    let compressed_plist_offsets_offset: u64 = u64::from_le_bytes(buffer[..].try_into().unwrap());
+    let (compressed_term_dictionary_offset, compressed_plist_offsets_offset) =
+        read_offsets(&mut reader).await?;
 
     // now read the term dictionary
     let compressed_term_dictionary = read_buf(
