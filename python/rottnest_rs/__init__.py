@@ -1,4 +1,4 @@
-# from .rottnest_rs import *
+import rottnest_rs as rottnest_rs
 from .make_lava import *
 
 __doc__ = rottnest_rs.__doc__

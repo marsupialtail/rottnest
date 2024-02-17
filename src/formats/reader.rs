@@ -1,5 +1,7 @@
 use bytes::{Bytes, BytesMut};
 use opendal::Reader;
+use opendal::Operator;
+use opendal::services::{Fs, S3};
 
 use std::io::SeekFrom;
 use std::ops::{Deref, DerefMut};
@@ -76,5 +78,62 @@ impl AsyncReader {
             compressed_term_dictionary_offset,
             compressed_plist_offsets_offset,
         ))
+    }
+}
+
+
+//dupilcate code for now
+pub(crate) struct S3Builder(S3);
+
+impl From<&str> for S3Builder {
+    fn from(file: &str) -> Self {
+        let mut builder = S3::default();
+        let mut iter = file[5..].split("/");
+
+        builder.bucket(iter.next().expect("malformed path"));
+        // Set the region. This is required for some services, if you don't care about it, for example Minio service, just set it to "auto", it will be ignored.
+        builder.region("us-west-2");
+        builder.enable_virtual_host_style();
+        builder.endpoint("https://tos-s3-cn-beijing.volces.com");
+        S3Builder(builder)
+    }
+}
+
+pub(crate) struct FsBuilder(Fs);
+
+impl From<&str> for FsBuilder {
+    fn from(folder: &str) -> Self {
+        let mut builder = Fs::default();
+        // let current_path = env::current_dir().expect("no path");
+        builder.root(folder);
+        FsBuilder(builder)
+    }
+}
+
+pub(crate) struct Operators(Operator);
+
+impl From<S3Builder> for Operators {
+    fn from(builder: S3Builder) -> Self {
+        Operators(
+            Operator::new(builder.0)
+                .expect("S3 builder construction error")
+                .finish(),
+        )
+    }
+}
+
+impl Operators {
+    pub(crate) fn into_inner(self) -> Operator {
+        self.0
+    }
+}
+
+impl From<FsBuilder> for Operators {
+    fn from(builder: FsBuilder) -> Self {
+        Operators(
+            Operator::new(builder.0)
+                .expect("Fs Builder construction error")
+                .finish(),
+        )
     }
 }
