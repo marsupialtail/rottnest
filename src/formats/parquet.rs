@@ -18,13 +18,15 @@ use parquet::{
     thrift::TSerializable,
     util::InMemoryPageIterator,
 };
+use tantivy::schema::is_valid_field_name;
 use thrift::protocol::TCompactInputProtocol;
 
 use opendal::raw::oio::ReadExt;
 use opendal::services::{Fs, S3};
-use opendal::{Operator, Reader};
+use opendal::Operator;
 
 use bytes::Bytes;
+use core::num;
 use std::convert::TryFrom;
 use std::io::{Read, SeekFrom};
 
@@ -36,7 +38,7 @@ use std::collections::HashMap;
 use std::{env, usize};
 use tokio::{self};
 
-use crate::lava::error::LavaError;
+use crate::{formats::reader::AsyncReader, lava::error::LavaError};
 
 //dupilcate code for now
 struct S3Builder(S3);
@@ -94,7 +96,7 @@ impl From<FsBuilder> for Operators {
     }
 }
 
-async fn get_reader_and_size_from_file(file: &str) -> Result<(usize, Reader), LavaError> {
+async fn get_reader_and_size_from_file(file: &str) -> Result<(usize, AsyncReader), LavaError> {
     let mut file_name = file.to_string();
     let operator = if file.starts_with("s3://") {
         file_name = file_name.replace("s3://", "");
@@ -109,13 +111,13 @@ async fn get_reader_and_size_from_file(file: &str) -> Result<(usize, Reader), La
     };
 
     let file_size: usize = operator.stat(&file_name).await?.content_length() as usize;
-    let reader: Reader = operator.clone().reader(&file_name).await?;
+    let reader: AsyncReader = operator.clone().reader(&file_name).await?.into();
 
     Ok((file_size, reader))
 }
 
 async fn parse_metadata(
-    reader: &mut Reader,
+    reader: &mut AsyncReader,
     file_size: usize,
 ) -> Result<ParquetMetaData, LavaError> {
     // check file is large enough to hold footer
@@ -350,20 +352,7 @@ pub async fn get_parquet_layout(
 
         let mut total_data_pages: usize = 0;
 
-        // let mut column_chunk_bytes = BytesMut::with_capacity((end - start) as usize);
-        let mut column_chunk_bytes = vec![0u8; (end - start) as usize];
-        reader.seek(SeekFrom::Start(start as u64)).await.unwrap();
-        // parallelize this please @Rain
-        let mut total_read: usize = 0;
-        while total_read < (end - start) as usize {
-            let read = reader.read(&mut column_chunk_bytes[total_read..]).await?;
-            if read == 0 {
-                // If read returns 0, it means EOF is reached
-                break;
-            }
-            total_read += read; // Update total bytes read
-        }
-        let column_chunk_bytes = Bytes::from(column_chunk_bytes);
+        let column_chunk_bytes = reader.read_range(start, end).await?;
 
         let mut column_chunk_pages: Vec<parquet::column::page::Page> = Vec::new();
 
@@ -557,10 +546,8 @@ pub async fn search_indexed_pages(
                         pages.push(dict_page);
                     }
 
-                    let mut page_bytes = vec![0; page_size];
-                    reader.seek(SeekFrom::Start(page_offset)).await.unwrap();
-                    reader.read(&mut page_bytes).await.unwrap();
-                    let page_bytes = Bytes::from(page_bytes);
+                    
+                    let page_bytes = reader.read_range(page_offset, page_offset + page_size as u64).await.unwrap();
                     let (header_len, header) = read_page_header(&page_bytes, 0).unwrap();
                     let page: Page = decode_page(
                         header,

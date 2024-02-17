@@ -2,7 +2,8 @@
 target
 Cargo.lock
 *.lava
+*.so
+python3/rottnest_rs/__pycache__
 output_file.bin
-python/rottnest_rs
 .vscode
 *.parquet
