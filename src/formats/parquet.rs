@@ -1,12 +1,12 @@
 use arrow::datatypes::ToByteSlice;
 use arrow::error::ArrowError;
 use arrow_array::{Array, StringArray};
+use log::debug;
 use parquet::{
     arrow::array_reader::make_byte_array_reader,
     basic::{Encoding, Type},
     column::page::Page,
     compression::{create_codec, Codec, CodecOptionsBuilder},
-    data_type::AsBytes,
     errors::ParquetError,
     file::{
         footer::{decode_footer, decode_metadata},
@@ -23,7 +23,6 @@ use thrift::protocol::TCompactInputProtocol;
 use opendal::raw::oio::ReadExt;
 
 use bytes::Bytes;
-use core::num;
 use std::convert::TryFrom;
 use std::io::{Read, SeekFrom};
 
@@ -35,8 +34,10 @@ use std::collections::HashMap;
 use std::{env, usize};
 use tokio::{self};
 
-use crate::{formats::reader::{AsyncReader, Operators, S3Builder, FsBuilder}, lava::error::LavaError};
-
+use crate::{
+    formats::reader::{AsyncReader, FsBuilder, Operators, S3Builder},
+    lava::error::LavaError,
+};
 
 async fn get_reader_and_size_from_file(file: &str) -> Result<(usize, AsyncReader), LavaError> {
     let mut file_name = file.to_string();
@@ -301,7 +302,6 @@ pub async fn get_parquet_layout(
         let end = end - start;
         let column_chunk_offset = start;
         start = 0;
-        
 
         while start != end {
             // this takes a slice of the entire thing for each page, granted it won't read the entire thing,
@@ -336,7 +336,9 @@ pub async fn get_parquet_layout(
                     parquet_layout
                         .data_page_sizes
                         .push(compressed_page_size as usize + header_len);
-                    parquet_layout.data_page_offsets.push((column_chunk_offset + start) as usize);
+                    parquet_layout
+                        .data_page_offsets
+                        .push((column_chunk_offset + start) as usize);
 
                     parquet_layout
                         .dictionary_page_sizes
@@ -410,7 +412,7 @@ pub struct MatchResult {
 #[tokio::main]
 pub async fn search_indexed_pages(
     query: String,
-    column_name: &str,
+    column_name: String,
     file_paths: Vec<String>,
     row_groups: Vec<usize>,
     page_offsets: Vec<u64>,
@@ -467,7 +469,8 @@ pub async fn search_indexed_pages(
                 let re = re.clone();
 
                 let handle = tokio::spawn(async move {
-                    let (file_size, mut reader) =
+                    debug!("tokio spawn thread: {:?}", std::thread::current().id());
+                    let (_file_size, mut reader) =
                         get_reader_and_size_from_file(&file_path).await.unwrap();
                     let mut pages: Vec<parquet::column::page::Page> = Vec::new();
                     if dict_page_size > 0 {
@@ -488,8 +491,10 @@ pub async fn search_indexed_pages(
                         pages.push(dict_page);
                     }
 
-                    
-                    let page_bytes = reader.read_range(page_offset, page_offset + page_size as u64).await.unwrap();
+                    let page_bytes = reader
+                        .read_range(page_offset, page_offset + page_size as u64)
+                        .await
+                        .unwrap();
                     let (header_len, header) = read_page_header(&page_bytes, 0).unwrap();
                     let page: Page = decode_page(
                         header,

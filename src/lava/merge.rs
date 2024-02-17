@@ -1,5 +1,4 @@
 use bincode;
-use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Cursor, Read, Seek, SeekFrom, Write};
@@ -9,7 +8,7 @@ use zstd::stream::read::Decoder;
 use opendal::raw::oio::ReadExt;
 use opendal::services::Fs;
 
-use opendal::{Operator, Reader};
+use opendal::Operator;
 use std::env;
 
 use crate::formats::reader::AsyncReader;
@@ -17,32 +16,35 @@ use crate::lava::error::LavaError;
 use crate::lava::plist::PList;
 
 struct PListChunkIterator {
-    reader : AsyncReader,
+    reader: AsyncReader,
     current_offset_in_chunk: usize,
     current_chunk_offset: usize,
     current_chunk: Vec<Vec<u64>>,
     plist_offsets: Vec<u64>,
-    plist_elems: Vec<u64>
+    plist_elems: Vec<u64>,
 }
-
-
 
 impl PListChunkIterator {
     // take ownership of the data structures
-    pub async fn new (mut reader: AsyncReader, plist_offsets: Vec<u64>, plist_elems: Vec<u64>) -> Result<Self, LavaError> {
+    pub async fn new(
+        mut reader: AsyncReader,
+        plist_offsets: Vec<u64>,
+        plist_elems: Vec<u64>,
+    ) -> Result<Self, LavaError> {
         // read the first chunk
         reader.seek(SeekFrom::Start(plist_offsets[0])).await?;
         let mut buffer3: Vec<u8> = vec![0u8; (plist_offsets[1] - plist_offsets[0]) as usize];
         reader.read(&mut buffer3).await?;
-        let mut result: Vec<Vec<u64>> = PList::search_compressed(buffer3, (0..plist_elems[1]).collect()).unwrap();
- 
+        let result: Vec<Vec<u64>> =
+            PList::search_compressed(buffer3, (0..plist_elems[1]).collect()).unwrap();
+
         Ok(Self {
             reader: reader,
             current_offset_in_chunk: 0,
             current_chunk_offset: 0,
             current_chunk: result,
             plist_offsets: plist_offsets,
-            plist_elems: plist_elems
+            plist_elems: plist_elems,
         })
     }
 
@@ -59,10 +61,20 @@ impl PListChunkIterator {
             if self.current_chunk_offset + 2 > self.plist_offsets.len() {
                 return Err(LavaError::Parse("out of chunks".to_string()));
             }
-            let mut buffer3: Vec<u8> = vec![0u8; (self.plist_offsets[self.current_chunk_offset + 1] - self.plist_offsets[self.current_chunk_offset]) as usize];
+            let mut buffer3: Vec<u8> = vec![
+                0u8;
+                (self.plist_offsets[self.current_chunk_offset + 1]
+                    - self.plist_offsets[self.current_chunk_offset])
+                    as usize
+            ];
             self.reader.read(&mut buffer3).await?;
-            self.current_chunk = PList::search_compressed(buffer3, 
-                (0..(self.plist_elems[self.current_chunk_offset + 1] - self.plist_elems[self.current_chunk_offset])).collect()).unwrap();
+            self.current_chunk = PList::search_compressed(
+                buffer3,
+                (0..(self.plist_elems[self.current_chunk_offset + 1]
+                    - self.plist_elems[self.current_chunk_offset]))
+                    .collect(),
+            )
+            .unwrap();
         }
 
         Ok(())
@@ -73,8 +85,8 @@ impl PListChunkIterator {
 async fn hoa(
     condensed_lava_file: &str,
     operator: &mut Operator,
-    lava_files: Vec<Cow<str>>,
-    uid_offsets: Vec<u64>
+    lava_files: Vec<String>,
+    uid_offsets: Vec<u64>,
 ) -> Result<(), LavaError> // hawaiian for lava condensation
 {
     // instantiate a list of readers from lava_files
@@ -127,9 +139,14 @@ async fn hoa(
 
         decompressed_term_dictionaries.push(buf_reader);
         file_sizes.push(file_size);
-        plist_chunk_iterators.push(PListChunkIterator::new(reader, 
-            this_plist_offsets[.. num_elements].to_vec(), 
-            this_plist_offsets[num_elements ..].to_vec()).await?);
+        plist_chunk_iterators.push(
+            PListChunkIterator::new(
+                reader,
+                this_plist_offsets[..num_elements].to_vec(),
+                this_plist_offsets[num_elements..].to_vec(),
+            )
+            .await?,
+        );
     }
 
     // now do the merge sort
@@ -171,7 +188,7 @@ async fn hoa(
                 let line = current_lines[i].as_ref().unwrap();
                 if line.eq(&smallest_line) {
                     // we need to read and decompress the plists
-                    
+
                     let this_plist: Vec<u64> = plist_chunk_iterators[i].get_current();
                     // println!("{:?} {:?}", this_plist, uid_offsets[i]);
                     for item in this_plist {
@@ -198,7 +215,8 @@ async fn hoa(
         if written > 1024 * 1024 || current_lines.iter().all(Option::is_none) {
             let bytes = plist_chunk.finalize_compression()?;
             output_file.write_all(&bytes)?;
-            new_plist_offsets.push(new_plist_offsets[new_plist_offsets.len() - 1] + bytes.len() as u64);
+            new_plist_offsets
+                .push(new_plist_offsets[new_plist_offsets.len() - 1] + bytes.len() as u64);
             new_plist_elems.push(counter);
             plist_chunk = PList::new()?;
         }
@@ -210,7 +228,11 @@ async fn hoa(
     let compressed_term_dictionary = encode_all(bytes, 0).expect("Compression failed");
     let compressed_term_dict_offset = output_file.seek(SeekFrom::Current(0))?;
 
-    println!("merged compress dict size {:?} len {:?}", compressed_term_dictionary.len(), counter);
+    println!(
+        "merged compress dict size {:?} len {:?}",
+        compressed_term_dictionary.len(),
+        counter
+    );
 
     output_file.write_all(&compressed_term_dictionary)?;
 
@@ -227,9 +249,9 @@ async fn hoa(
 }
 
 pub fn merge_lava(
-    condensed_lava_file: Cow<str>,
-    lava_files: Vec<Cow<str>>,
-    uid_offsets: Vec<u64>
+    condensed_lava_file: String,
+    lava_files: Vec<String>,
+    uid_offsets: Vec<u64>,
 ) -> Result<(), LavaError> {
     // you should only merge them on local disk. It's not worth random accessing S3 for this because of the request costs.
     // worry about running out of disk later. Assume you have a fast SSD for now.
@@ -238,5 +260,10 @@ pub fn merge_lava(
     builder.root(current_path.to_str().expect("no path"));
     let mut operator = Operator::new(builder)?.finish();
 
-    hoa(condensed_lava_file.as_ref(), &mut operator, lava_files, uid_offsets)
+    hoa(
+        condensed_lava_file.as_ref(),
+        &mut operator,
+        lava_files,
+        uid_offsets,
+    )
 }
