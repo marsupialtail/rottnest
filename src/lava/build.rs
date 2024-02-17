@@ -4,7 +4,6 @@ use tantivy::tokenizer::*;
 use tantivy_jieba::JiebaTokenizer;
 
 use bincode;
-use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
@@ -13,7 +12,7 @@ use std::fs::File;
 use std::io::{Seek, SeekFrom, Write};
 use zstd::stream::encode_all;
 
-use whatlang::{detect, Lang};
+use whatlang::Lang;
 
 use lazy_static::lazy_static;
 
@@ -64,7 +63,7 @@ It is important to put the posting lists first. Just trust me bro.
 /// Function that tokenizes the input text and returns a list of tokens.
 
 pub fn build_lava_natural_language(
-    output_file_name: Cow<str>,
+    output_file_name: String,
     array: ArrayData,
     uid: ArrayData,
     language: Option<ArrayData>,
@@ -99,7 +98,7 @@ pub fn build_lava_natural_language(
         ));
     }
 
-    let language = match language {
+    let _language = match language {
         Some(x) => {
             let array = make_array(x);
 
@@ -150,7 +149,7 @@ pub fn build_lava_natural_language(
         term_dictionary.push_str(key);
     }
 
-    let mut file = File::create(output_file_name.as_ref())?;
+    let mut file = File::create(output_file_name)?;
 
     let bytes = term_dictionary.as_bytes();
     let compressed_term_dictionary = encode_all(bytes, 0).expect("Compression failed");
@@ -167,10 +166,10 @@ pub fn build_lava_natural_language(
     let mut plist = PList::new()?;
     let mut counter: u64 = 0;
 
-    for (key, value) in inverted_index.iter() {
+    for (_key, value) in inverted_index.iter() {
         // this usually saves around 20% of the space. Don't remember things that happen more than 1/4 of the time.
         // but let's not do this because it makes everything else more complicated
-        
+
         let mut value_all = BTreeSet::new();
         value_all.insert(0u64);
 
@@ -195,9 +194,6 @@ pub fn build_lava_natural_language(
             plist = PList::new()?;
         }
     }
-
-
-
 
     plist_offsets.append(&mut plist_elems);
 

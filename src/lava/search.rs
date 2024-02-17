@@ -1,15 +1,10 @@
-use bytes::{Bytes, BytesMut};
-use opendal::{
-    services::{Fs, S3},
-    Operator, Reader,
-};
+use opendal::Operator;
 use regex::Regex;
 
 use std::{
     collections::HashMap,
     io::{BufRead, BufReader, Cursor, Read, SeekFrom},
 };
-use tokio::pin;
 use zstd::stream::read::Decoder;
 
 use std::env;
@@ -17,16 +12,19 @@ use std::env;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
 use crate::lava::plist::PList;
-use crate::{formats::reader::{AsyncReader, Operators, S3Builder, FsBuilder}, lava::error::LavaError};
+use crate::{
+    formats::reader::{AsyncReader, FsBuilder, Operators, S3Builder},
+    lava::error::LavaError,
+};
 
 #[tokio::main]
 async fn search_lava_async(
     operator: &mut Operator,
-    file: &str,
-    query: &str,
+    file: String,
+    query: String,
 ) -> Result<Vec<u64>, LavaError> {
-    let file_size: u64 = operator.stat(file).await?.content_length();
-    let mut reader: AsyncReader = operator.clone().reader_with(file).await?.into();
+    let file_size: u64 = operator.stat(&file).await?.content_length();
+    let mut reader: AsyncReader = operator.clone().reader_with(&file).await?.into();
 
     let (compressed_term_dictionary_offset, compressed_plist_offsets_offset) =
         reader.read_offsets().await?;
@@ -47,7 +45,7 @@ async fn search_lava_async(
     let cursor = Cursor::new(decompressed_term_dictionary);
     let buf_reader: BufReader<Cursor<Vec<u8>>> = BufReader::new(cursor);
     let mut matched: Vec<u64> = Vec::new();
-    let re: Regex = Regex::new(query).unwrap();
+    let re: Regex = Regex::new(&query).unwrap();
 
     let mut counter: u64 = 0;
     for line in buf_reader.lines() {
@@ -117,9 +115,9 @@ async fn search_lava_async(
     Ok(plist_result)
 }
 
-pub fn search_lava(file: &str, query: &str) -> Result<Vec<u64>, LavaError> {
+pub fn search_lava(file: String, query: String) -> Result<Vec<u64>, LavaError> {
     let mut operator = if file.starts_with("s3://") {
-        Operators::from(S3Builder::from(file)).into_inner()
+        Operators::from(S3Builder::from(file.as_str())).into_inner()
     } else {
         let current_path = env::current_dir()?;
         Operators::from(FsBuilder::from(current_path.to_str().expect("no path"))).into_inner()
@@ -132,7 +130,7 @@ pub fn search_lava(file: &str, query: &str) -> Result<Vec<u64>, LavaError> {
     };
 
     println!("Searching {}", filename);
-    search_lava_async(&mut operator, &filename, query)
+    search_lava_async(&mut operator, filename, query)
 }
 
 #[cfg(test)]
@@ -144,7 +142,7 @@ mod tests {
         let file = "content_split.lava";
         let query = "helsinki";
 
-        let res = search_lava(file, query).unwrap();
+        let res = search_lava(file.to_string(), query.to_string()).unwrap();
 
         println!("{:?}", res);
     }

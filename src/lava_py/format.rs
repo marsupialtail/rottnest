@@ -1,9 +1,8 @@
 use crate::formats::{parquet, MatchResult, ParquetLayout};
 use crate::lava::error::LavaError;
-use arrow::array::ArrayData;
-use arrow::pyarrow::{FromPyArrow, PyArrowException, PyArrowType, ToPyArrow};
+use arrow::pyarrow::ToPyArrow;
 use pyo3::prelude::*;
-use pyo3::{pyfunction, types::PyDict, types::PyString, PyAny};
+use pyo3::{pyfunction, types::PyString};
 
 #[pyclass]
 pub struct ParquetLayoutWrapper {
@@ -62,11 +61,14 @@ impl From<MatchResult> for MatchResultWrapper {
 
 #[pyfunction]
 pub fn get_parquet_layout(
-    column_name: &PyString,
-    file: &str,
     py: Python,
+    column_name: &PyString,
+    file: &PyString,
 ) -> Result<(PyObject, ParquetLayoutWrapper), LavaError> {
-    let (arr, parquet_layout) = parquet::get_parquet_layout(&column_name.to_string(), file)?;
+    let column_name = column_name.to_string();
+    let file = file.to_string();
+    let (arr, parquet_layout) =
+        py.allow_threads(|| parquet::get_parquet_layout(&column_name, &file))?;
     Ok((
         arr.to_pyarrow(py).unwrap(),
         ParquetLayoutWrapper::from_parquet_layout(parquet_layout),
@@ -75,6 +77,7 @@ pub fn get_parquet_layout(
 
 #[pyfunction]
 pub fn search_indexed_pages(
+    py: Python,
     query: &PyString,
     column_name: &PyString,
     file_paths: Vec<&PyString>,
@@ -83,14 +86,20 @@ pub fn search_indexed_pages(
     page_sizes: Vec<usize>,
     dict_page_sizes: Vec<usize>,
 ) -> Result<Vec<MatchResultWrapper>, LavaError> {
-    let match_result = parquet::search_indexed_pages(
-        query.to_string(),
-        &column_name.to_string(),
-        file_paths.iter().map(|x| x.to_string()).collect(),
-        row_groups,
-        page_offsets.iter().map(|x| *x as u64).collect(),
-        page_sizes,
-        dict_page_sizes, // 0 means no dict page
-    )?;
+    let query = query.to_string();
+    let column_name = column_name.to_string();
+    let file_paths: Vec<String> = file_paths.iter().map(|x| x.to_string()).collect();
+    let page_offsets: Vec<u64> = page_offsets.iter().map(|x| *x as u64).collect();
+    let match_result = py.allow_threads(|| {
+        parquet::search_indexed_pages(
+            query,
+            column_name,
+            file_paths,
+            row_groups,
+            page_offsets,
+            page_sizes,
+            dict_page_sizes, // 0 means no dict page
+        )
+    })?;
     Ok(match_result.into_iter().map(|x| x.into()).collect())
 }
