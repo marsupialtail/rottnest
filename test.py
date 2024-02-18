@@ -66,22 +66,27 @@ def merge_test():
 # index_file_natural_language("train.parquet","raw_content", name = index_name)
 # search_index_natural_language(f"{index_name}.parquet", f"{index_name}.lava", "Helsinki")
 
-import time
-start = time.time()
-index_name = "content_split"
-# rottnest_rs.index_file_natural_language("ecom_orig.parquet","content_split", name = index_name)
-rottnest_rs.search_index_natural_language(f"{index_name}", "Helsinki")
-epoch = time.time() - start
-print("search time", epoch)
-
-# index_name = "bump1"
 # import time
 # start = time.time()
-# # rottnest_rs.index_file_natural_language("s3://maas-data/data_for_mass_wangqian/en/part-03060-21668627-949b-4858-97ce-a4b0f4fc2df4-c000.gz.parquet","text", name = index_name)
-# print("index time", time.time() - start)
-# start = time.time()
-# rottnest_rs.search_index_natural_language(index_name, "Publish")
-# print("search time", time.time() - start)
+# index_name = "content_split"
+# rottnest_rs.index_file_natural_language("ecom_orig.parquet","content_split", name = index_name)
+# # rottnest_rs.search_index_natural_language(f"{index_name}", "Helsinki")
+# epoch = time.time() - start
+# print("index time", epoch)
+
+# index_name = "bump1"
+index_name = "bump3"
+import time
+start = time.time()
+# rottnest_rs.index_file_natural_language("s3://maas-data/data_for_mass_wangqian/en/part-03060-21668627-949b-4858-97ce-a4b0f4fc2df4-c000.gz.parquet","text", name = index_name)
+rottnest_rs.index_file_natural_language("part-03060-21668627-949b-4858-97ce-a4b0f4fc2df4-c000.gz.parquet","text", name = index_name)
+print("index time", time.time() - start)
+start = time.time()
+result = rottnest_rs.search_index_natural_language(index_name, "Publish")
+print("search time", time.time() - start)
+# if result is not None:
+#     for res in result:
+#         print(str(res))
 
 # index_name = "bump2"
 # rottnest_rs.index_file_natural_language("data/part-03062-21668627-949b-4858-97ce-a4b0f4fc2df4-c000.gz.parquet","text", name = index_name)

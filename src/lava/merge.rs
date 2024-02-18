@@ -11,7 +11,7 @@ use opendal::services::Fs;
 use opendal::Operator;
 use std::env;
 
-use crate::formats::reader::AsyncReader;
+use crate::formats::reader::{AsyncReader, READER_BUFFER_SIZE};
 use crate::lava::error::LavaError;
 use crate::lava::plist::PList;
 
@@ -104,7 +104,12 @@ async fn hoa(
     for file in lava_files {
         let file = file.as_ref();
         let file_size: u64 = operator.stat(file).await?.content_length();
-        let mut reader: AsyncReader = operator.clone().reader(file).await?.into();
+        let mut reader: AsyncReader = operator
+            .clone()
+            .reader_with(file)
+            .buffer(READER_BUFFER_SIZE)
+            .await?
+            .into();
 
         let (compressed_term_dict_offset, compressed_plist_offsets_offset) =
             reader.read_offsets().await?;
