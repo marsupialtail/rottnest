@@ -3,7 +3,8 @@ target
 Cargo.lock
 *.lava
 *.so
-python3/rottnest_rs/__pycache__
+__pycache__
 output_file.bin
 .vscode
 *.parquet
+*.meta

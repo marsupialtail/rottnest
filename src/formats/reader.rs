@@ -1,7 +1,7 @@
 use bytes::{Bytes, BytesMut};
-use opendal::Reader;
-use opendal::Operator;
 use opendal::services::{Fs, S3};
+use opendal::Operator;
+use opendal::Reader;
 
 use std::io::SeekFrom;
 use std::ops::{Deref, DerefMut};
@@ -11,6 +11,8 @@ use tokio::pin;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
 use crate::lava::error::LavaError;
+
+pub const READER_BUFFER_SIZE: usize = 4 * 1024 * 1024;
 
 pub struct AsyncReader {
     reader: Reader,
@@ -80,7 +82,6 @@ impl AsyncReader {
         ))
     }
 }
-
 
 //dupilcate code for now
 pub(crate) struct S3Builder(S3);

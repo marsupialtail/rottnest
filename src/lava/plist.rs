@@ -6,7 +6,7 @@ use std::{
 use zstd::stream::read::Decoder;
 use zstd::stream::write::Encoder;
 
-use std::io::{BufRead, BufReader, Read, SeekFrom, Write};
+use std::io::{Read, Write};
 use zstd::stream::encode_all;
 
 pub struct PList<'a> {
@@ -38,18 +38,18 @@ impl<'a> PList<'a> {
                 .try_into()
                 .expect("data corruption"),
         );
+
         let mut decompressed_plists: Vec<u8> = Vec::new();
         let mut decompressor =
             Decoder::new(&compressed[..compressed_plist_offsets_offset as usize])?;
         decompressor.read_to_end(&mut decompressed_plists)?;
-
 
         let mut decompressed_plist_offsets: Vec<u8> = Vec::new();
         let mut decompressor = Decoder::new(
             &compressed[compressed_plist_offsets_offset as usize..compressed.len() as usize - 8],
         )?;
         decompressor.read_to_end(&mut decompressed_plist_offsets)?;
-        let mut decompressed_plist_offsets: Vec<u64> =
+        let decompressed_plist_offsets: Vec<u64> =
             bincode::deserialize(&decompressed_plist_offsets).unwrap();
 
         let mut result = Vec::new();
@@ -57,11 +57,6 @@ impl<'a> PList<'a> {
             let plist_offset = decompressed_plist_offsets[index as usize];
             let plist_size = decompressed_plist_offsets[index as usize + 1] - plist_offset;
             let plist: Vec<u64> = bincode::deserialize(
-                &decompressed_plists
-                    [plist_offset as usize..plist_offset as usize + plist_size as usize],
-            )
-            .unwrap();
-            let test: BTreeSet<u64> = bincode::deserialize(
                 &decompressed_plists
                     [plist_offset as usize..plist_offset as usize + plist_size as usize],
             )
@@ -88,7 +83,7 @@ impl<'a> PList<'a> {
     }
 
     // Example method to finalize compression and retrieve compressed data
-    pub fn finalize_compression(mut self) -> Result<Vec<u8>> {
+    pub fn finalize_compression(self) -> Result<Vec<u8>> {
         // Finish compression and retrieve the inner Cursor<Vec<u8>>
 
         let mut cursor = self.compressor.finish()?;
