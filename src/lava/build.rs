@@ -62,7 +62,8 @@ It is important to put the posting lists first. Just trust me bro.
 
 /// Function that tokenizes the input text and returns a list of tokens.
 
-pub fn build_lava_natural_language(
+#[tokio::main]
+pub async fn build_lava_natural_language(
     output_file_name: String,
     array: ArrayData,
     uid: ArrayData,
@@ -114,10 +115,12 @@ pub fn build_lava_natural_language(
     };
 
     // let mut tokens: Vec<Vec<String>> = Vec::new();
-    let mut inverted_index: BTreeMap<String, BTreeSet<u64>> = BTreeMap::new();
+
+    let mut join_handles = Vec::new();
 
     for i in 0..array.len() {
-        let text = array.value(i);
+        let text = array.value(i).to_string();
+        let uid = uid.value(i);
         // let lang = if let Some(ref language) = language {
         //     Lang::from_code(language.value(i))
         // } else {
@@ -126,21 +129,36 @@ pub fn build_lava_natural_language(
         // .unwrap_or(Lang::Eng);
 
         // let mut tokenizer = TOKENIZERS.get(&lang).unwrap_or(&DEFAULT_TOKENIZER).clone();
+        let join_handle = tokio::spawn(async move {
+            // log::info!("thread id: {:?}", std::thread::current().id());
+            // let mut inverted_index: BTreeMap<String, BTreeSet<u64>> = BTreeMap::new();
+            let mut tokenizer = DEFAULT_TOKENIZER.clone();
+            // println!("text: {} {}", text, detect(text).unwrap_or(Info::new(Script::Latin, Lang::Eng, 0.0)).lang());
 
-        let mut tokenizer = DEFAULT_TOKENIZER.clone();
-        // println!("text: {} {}", text, detect(text).unwrap_or(Info::new(Script::Latin, Lang::Eng, 0.0)).lang());
+            let mut token_stream = tokenizer.token_stream(&text);
+            // let mut this_tokens = Vec::new();
+            let mut entry_set = BTreeSet::new();
+            while let Some(token) = token_stream.next() {
+                // this_tokens.push(token.text.to_string());
+                entry_set.insert(format!("{}\n", token.text));
+            }
 
-        // The following code can be optimized as multiple threads https://docs.rs/futures/0.3.30/futures/executor/struct.ThreadPool.html
-        let mut token_stream = tokenizer.token_stream(text);
-        // let mut this_tokens = Vec::new();
-        while let Some(token) = token_stream.next() {
-            // this_tokens.push(token.text.to_string());
-            inverted_index
-                .entry(format!("{}\n", token.text))
-                .or_insert_with(BTreeSet::new)
-                .insert(uid.value(i));
-        }
+            (entry_set, uid)
+        });
+        join_handles.push(join_handle);
         // tokens.push(this_tokens);
+    }
+
+    let mut inverted_index: BTreeMap<String, BTreeSet<u64>> = BTreeMap::new();
+    let res = futures::future::join_all(join_handles).await;
+    for r in res {
+        let (entry_set, uid) = r.unwrap();
+        for key in entry_set {
+            inverted_index
+                .entry(key)
+                .or_insert_with(BTreeSet::new)
+                .insert(uid);
+        }
     }
 
     let total_length: usize = inverted_index.keys().map(|k| k.len()).sum();

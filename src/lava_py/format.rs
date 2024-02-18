@@ -1,3 +1,5 @@
+use std::hash::{DefaultHasher, Hash, Hasher};
+
 use crate::formats::{parquet, MatchResult, ParquetLayout};
 use crate::lava::error::LavaError;
 use arrow::pyarrow::ToPyArrow;
@@ -45,6 +47,33 @@ pub struct MatchResultWrapper {
     pub offset_in_row_group: usize,
     #[pyo3(get, set)]
     pub matched: String,
+}
+
+#[pymethods]
+impl MatchResultWrapper {
+    fn __repr__(slf: &PyCell<Self>) -> PyResult<String> {
+        Ok(format!(
+            "MatchResult(file_path={}, column_index={}, row_group={}, offset_in_row_group={}, matched={})",
+            slf.borrow().file_path, slf.borrow().column_index, slf.borrow().row_group, slf.borrow().offset_in_row_group, slf.borrow().matched
+        ))
+    }
+
+    fn __str__(&self) -> String {
+        format!(
+            "MatchResult(file_path={}, column_index={}, row_group={}, offset_in_row_group={}, matched={})",
+            self.file_path, self.column_index, self.row_group, self.offset_in_row_group, self.matched
+        )
+    }
+
+    fn __hash__(&self) -> PyResult<isize> {
+        let mut hasher = DefaultHasher::new();
+        self.file_path.hash(&mut hasher);
+        self.column_index.hash(&mut hasher);
+        self.row_group.hash(&mut hasher);
+        self.offset_in_row_group.hash(&mut hasher);
+        self.matched.hash(&mut hasher);
+        Ok(hasher.finish() as isize)
+    }
 }
 
 impl From<MatchResult> for MatchResultWrapper {

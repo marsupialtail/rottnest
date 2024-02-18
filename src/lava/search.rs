@@ -11,7 +11,7 @@ use std::env;
 
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
-use crate::lava::plist::PList;
+use crate::{formats::reader::READER_BUFFER_SIZE, lava::plist::PList};
 use crate::{
     formats::reader::{AsyncReader, FsBuilder, Operators, S3Builder},
     lava::error::LavaError,
@@ -24,7 +24,12 @@ async fn search_lava_async(
     query: String,
 ) -> Result<Vec<u64>, LavaError> {
     let file_size: u64 = operator.stat(&file).await?.content_length();
-    let mut reader: AsyncReader = operator.clone().reader_with(&file).await?.into();
+    let mut reader: AsyncReader = operator
+        .clone()
+        .reader_with(&file)
+        .buffer(READER_BUFFER_SIZE)
+        .await?
+        .into();
 
     let (compressed_term_dictionary_offset, compressed_plist_offsets_offset) =
         reader.read_offsets().await?;
@@ -100,10 +105,13 @@ async fn search_lava_async(
         reader
             .seek(SeekFrom::Start(plist_offsets[idx as usize]))
             .await?;
-        let mut buffer3: Vec<u8> =
-            vec![0u8; (plist_offsets[(idx + 1) as usize] - plist_offsets[idx as usize]) as usize];
-        reader.read(&mut buffer3).await?;
-        let mut result: Vec<u64> = PList::search_compressed(buffer3, offsets)
+        let buffer3 = reader
+            .read_range(
+                plist_offsets[idx as usize],
+                plist_offsets[(idx + 1) as usize],
+            )
+            .await?;
+        let mut result: Vec<u64> = PList::search_compressed(buffer3.to_vec(), offsets)
             .unwrap()
             .into_iter()
             .flatten()

@@ -39,6 +39,8 @@ use crate::{
     lava::error::LavaError,
 };
 
+use super::reader::READER_BUFFER_SIZE;
+
 async fn get_reader_and_size_from_file(file: &str) -> Result<(usize, AsyncReader), LavaError> {
     let mut file_name = file.to_string();
     let operator = if file.starts_with("s3://") {
@@ -54,7 +56,12 @@ async fn get_reader_and_size_from_file(file: &str) -> Result<(usize, AsyncReader
     };
 
     let file_size: usize = operator.stat(&file_name).await?.content_length() as usize;
-    let reader: AsyncReader = operator.clone().reader(&file_name).await?.into();
+    let reader: AsyncReader = operator
+        .clone()
+        .reader_with(&file_name)
+        .buffer(READER_BUFFER_SIZE)
+        .await?
+        .into();
 
     Ok((file_size, reader))
 }
@@ -279,7 +286,8 @@ pub async fn get_parquet_layout(
             column_name, file_path
         ));
 
-    // @rain we should parallelize this across row groups using tokio
+    //TODO: @rain we should parallelize this across row groups using tokio
+    // this need to refactor the ParquetLayout data structure, since it won't cost too much time, postpone for now.
 
     for row_group in 0..metadata.num_row_groups() {
         let column = metadata.row_group(row_group).column(column_index);
@@ -548,10 +556,10 @@ pub async fn search_indexed_pages(
         .collect::<Vec<_>>()
         .await;
 
-    let _res: Vec<std::prelude::v1::Result<Vec<MatchResult>, tokio::task::JoinError>> =
+    let res: Vec<std::prelude::v1::Result<Vec<MatchResult>, tokio::task::JoinError>> =
         futures::future::join_all(iter).await;
     let result: Result<Vec<MatchResult>, tokio::task::JoinError> =
-        _res.into_iter().try_fold(Vec::new(), |mut acc, r| {
+        res.into_iter().try_fold(Vec::new(), |mut acc, r| {
             r.map(|inner_vec| {
                 acc.extend(inner_vec);
                 acc

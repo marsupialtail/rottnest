@@ -38,6 +38,7 @@ impl<'a> PList<'a> {
                 .try_into()
                 .expect("data corruption"),
         );
+
         let mut decompressed_plists: Vec<u8> = Vec::new();
         let mut decompressor =
             Decoder::new(&compressed[..compressed_plist_offsets_offset as usize])?;
