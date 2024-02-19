@@ -1,11 +1,11 @@
 [package]
-name = "rottnest_rs"
-version = "0.1.0"
+name = "rottnest"
+version = "1.1.0"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [lib]
-name = "rottnest_rs"
+name = "rottnest"
 crate-type = ["cdylib"]
 
 [features]

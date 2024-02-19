@@ -1,5 +1,5 @@
-use std::hash::{DefaultHasher, Hash, Hasher};
-
+use std::hash::{Hash, Hasher};
+use std::collections::hash_map::DefaultHasher;
 use crate::formats::{parquet, MatchResult, ParquetLayout};
 use crate::lava::error::LavaError;
 use arrow::pyarrow::ToPyArrow;

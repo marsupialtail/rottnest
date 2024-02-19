@@ -1,7 +1,7 @@
 import pyarrow
 import pyarrow.parquet as pq
 from typing import List
-import rottnest_rs.rottnest_rs as rottnest_rs
+import rottnest.rottnest as rottnest
 from typing import List, Optional
 import uuid
 import polars
@@ -9,7 +9,7 @@ import numpy as np
 
 def index_file_natural_language(file_path: List[str], column_name: str, name: Optional[str]):
 
-    arr, layout = rottnest_rs.get_parquet_layout(column_name, file_path)
+    arr, layout = rottnest.get_parquet_layout(column_name, file_path)
     data_page_num_rows = np.array(layout.data_page_num_rows)
     uid = np.repeat(np.arange(len(data_page_num_rows)), data_page_num_rows) + 1
 
@@ -27,7 +27,7 @@ def index_file_natural_language(file_path: List[str], column_name: str, name: Op
     name = uuid.uuid4().hex if name is None else name
 
     file_data.write_parquet(f"{name}.meta")
-    print(rottnest_rs.build_lava_natural_language(f"{name}.lava", arr, pyarrow.array(uid.astype(np.uint64))))
+    print(rottnest.build_lava_natural_language(f"{name}.lava", arr, pyarrow.array(uid.astype(np.uint64))))
 
 def merge_index_natural_language(new_index_name: str, index_names: List[str]):
     assert len(index_names) > 1
@@ -38,7 +38,7 @@ def merge_index_natural_language(new_index_name: str, index_names: List[str]):
     offsets = np.cumsum([0] + metadata_lens)[:-1]
     metadatas = [metadata.with_columns(polars.col("uid") + offsets[i]) for i, metadata in enumerate(metadatas)]
 
-    rottnest_rs.merge_lava(f"{new_index_name}.lava", [f"{name}.lava" for name in index_names], offsets)
+    rottnest.merge_lava(f"{new_index_name}.lava", [f"{name}.lava" for name in index_names], offsets)
     polars.concat(metadatas).write_parquet(f"{new_index_name}.meta")
 
 def search_index_natural_language(index_name, query, mode = "exact"):
@@ -47,7 +47,7 @@ def search_index_natural_language(index_name, query, mode = "exact"):
 
     metadata_file = f"{index_name}.meta"
     index_file = f"{index_name}.lava"
-    uids = polars.from_dict({"uid":rottnest_rs.search_lava(index_file, query if mode == "substring" else f"^{query}$")})
+    uids = polars.from_dict({"uid":rottnest.search_lava(index_file, query if mode == "substring" else f"^{query}$")})
     
     print(uids)
     if len(uids) == 0:
@@ -68,6 +68,6 @@ def search_index_natural_language(index_name, query, mode = "exact"):
         
     metadata = polars.concat([metadata.filter(polars.col("row_groups") != -1), expanded])
 
-    result = rottnest_rs.search_indexed_pages(query, column_name, metadata["file_path"].to_list(), metadata["row_groups"].to_list(),
+    result = rottnest.search_indexed_pages(query, column_name, metadata["file_path"].to_list(), metadata["row_groups"].to_list(),
                                      metadata["data_page_offsets"].to_list(), metadata["data_page_sizes"].to_list(), metadata["dictionary_page_sizes"].to_list())
     return result

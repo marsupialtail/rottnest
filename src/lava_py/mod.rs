@@ -4,7 +4,7 @@ mod format;
 mod lava;
 
 #[pymodule]
-fn rottnest_rs(_py: Python, m: &PyModule) -> PyResult<()> {
+fn rottnest(_py: Python, m: &PyModule) -> PyResult<()> {
     pyo3_log::init();
 
     m.add_function(wrap_pyfunction!(lava::build_lava_natural_language, m)?)?;
