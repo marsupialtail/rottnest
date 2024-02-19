@@ -2,7 +2,7 @@ use bytes::{Bytes, BytesMut};
 use opendal::services::{Fs, S3};
 use opendal::Operator;
 use opendal::Reader;
-
+use std::env;
 use std::io::SeekFrom;
 use std::ops::{Deref, DerefMut};
 
@@ -93,9 +93,16 @@ impl From<&str> for S3Builder {
 
         builder.bucket(iter.next().expect("malformed path"));
         // Set the region. This is required for some services, if you don't care about it, for example Minio service, just set it to "auto", it will be ignored.
-        builder.region("us-west-2");
-        builder.enable_virtual_host_style();
-        builder.endpoint("https://tos-s3-cn-beijing.volces.com");
+        if let Ok(value) = env::var("AWS_ENDPOINT_URL") {
+            builder.endpoint(&value);
+        }
+        if let Ok(value) = env::var("AWS_REGION") {
+            builder.region(&value);
+        }
+        if let Ok(_value) = env::var("AWS_VIRTUAL_HOST_STYLE") {
+            builder.enable_virtual_host_style();
+        }
+        
         S3Builder(builder)
     }
 }
