@@ -59,7 +59,6 @@ def merge_index_natural_language(new_index_name: str, index_names: List[str]):
     metadata_lens = [len(metadata) for metadata in metadatas]
     offsets = np.cumsum([0] + metadata_lens)[:-1]
     metadatas = [metadata.with_columns(polars.col("uid") + offsets[i]) for i, metadata in enumerate(metadatas)]
-
     rottnest.merge_lava(f"{new_index_name}.lava", [f"{name}.lava" for name in index_names], offsets)
     polars.concat(metadatas).write_parquet(f"{new_index_name}.meta")
 
@@ -89,7 +88,7 @@ def search_index_natural_language(index_name, query, mode = "bm25"):
 
     metadata_file = f"{index_name}.meta"
     index_file = f"{index_name}.lava"
-    uids = polars.from_dict({"uid":rottnest.search_lava(index_file, list(indices[0]), list(distances[0]), 10)})
+    uids = polars.from_dict({"uid":rottnest.search_lava([index_file], list(indices[0]), list(distances[0]), 10)})
     
     print(uids)
     if len(uids) == 0:

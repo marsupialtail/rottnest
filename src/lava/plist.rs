@@ -31,6 +31,7 @@ impl<'a> PListChunk<'a> {
         })
     }
 
+    // we should try to make the first argument a slice instead of Vec to avoid copying. @Rain
     pub fn search_compressed(compressed: Vec<u8>, indices: Vec<u64>) -> Result<Vec<Vec<u64>>> {
         // first read the last 8 bytes
         let compressed_plist_offsets_offset = u64::from_le_bytes(

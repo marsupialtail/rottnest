@@ -185,7 +185,7 @@ mod tests {
     pub fn test_search_lava() {
         let file = "bump2.lava";
 
-        let res = search_lava(vec![file.to_string()], vec![6300,1505], vec![0.1,0.2], 10).unwrap();
+        let res = search_lava(vec![file.to_string()], vec![6300,15050], vec![0.1,0.2], 10).unwrap();
 
         println!("{:?}", res);
     }

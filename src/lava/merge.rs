@@ -31,11 +31,10 @@ impl PListChunkIterator {
         plist_elems: Vec<u64>,
     ) -> Result<Self, LavaError> {
         // read the first chunk
-        reader.seek(SeekFrom::Start(plist_offsets[0])).await?;
-        let mut buffer3: Vec<u8> = vec![0u8; (plist_offsets[1] - plist_offsets[0]) as usize];
-        reader.read(&mut buffer3).await?;
+
+        let buffer3 = reader.read_range(plist_offsets[0], plist_offsets[1]).await?;
         let result: Vec<Vec<u64>> =
-            PListChunk::search_compressed(buffer3, (0..plist_elems[1]).collect()).unwrap();
+            PListChunk::search_compressed(buffer3.to_vec(), (0..plist_elems[1]).collect()).unwrap();
 
         Ok(Self {
             reader: reader,
@@ -60,15 +59,11 @@ impl PListChunkIterator {
             if self.current_chunk_offset + 2 > self.plist_offsets.len() {
                 return Err(LavaError::Parse("out of chunks".to_string()));
             }
-            let mut buffer3: Vec<u8> = vec![
-                0u8;
-                (self.plist_offsets[self.current_chunk_offset + 1]
-                    - self.plist_offsets[self.current_chunk_offset])
-                    as usize
-            ];
-            self.reader.read(&mut buffer3).await?;
+            
+            let buffer3 = self.reader.read_range(self.plist_offsets[self.current_chunk_offset], self.plist_offsets[self.current_chunk_offset + 1]).await?;
+
             self.current_chunk = PListChunk::search_compressed(
-                buffer3,
+                buffer3.to_vec(),
                 (0..(self.plist_elems[self.current_chunk_offset + 1]
                     - self.plist_elems[self.current_chunk_offset]))
                     .collect(),
@@ -136,7 +131,7 @@ async fn hoa(
         }
 
         let buffer2 = reader
-            .read_range(compressed_plist_offsets_offset, file_size - 16)
+            .read_range(compressed_plist_offsets_offset, file_size - 24)
             .await?;
 
         decompressor = Decoder::new(&buffer2[..])?;
@@ -186,8 +181,8 @@ async fn hoa(
             let this_plist: Vec<u64> = plist_chunk_iterators[i].get_current();
             assert_eq!(this_plist.len() % 2, 0);
 
-            for (i, item) in this_plist.iter().enumerate() {
-                if i % 2 == 0 {
+            for (j, item) in this_plist.iter().enumerate() {
+                if j % 2 == 0 {
                     // page offset
                     plist.push(*item + uid_offsets[i]);
                 } else {
@@ -254,4 +249,24 @@ pub fn merge_lava(
         lava_files,
         uid_offsets,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::merge_lava;
+
+    #[test]
+    pub fn test_merge_lava() {
+
+        let res = merge_lava(
+            "condensed.lava".to_string(),
+            vec![
+                "bump1.lava".to_string(),
+                "bump2.lava".to_string(),
+            ],
+            vec![0, 1000000],
+        );
+
+        println!("{:?}", res);
+    }
 }

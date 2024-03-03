@@ -14,12 +14,10 @@ pub fn search_lava(py: Python, files: Vec<String>, query_tokens: Vec<u32>, query
 #[pyfunction]
 pub fn merge_lava(
     py: Python,
-    condensed_lava_file: &PyString,
-    lava_files: Vec<&PyString>,
+    condensed_lava_file: String,
+    lava_files: Vec<String>,
     uid_offsets: Vec<u64>,
 ) -> Result<(), LavaError> {
-    let condensed_lava_file = condensed_lava_file.to_string();
-    let lava_files = lava_files.iter().map(|x| x.to_string()).collect();
     py.allow_threads(|| lava::merge_lava(condensed_lava_file, lava_files, uid_offsets))
 }
 
