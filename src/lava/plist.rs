@@ -9,14 +9,14 @@ use zstd::stream::write::Encoder;
 use std::io::{Read, Write};
 use zstd::stream::encode_all;
 
-pub struct PList<'a> {
+pub struct PListChunk<'a> {
     compressor: Encoder<'a, Cursor<Vec<u8>>>,
     plist_offsets: Vec<usize>,
     elems: u64,
     last_flushed: u64,
 }
 
-impl<'a> PList<'a> {
+impl<'a> PListChunk<'a> {
     pub fn new() -> Result<Self> {
         let plist_compressed = Vec::new(); // Initially empty Vec<u8>
         let cursor = Cursor::new(plist_compressed); // Cursor for Encoder to write into
@@ -67,7 +67,7 @@ impl<'a> PList<'a> {
         Ok(result)
     }
 
-    pub fn add_plist(&mut self, plist: &BTreeSet<u64>) -> Result<usize> {
+    pub fn add_plist(&mut self, plist: &Vec<u64>) -> Result<usize> {
         self.elems += plist.len() as u64;
         // serialize first
         let serialized = bincode::serialize(&plist).unwrap();
@@ -116,14 +116,14 @@ mod tests {
     // A test function
     #[test]
     fn test_plist() -> Result<()> {
-        let mut plist = PList::new()?;
-        let a = BTreeSet::from([0, 1, 2]);
+        let mut plist = PListChunk::new()?;
+        let a = vec![0, 1, 2];
 
         let b = plist.add_plist(&a)?;
         println!("written {}", b);
         let result = plist.finalize_compression()?;
         println!("{:?}", result);
-        let result = PList::search_compressed(result, vec![0]).unwrap();
+        let result = PListChunk::search_compressed(result, vec![0]).unwrap();
         assert_eq!(result[0], a.into_iter().collect::<Vec<u64>>());
         Ok(())
     }
@@ -135,8 +135,8 @@ mod tests {
         numbers.shuffle(&mut rng); // Shuffle the numbers
         let mut sorted_numbers: Vec<u64> = numbers.into_iter().take(60).collect(); // Take the first 60 numbers
                                                                                    // sorted_numbers.sort(); // Sort the taken numbers
-        let sorted_numbers = BTreeSet::from_iter(sorted_numbers.into_iter());
-        let mut plist = PList::new()?;
+        let sorted_numbers = Vec::from_iter(sorted_numbers.into_iter());
+        let mut plist = PListChunk::new()?;
 
         for i in 0..100 {
             let b = plist.add_plist(&sorted_numbers)?;
@@ -145,7 +145,7 @@ mod tests {
         let result = plist.finalize_compression()?;
         println!("{:?}", result);
 
-        let result = PList::search_compressed(result, vec![0]).unwrap();
+        let result = PListChunk::search_compressed(result, vec![0]).unwrap();
         assert_eq!(result[0], sorted_numbers.into_iter().collect::<Vec<u64>>());
 
         Ok(())

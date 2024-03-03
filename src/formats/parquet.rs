@@ -35,11 +35,11 @@ use std::{env, usize};
 use tokio::{self};
 
 use crate::{
-    formats::reader::{AsyncReader, FsBuilder, Operators, S3Builder},
+    formats::io::{AsyncReader, FsBuilder, Operators, S3Builder},
     lava::error::LavaError,
 };
 
-use super::reader::READER_BUFFER_SIZE;
+use super::io::READER_BUFFER_SIZE;
 
 async fn get_reader_and_size_from_file(file: &str) -> Result<(usize, AsyncReader), LavaError> {
     let mut file_name = file.to_string();

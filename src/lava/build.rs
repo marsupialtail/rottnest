@@ -1,57 +1,20 @@
 use arrow::array::{make_array, Array, ArrayData, StringArray, UInt64Array};
-
-use tantivy::tokenizer::*;
-use tantivy_jieba::JiebaTokenizer;
+use tokenizers::tokenizer::Tokenizer;
 
 use bincode;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
-use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fs::File;
 use std::io::{Seek, SeekFrom, Write};
 use zstd::stream::encode_all;
 
-use whatlang::Lang;
-
-use lazy_static::lazy_static;
+use std::io::Cursor;
 
 use crate::lava::error::LavaError;
-use crate::lava::plist::PList;
+use crate::lava::plist::PListChunk;
 
-#[derive(Clone)]
-enum TokenizerEnum {
-    Simple(SimpleTokenizer),
-    Jieba(JiebaTokenizer),
-    English(TextAnalyzer),
-}
-
-lazy_static! {
-    static ref DEFAULT_TOKENIZER: TokenizerEnum = TokenizerEnum::Simple(SimpleTokenizer::default());
-    static ref TOKENIZERS: HashMap<Lang, TokenizerEnum> = {
-        let mut tokenizers = HashMap::new();
-        tokenizers.insert(Lang::Cmn, TokenizerEnum::Jieba(JiebaTokenizer {}));
-
-        let en_stem = TextAnalyzer::builder(SimpleTokenizer::default())
-            .filter(RemoveLongFilter::limit(40))
-            .filter(LowerCaser)
-            .filter(Stemmer::new(Language::English))
-            .build();
-        tokenizers.insert(Lang::Eng, TokenizerEnum::English(en_stem));
-
-        tokenizers
-    };
-}
-
-impl TokenizerEnum {
-    fn token_stream<'a>(&'a mut self, text: &'a str) -> tantivy::tokenizer::BoxTokenStream<'a> {
-        match self {
-            TokenizerEnum::Simple(tokenizer) => BoxTokenStream::new(tokenizer.token_stream(text)),
-            TokenizerEnum::Jieba(tokenizer) => BoxTokenStream::new(tokenizer.token_stream(text)),
-            TokenizerEnum::English(tokenizer) => tokenizer.token_stream(text),
-        }
-    }
-}
+use libdivsufsort_rs::divsufsort64;
 
 /*
 Structure of the lava file
@@ -63,15 +26,35 @@ It is important to put the posting lists first. Just trust me bro.
 /// Function that tokenizes the input text and returns a list of tokens.
 
 #[tokio::main]
-pub async fn build_lava_natural_language(
+pub async fn build_lava_bm25(
     output_file_name: String,
     array: ArrayData,
     uid: ArrayData,
-    language: Option<ArrayData>,
+    tokenizer_file: Option<String>,
+    k1: Option<f32>,
+    b: Option<f32>
 ) -> Result<(), LavaError> {
+
+    // if k1 and b are not provided, set them to default value
+    let k1: f32 = k1.unwrap_or(1.2);
+    let b: f32 = b.unwrap_or(0.75);
+
     let array = make_array(array);
     // let uid = make_array(ArrayData::from_pyarrow(uid)?);
     let uid = make_array(uid);
+
+    // if the tokenizer file is provided, check if the file exists. If it does not exist, raise an Error
+    let tokenizer = if let Some(tokenizer_file) = tokenizer_file {
+        if !std::path::Path::new(&tokenizer_file).exists() {
+            return Err(LavaError::Parse(
+                "Tokenizer file does not exist".to_string(),
+            ));
+        }
+        println!("Tokenizer file: {}", tokenizer_file);
+        Tokenizer::from_file(tokenizer_file).unwrap()
+    } else {
+        Tokenizer::from_pretrained("bert-base-uncased", None).unwrap()
+    };
 
     let array: &arrow_array::GenericByteArray<arrow_array::types::GenericStringType<i32>> = array
         .as_any()
@@ -99,124 +82,95 @@ pub async fn build_lava_natural_language(
         ));
     }
 
-    let _language = match language {
-        Some(x) => {
-            let array = make_array(x);
-
-            let test = array
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .ok_or(LavaError::Parse(
-                    "Expects string array as optional third argument".to_string(),
-                ))?;
-            Some(test.clone())
-        }
-        None => None,
-    };
-
     // let mut tokens: Vec<Vec<String>> = Vec::new();
 
-    let mut join_handles = Vec::new();
+    let mut join_handles: Vec<tokio::task::JoinHandle<(BTreeSet<u32>, u64)>> = Vec::new();
 
+    let mut texts: Vec<&str> = Vec::new();
     for i in 0..array.len() {
-        let text = array.value(i).to_string();
-        let uid = uid.value(i);
-        // let lang = if let Some(ref language) = language {
-        //     Lang::from_code(language.value(i))
-        // } else {
-        //     detect(text).map(|info| info.lang())
-        // }
-        // .unwrap_or(Lang::Eng);
-
-        // let mut tokenizer = TOKENIZERS.get(&lang).unwrap_or(&DEFAULT_TOKENIZER).clone();
-        let join_handle = tokio::spawn(async move {
-            // log::info!("thread id: {:?}", std::thread::current().id());
-            // let mut inverted_index: BTreeMap<String, BTreeSet<u64>> = BTreeMap::new();
-            let mut tokenizer = DEFAULT_TOKENIZER.clone();
-            // println!("text: {} {}", text, detect(text).unwrap_or(Info::new(Script::Latin, Lang::Eng, 0.0)).lang());
-
-            let mut token_stream = tokenizer.token_stream(&text);
-            // let mut this_tokens = Vec::new();
-            let mut entry_set = BTreeSet::new();
-            while let Some(token) = token_stream.next() {
-                // this_tokens.push(token.text.to_string());
-                entry_set.insert(format!("{}\n", token.text));
-            }
-
-            (entry_set, uid)
-        });
-        join_handles.push(join_handle);
-        // tokens.push(this_tokens);
+        texts.push(array.value(i));
     }
 
-    let mut inverted_index: BTreeMap<String, BTreeSet<u64>> = BTreeMap::new();
-    let res = futures::future::join_all(join_handles).await;
-    for r in res {
-        let (entry_set, uid) = r.unwrap();
-        for key in entry_set {
-            inverted_index
-                .entry(key)
-                .or_insert_with(BTreeSet::new)
-                .insert(uid);
+    let encodings = tokenizer.encode_batch(texts, false).expect("Tokenizer failed");
+    let vocab_size: usize = tokenizer.get_vocab_size(false);
+
+    let mut inverted_index: Vec<BTreeMap<usize, f32>> = vec![BTreeMap::new(); vocab_size];
+    let mut token_counts: Vec<usize> = vec![0; vocab_size];
+
+    let mut avg_len: f32 = 0.0;
+    for encoding in encodings.iter() {
+        avg_len += encoding.len() as f32;
+    }
+    avg_len /= encodings.len() as f32;
+
+    for (i, encoding) in encodings.iter().enumerate() {
+        
+        let uid = uid.value(i) as usize;
+        let mut local_token_counts: BTreeMap<u32, usize> = BTreeMap::new();
+        for key in encoding.get_ids() {
+            *local_token_counts.entry(*key).or_insert(0) += 1;
         }
-    }
+        for key in local_token_counts.keys() {
+            let local_count = local_token_counts[key];
+            let local_factor: f32 = (local_count as f32) * (k1 + 1.0) / (local_count as f32 + k1 * (1.0 - b + b * encoding.len() as f32 / avg_len));
 
-    let total_length: usize = inverted_index.keys().map(|k| k.len()).sum();
-    let mut term_dictionary = String::with_capacity(total_length);
-    for key in inverted_index.keys() {
-        term_dictionary.push_str(key);
+            inverted_index[*key as usize].entry(uid)
+                .and_modify(|e| *e = (*e).max(local_factor))
+                .or_insert(local_factor);
+
+            token_counts[*key as usize] += 1;
+        }
     }
 
     let mut file = File::create(output_file_name)?;
 
-    let bytes = term_dictionary.as_bytes();
-    let compressed_term_dictionary = encode_all(bytes, 0).expect("Compression failed");
+    let bytes = bincode::serialize(&token_counts)?;
+    let compressed_token_counts = encode_all(&bytes[..], 0).expect("Compression failed");
 
     // Handle the compressed data (for example, saving to a file or sending over a network)
     println!(
-        "Compressed term dictionary size: {} len: {}",
-        compressed_term_dictionary.len(),
+        "Compressed token counts size: {} number of tokens: {}",
+        compressed_token_counts.len(),
         inverted_index.len()
     );
 
     let mut plist_offsets: Vec<u64> = vec![0];
     let mut plist_elems: Vec<u64> = vec![0];
-    let mut plist = PList::new()?;
+    let mut plist_chunk = PListChunk::new()?;
     let mut counter: u64 = 0;
 
-    for (_key, value) in inverted_index.iter() {
-        // this usually saves around 20% of the space. Don't remember things that happen more than 1/4 of the time.
-        // but let's not do this because it makes everything else more complicated
+    for (_key, value) in inverted_index.iter().enumerate() {
 
-        let mut value_all = BTreeSet::new();
-        value_all.insert(0u64);
-
-        let value_vec = if value.len() <= (num_unique_uids / 4) as usize {
-            //@Rain can we get rid of this clone
-            value
+        let plist = if value.len() == 0 {
+            vec![]
         } else {
-            &value_all
+            let mut result = vec![];
+            for (key, val) in value.iter() {
+                result.push(*key as u64);
+                // quantize the score to int.
+                result.push((*val * 100 as f32) as u64);
+            }
+            result
         };
-
-        // let value_vec = value;
 
         counter += 1;
 
-        // value_vec.sort();
-        let written = plist.add_plist(value_vec)?;
+        let written = plist_chunk.add_plist(&plist)?;
         if written > 1024 * 1024 || counter == inverted_index.len() as u64 {
-            let bytes = plist.finalize_compression()?;
+            let bytes = plist_chunk.finalize_compression()?;
             file.write_all(&bytes)?;
             plist_offsets.push(plist_offsets[plist_offsets.len() - 1] + bytes.len() as u64);
             plist_elems.push(counter);
-            plist = PList::new()?;
+            plist_chunk = PListChunk::new()?;
         }
     }
+
+    println!("{}", counter);
 
     plist_offsets.append(&mut plist_elems);
 
     let compressed_term_dict_offset = file.seek(SeekFrom::Current(0))?;
-    file.write_all(&compressed_term_dictionary)?;
+    file.write_all(&compressed_token_counts)?;
 
     let compressed_plist_offsets_offset = file.seek(SeekFrom::Current(0))?;
     let serialized = bincode::serialize(&plist_offsets).unwrap();
@@ -226,6 +180,48 @@ pub async fn build_lava_natural_language(
 
     file.write_all(&(compressed_term_dict_offset as u64).to_le_bytes())?;
     file.write_all(&(compressed_plist_offsets_offset as u64).to_le_bytes())?;
+    file.write_all(&(encodings.len() as u64).to_le_bytes())?;
 
     Ok(())
+}
+
+#[tokio::main]
+pub async fn build_lava_substring(
+    output_file_name: String,
+    array: ArrayData,
+    uid: ArrayData,
+) -> Result<(), LavaError> {
+    let array = make_array(array);
+    let array: &arrow_array::GenericByteArray<arrow_array::types::GenericStringType<i32>> = array
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .ok_or(LavaError::Parse(
+            "Expects string array as first argument".to_string(),
+        ))?;
+
+    let mut input = String::new();
+    
+    for i in 0..array.len() {
+        let text = array.value(i).to_string();
+        input.push_str(&text);
+    }
+    
+    let input = input.as_bytes().to_vec();
+    let sa = divsufsort64(&input).unwrap();
+
+    let mut bwt = Vec::with_capacity(input.len());
+    for i in 0..sa.len() {
+        if sa[i] == 0 {
+            bwt.push(input[input.len() - 1]);
+        } else {
+            bwt.push(input[(sa[i] - 1) as usize]);
+        }
+    }
+
+    let compressed_term_dictionary = encode_all(Cursor::new(bwt), 0).expect("Compression failed");
+    println!("{:?}",compressed_term_dictionary.len());
+    Ok(())
+
+    
+
 }

@@ -1,6 +1,5 @@
 use bincode;
 use std::collections::BTreeSet;
-use std::fs::File;
 use std::io::{BufRead, BufReader, Cursor, Read, Seek, SeekFrom, Write};
 use zstd::stream::encode_all;
 use zstd::stream::read::Decoder;
@@ -8,12 +7,12 @@ use zstd::stream::read::Decoder;
 use opendal::raw::oio::ReadExt;
 use opendal::services::Fs;
 
-use opendal::Operator;
+use opendal::{Operator, Writer};
 use std::env;
 
-use crate::formats::reader::{AsyncReader, READER_BUFFER_SIZE};
+use crate::formats::io::{AsyncReader, READER_BUFFER_SIZE, WRITER_BUFFER_SIZE};
 use crate::lava::error::LavaError;
-use crate::lava::plist::PList;
+use crate::lava::plist::PListChunk;
 
 struct PListChunkIterator {
     reader: AsyncReader,
@@ -36,7 +35,7 @@ impl PListChunkIterator {
         let mut buffer3: Vec<u8> = vec![0u8; (plist_offsets[1] - plist_offsets[0]) as usize];
         reader.read(&mut buffer3).await?;
         let result: Vec<Vec<u64>> =
-            PList::search_compressed(buffer3, (0..plist_elems[1]).collect()).unwrap();
+            PListChunk::search_compressed(buffer3, (0..plist_elems[1]).collect()).unwrap();
 
         Ok(Self {
             reader: reader,
@@ -68,7 +67,7 @@ impl PListChunkIterator {
                     as usize
             ];
             self.reader.read(&mut buffer3).await?;
-            self.current_chunk = PList::search_compressed(
+            self.current_chunk = PListChunk::search_compressed(
                 buffer3,
                 (0..(self.plist_elems[self.current_chunk_offset + 1]
                     - self.plist_elems[self.current_chunk_offset]))
@@ -91,8 +90,7 @@ async fn hoa(
 {
     // instantiate a list of readers from lava_files
     // let mut readers: Vec<Reader> = Vec::with_capacity(lava_files.len());
-    let mut decompressed_term_dictionaries: Vec<BufReader<Cursor<Vec<u8>>>> =
-        Vec::with_capacity(lava_files.len());
+    
     let mut file_sizes: Vec<u64> = Vec::with_capacity(lava_files.len());
     // let mut plist_offsets: Vec<Vec<u64>> = Vec::with_capacity(lava_files.len());
     // let mut plist_elems: Vec<Vec<u64>> = Vec::with_capacity(lava_files.len());
@@ -100,6 +98,9 @@ async fn hoa(
     let mut plist_chunk_iterators: Vec<PListChunkIterator> = Vec::with_capacity(lava_files.len());
 
     // read in and decompress all the term dictionaries in memory. The term dictionaries corresponding to English language should be small.
+
+    let mut combined_token_counts: Vec<usize> = Vec::new();
+    let mut total_num_documents: u64 = 0;
 
     for file in lava_files {
         let file = file.as_ref();
@@ -111,19 +112,28 @@ async fn hoa(
             .await?
             .into();
 
-        let (compressed_term_dict_offset, compressed_plist_offsets_offset) =
+        let (compressed_term_dict_offset, compressed_plist_offsets_offset, num_documents) =
             reader.read_offsets().await?;
+        total_num_documents += num_documents;
 
-        let compressed_term_dictionary = reader
+        let compressed_token_counts = reader
             .read_range(compressed_term_dict_offset, compressed_plist_offsets_offset)
             .await?;
 
-        let mut decompressed_term_dictionary: Vec<u8> = Vec::new();
+        let mut decompressed_token_counts: Vec<u8> = Vec::new();
         let mut decompressor: Decoder<'_, BufReader<&[u8]>> =
-            Decoder::new(&compressed_term_dictionary[..])?;
-        decompressor.read_to_end(&mut decompressed_term_dictionary)?;
-        let cursor = Cursor::new(decompressed_term_dictionary);
-        let buf_reader: BufReader<Cursor<Vec<u8>>> = BufReader::new(cursor);
+            Decoder::new(&compressed_token_counts[..])?;
+        decompressor.read_to_end(&mut decompressed_token_counts)?;
+        let token_counts: Vec<usize> = bincode::deserialize(&decompressed_token_counts)?;
+
+        if combined_token_counts.len() == 0 {
+            combined_token_counts = token_counts;
+        } else {
+            // add token_counts to combined_token_counts
+            for (i, count) in token_counts.iter().enumerate() {
+                combined_token_counts[i] += count;
+            }
+        }
 
         let buffer2 = reader
             .read_range(compressed_plist_offsets_offset, file_size - 16)
@@ -142,7 +152,6 @@ async fn hoa(
         }
         let num_elements = this_plist_offsets.len() / 2;
 
-        decompressed_term_dictionaries.push(buf_reader);
         file_sizes.push(file_size);
         plist_chunk_iterators.push(
             PListChunkIterator::new(
@@ -154,102 +163,76 @@ async fn hoa(
         );
     }
 
-    // now do the merge sort
+    let mut output_file: Writer = operator
+            .clone()
+            .writer_with(condensed_lava_file)
+            .buffer(WRITER_BUFFER_SIZE)
+            .await?;
 
-    let mut term_dictionary = String::new();
-    let mut current_lines: Vec<Option<String>> = vec![None; decompressed_term_dictionaries.len()];
-
-    // Initialize the current line for each reader
-    for (i, reader) in decompressed_term_dictionaries.iter_mut().enumerate() {
-        if let Some(Ok(line)) = reader.lines().next() {
-            current_lines[i] = Some(line);
-        }
-    }
-
-    let mut output_file = File::create(condensed_lava_file)?;
     let mut new_plist_offsets: Vec<u64> = vec![0];
     let mut new_plist_elems: Vec<u64> = vec![0];
-    let mut plist_chunk = PList::new()?;
+    let mut plist_chunk = PListChunk::new()?;
     let mut counter: u64 = 0;
 
-    while current_lines.iter().any(Option::is_some) {
+    let mut compressed_term_dict_offset: u64 = 0;
+
+    for tok in 0..combined_token_counts.len() { 
         // Find the smallest current line
-        let smallest_line = current_lines
-            .iter()
-            .filter_map(|line| line.as_ref()) // Extract only Some(&String) elements
-            .min()
-            .unwrap()
-            .clone(); // Find the minimum line
 
-        term_dictionary += &smallest_line;
-        term_dictionary += "\n";
+        let mut plist: Vec<u64> = vec![];
 
-        // Progress the BufReaders whose last output was smallest line
+        for i in 0.. plist_chunk_iterators.len() { 
+            
+            let this_plist: Vec<u64> = plist_chunk_iterators[i].get_current();
+            assert_eq!(this_plist.len() % 2, 0);
 
-        let mut plist: BTreeSet<u64> = BTreeSet::new();
-
-        for i in 0..current_lines.len() {
-            if current_lines[i].is_some() {
-                let line = current_lines[i].as_ref().unwrap();
-                if line.eq(&smallest_line) {
-                    // we need to read and decompress the plists
-
-                    let this_plist: Vec<u64> = plist_chunk_iterators[i].get_current();
-                    // println!("{:?} {:?}", this_plist, uid_offsets[i]);
-                    for item in this_plist {
-                        plist.insert(item + uid_offsets[i]);
-                    }
-
-                    let _ = plist_chunk_iterators[i].increase_cursor().await;
-
-                    let reader = &mut decompressed_term_dictionaries[i];
-                    if let Some(Ok(line)) = reader.lines().next() {
-                        current_lines[i] = Some(line);
-                    } else {
-                        current_lines[i] = None;
-                    }
+            for (i, item) in this_plist.iter().enumerate() {
+                if i % 2 == 0 {
+                    // page offset
+                    plist.push(*item + uid_offsets[i]);
+                } else {
+                    // quantized score
+                    plist.push(*item);
                 }
             }
+
+            let _ = plist_chunk_iterators[i].increase_cursor().await; 
         }
 
         counter += 1;
 
-        // value_vec.sort();
-        // println!("{}", key);
+        let plist = Vec::from_iter(plist.into_iter());
         let written = plist_chunk.add_plist(&plist)?;
-        if written > 1024 * 1024 || current_lines.iter().all(Option::is_none) {
+        if written > 1024 * 1024 || tok == combined_token_counts.len() - 1 {
             let bytes = plist_chunk.finalize_compression()?;
-            output_file.write_all(&bytes)?;
+            let this_len: u64 = bytes.len() as u64;
+            
+            output_file.write(bytes).await?;
+            compressed_term_dict_offset += this_len;
             new_plist_offsets
-                .push(new_plist_offsets[new_plist_offsets.len() - 1] + bytes.len() as u64);
+                .push(new_plist_offsets[new_plist_offsets.len() - 1] + this_len);
             new_plist_elems.push(counter);
-            plist_chunk = PList::new()?;
+            plist_chunk = PListChunk::new()?;
         }
     }
 
     new_plist_offsets.append(&mut new_plist_elems);
 
-    let bytes = term_dictionary.as_bytes();
-    let compressed_term_dictionary = encode_all(bytes, 0).expect("Compression failed");
-    let compressed_term_dict_offset = output_file.seek(SeekFrom::Current(0))?;
+    let bytes = bincode::serialize(&combined_token_counts)?;
+    let compressed_token_counts = encode_all(&bytes[..], 0).expect("Compression failed");
 
-    println!(
-        "merged compress dict size {:?} len {:?}",
-        compressed_term_dictionary.len(),
-        counter
-    );
+    let compressed_plist_offsets_offset = compressed_term_dict_offset + compressed_token_counts.len() as u64;
+    output_file.write(compressed_token_counts).await?;
 
-    output_file.write_all(&compressed_term_dictionary)?;
-
-    let compressed_plist_offsets_offset = output_file.seek(SeekFrom::Current(0))?;
     let serialized = bincode::serialize(&new_plist_offsets).unwrap();
     let compressed_plist_offsets =
         encode_all(&serialized[..], 0).expect("Compression of plist offsets failed");
-    output_file.write_all(&compressed_plist_offsets)?;
+    output_file.write(compressed_plist_offsets).await?;
 
-    output_file.write_all(&(compressed_term_dict_offset as u64).to_le_bytes())?;
-    output_file.write_all(&(compressed_plist_offsets_offset as u64).to_le_bytes())?;
-
+    output_file.write((compressed_term_dict_offset as u64).to_le_bytes().to_vec()).await?;
+    output_file.write((compressed_plist_offsets_offset as u64).to_le_bytes().to_vec()).await?;
+    output_file.write((total_num_documents as u64).to_le_bytes().to_vec()).await?;
+    output_file.close().await?;
     Ok(())
 }
 

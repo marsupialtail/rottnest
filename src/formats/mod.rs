@@ -1,5 +1,5 @@
 pub mod parquet;
-pub mod reader;
+pub mod io;
 
 pub use parquet::get_parquet_layout;
 pub use parquet::search_indexed_pages;

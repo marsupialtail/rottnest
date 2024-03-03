@@ -13,6 +13,7 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use crate::lava::error::LavaError;
 
 pub const READER_BUFFER_SIZE: usize = 4 * 1024 * 1024;
+pub const WRITER_BUFFER_SIZE: usize = 4 * 1024 * 1024;
 
 pub struct AsyncReader {
     reader: Reader,
@@ -70,15 +71,17 @@ impl AsyncReader {
         Ok(res.freeze())
     }
 
-    pub async fn read_offsets(&mut self) -> Result<(u64, u64), LavaError> {
+    pub async fn read_offsets(&mut self) -> Result<(u64, u64, u64), LavaError> {
         let reader = self;
         pin!(reader);
-        reader.seek(SeekFrom::End(-16)).await?;
+        reader.seek(SeekFrom::End(-24)).await?;
         let compressed_term_dictionary_offset = reader.read_u64_le().await?;
         let compressed_plist_offsets_offset = reader.read_u64_le().await?;
+        let num_documents = reader.read_u64_le().await?;
         Ok((
             compressed_term_dictionary_offset,
             compressed_plist_offsets_offset,
+            num_documents
         ))
     }
 }
@@ -144,4 +147,20 @@ impl From<FsBuilder> for Operators {
                 .finish(),
         )
     }
+}
+
+pub fn get_operator_and_filename_from_file(file: String) -> (Operator, String) {
+    let mut operator = if file.starts_with("s3://") {
+        Operators::from(S3Builder::from(file.as_str())).into_inner()
+    } else {
+        let current_path = env::current_dir().unwrap();
+        Operators::from(FsBuilder::from(current_path.to_str().expect("no path"))).into_inner()
+    };
+
+    let filename = if file.starts_with("s3://") {
+        file[5..].split("/").collect::<Vec<&str>>().join("/")
+    } else {
+        file.to_string()
+    };
+    (operator, filename)
 }

@@ -7,7 +7,7 @@ import uuid
 import polars
 import numpy as np
 
-def index_file_natural_language(file_path: List[str], column_name: str, name: Optional[str]):
+def index_file_natural_language(file_path: List[str], column_name: str, name = None, tokenizer_file = None):
 
     arr, layout = rottnest.get_parquet_layout(column_name, file_path)
     data_page_num_rows = np.array(layout.data_page_num_rows)
@@ -27,7 +27,29 @@ def index_file_natural_language(file_path: List[str], column_name: str, name: Op
     name = uuid.uuid4().hex if name is None else name
 
     file_data.write_parquet(f"{name}.meta")
-    print(rottnest.build_lava_natural_language(f"{name}.lava", arr, pyarrow.array(uid.astype(np.uint64))))
+    print(rottnest.build_lava_bm25(f"{name}.lava", arr, pyarrow.array(uid.astype(np.uint64)), tokenizer_file))
+
+def index_file_substring(file_path: List[str], column_name: str, name: Optional[str]):
+
+    arr, layout = rottnest.get_parquet_layout(column_name, file_path)
+    data_page_num_rows = np.array(layout.data_page_num_rows)
+    uid = np.repeat(np.arange(len(data_page_num_rows)), data_page_num_rows) + 1
+
+    file_data = polars.from_dict({
+            "uid": np.arange(len(data_page_num_rows) + 1),
+            "file_path": [file_path] * (len(data_page_num_rows) + 1),
+            "column_name": [column_name] * (len(data_page_num_rows) + 1),
+            "data_page_offsets": [-1] + layout.data_page_offsets,
+            "data_page_sizes": [-1] + layout.data_page_sizes,
+            "dictionary_page_sizes": [-1] + layout.dictionary_page_sizes,
+            "row_groups": np.hstack([[-1] , np.repeat(np.arange(layout.num_row_groups), layout.row_group_data_pages)]),
+        }
+    )
+
+    name = uuid.uuid4().hex if name is None else name
+
+    file_data.write_parquet(f"{name}.meta")
+    print(rottnest.build_lava_substring(f"{name}.lava", arr, pyarrow.array(uid.astype(np.uint64))))
 
 def merge_index_natural_language(new_index_name: str, index_names: List[str]):
     assert len(index_names) > 1
@@ -41,13 +63,33 @@ def merge_index_natural_language(new_index_name: str, index_names: List[str]):
     rottnest.merge_lava(f"{new_index_name}.lava", [f"{name}.lava" for name in index_names], offsets)
     polars.concat(metadatas).write_parquet(f"{new_index_name}.meta")
 
-def search_index_natural_language(index_name, query, mode = "exact"):
+def search_index_natural_language(index_name, query, mode = "bm25"):
 
-    assert mode in {"exact", "substring"}
+    from openai import OpenAI
+    import pickle
+    import faiss
+
+    assert mode in {"bm25", "substring"}
+
+    client = OpenAI()
+    mode = "text-embedding-3-large"
+    embeddings = pickle.load(open("tokenizer_embeddings.pkl", "rb"))
+
+    tokens = embeddings['words']
+    db_vectors = embeddings['vecs']
+
+    index = faiss.IndexFlatL2(3072)  # Use the L2 distance for similarity
+    index.add(db_vectors)  # Add the dataset vectors to the index
+    print("Number of vectors in the index: ", index.ntotal)
+    results = client.embeddings.create(input = query, model = mode)
+    query_vectors = np.vstack([results.data[i].embedding for i in range(len(results.data))])
+    distances, indices = index.search(query_vectors, 200)  # Perform the search
+    
+    print([tokens[i] for i in indices[0]])
 
     metadata_file = f"{index_name}.meta"
     index_file = f"{index_name}.lava"
-    uids = polars.from_dict({"uid":rottnest.search_lava(index_file, query if mode == "substring" else f"^{query}$")})
+    uids = polars.from_dict({"uid":rottnest.search_lava(index_file, list(indices[0]), list(distances[0]), 10)})
     
     print(uids)
     if len(uids) == 0:
