@@ -1,6 +1,7 @@
 use arrow::datatypes::ToByteSlice;
 use arrow::error::ArrowError;
 use arrow_array::{Array, StringArray};
+use arrow::array::ArrayData;
 use log::debug;
 use parquet::{
     arrow::array_reader::make_byte_array_reader,
@@ -418,22 +419,20 @@ pub struct MatchResult {
 }
 
 #[tokio::main]
-pub async fn search_indexed_pages(
-    query: String,
+pub async fn read_indexed_pages(
     column_name: String,
     file_paths: Vec<String>,
     row_groups: Vec<usize>,
     page_offsets: Vec<u64>,
     page_sizes: Vec<usize>,
     dict_page_sizes: Vec<usize>, // 0 means no dict page
-) -> Result<Vec<MatchResult>, LavaError> {
+) -> Result<Vec<ArrayData>, LavaError> {
     // current implementation might re-read dictionary pages, this should be optimized
     // we are assuming that all the files are either on disk or cloud.
 
     let codec_options = CodecOptionsBuilder::default()
         .set_backward_compatible_lz4(false)
         .build();
-    let re = Regex::new(&query).unwrap();
 
     let metadatas = parse_metadatas(&file_paths).await;
 
@@ -445,7 +444,7 @@ pub async fn search_indexed_pages(
         dict_page_sizes
     );
 
-    let iter: Vec<tokio::task::JoinHandle<Vec<MatchResult>>> = stream::iter(iter)
+    let iter: Vec<tokio::task::JoinHandle<ArrayData>> = stream::iter(iter)
         .map(
             |(file_path, row_group, page_offset, page_size, dict_page_size)| {
                 let column_index = metadatas[&file_path]
@@ -473,8 +472,6 @@ pub async fn search_indexed_pages(
                 let mut codec = create_codec(compression_scheme, &codec_options)
                     .unwrap()
                     .unwrap();
-
-                let re = re.clone();
 
                 let handle = tokio::spawn(async move {
                     debug!("tokio spawn thread: {:?}", std::thread::current().id());
@@ -533,21 +530,7 @@ pub async fn search_indexed_pages(
                         })
                         .unwrap();
 
-                    let mut match_results: Vec<MatchResult> = vec![];
-
-                    for i in 0..new_array.len() {
-                        if re.is_match(new_array.value(i)) {
-                            match_results.push(MatchResult {
-                                file_path: file_path.clone(),
-                                column_index: column_index,
-                                row_group: row_group,
-                                offset_in_row_group: i,
-                                matched: new_array.value(i).to_string(),
-                            })
-                        }
-                    }
-
-                    match_results
+                    new_array.into_data()
                 });
 
                 handle
@@ -556,12 +539,12 @@ pub async fn search_indexed_pages(
         .collect::<Vec<_>>()
         .await;
 
-    let res: Vec<std::prelude::v1::Result<Vec<MatchResult>, tokio::task::JoinError>> =
+    let res: Vec<std::prelude::v1::Result<ArrayData, tokio::task::JoinError>> =
         futures::future::join_all(iter).await;
-    let result: Result<Vec<MatchResult>, tokio::task::JoinError> =
+    let result: Result<Vec<ArrayData>, tokio::task::JoinError> =
         res.into_iter().try_fold(Vec::new(), |mut acc, r| {
             r.map(|inner_vec| {
-                acc.extend(inner_vec);
+                acc.push(inner_vec);
                 acc
             })
         });

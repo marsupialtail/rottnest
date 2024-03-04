@@ -2,7 +2,8 @@ use std::hash::{Hash, Hasher};
 use std::collections::hash_map::DefaultHasher;
 use crate::formats::{parquet, MatchResult, ParquetLayout};
 use crate::lava::error::LavaError;
-use arrow::pyarrow::ToPyArrow;
+use arrow::pyarrow::{ToPyArrow, PyArrowType};
+use arrow::array::ArrayData;
 use pyo3::prelude::*;
 use pyo3::{pyfunction, types::PyString};
 
@@ -105,23 +106,20 @@ pub fn get_parquet_layout(
 }
 
 #[pyfunction]
-pub fn search_indexed_pages(
+pub fn read_indexed_pages(
     py: Python,
-    query: &PyString,
     column_name: &PyString,
     file_paths: Vec<&PyString>,
     row_groups: Vec<usize>,
     page_offsets: Vec<usize>,
     page_sizes: Vec<usize>,
     dict_page_sizes: Vec<usize>,
-) -> Result<Vec<MatchResultWrapper>, LavaError> {
-    let query = query.to_string();
+) -> Result<Vec<PyArrowType<ArrayData>>, LavaError> {
     let column_name = column_name.to_string();
     let file_paths: Vec<String> = file_paths.iter().map(|x| x.to_string()).collect();
     let page_offsets: Vec<u64> = page_offsets.iter().map(|x| *x as u64).collect();
     let match_result = py.allow_threads(|| {
-        parquet::search_indexed_pages(
-            query,
+        parquet::read_indexed_pages(
             column_name,
             file_paths,
             row_groups,
@@ -130,5 +128,5 @@ pub fn search_indexed_pages(
             dict_page_sizes, // 0 means no dict page
         )
     })?;
-    Ok(match_result.into_iter().map(|x| x.into()).collect())
+    Ok(match_result.into_iter().map(|x| PyArrowType(x)).collect())
 }

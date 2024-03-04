@@ -1,7 +1,5 @@
 import rottnest as rottnest
-from .pele import  search_index_natural_language, index_file_natural_language, merge_index_natural_language, index_file_substring
-from .ahupuaa import partition_periodic, partition_sessionize
-from .ahupuaa import MetricsPartition as MetricsPartition
+from .pele import  search_index_bm25, index_file_bm25, merge_index_bm25, index_file_substring
 
 __doc__ = rottnest.__doc__
 if hasattr(rottnest, "__all__"):

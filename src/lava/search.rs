@@ -7,12 +7,60 @@ use zstd::stream::read::Decoder;
 use std::env;
 
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
+use tokenizers::tokenizer::Tokenizer;
 
 use crate::{formats::io::READER_BUFFER_SIZE, lava::plist::PListChunk};
+use crate::formats::parquet::read_indexed_pages;
 use crate::{
     formats::io::{AsyncReader, FsBuilder, Operators, S3Builder},
     lava::error::LavaError,
 };
+
+async fn get_tokenizer_vocab_async(
+    file_sizes: Vec<usize>,
+    mut readers: Vec<AsyncReader>,
+) -> Result<Vec<String>, LavaError>
+{
+    let mut compressed_tokenizer: Option<Vec<u8>> = None;
+
+    for i in 0 .. readers.len() {
+        let (compressed_term_dictionary_offset, compressed_plist_offsets_offset, num_documents) =
+            readers[i].read_offsets().await?;
+        // now read the term dictionary
+        readers[i].seek(SeekFrom::Start(compressed_plist_offsets_offset)).await?;
+        let mut buffer2: Vec<u8> = vec![0u8; file_sizes[i] - compressed_plist_offsets_offset as usize - 24];
+        readers[i].read(&mut buffer2).await?;
+        let mut decompressor = Decoder::new(&buffer2[..])?;
+        let mut decompressed_serialized_plist_offsets: Vec<u8> =
+            Vec::with_capacity(buffer2.len() as usize);
+        decompressor.read_to_end(&mut decompressed_serialized_plist_offsets)?;
+        let plist_offsets: Vec<u64> = bincode::deserialize(&decompressed_serialized_plist_offsets)?;
+
+        let this_compressed_tokenizer: bytes::Bytes = readers[i].read_range(0, plist_offsets[0]).await?;
+
+        match &compressed_tokenizer {
+            Some(value) => assert!(this_compressed_tokenizer == value, "detected different tokenizers, cannot merge, something is very wrong."), 
+            None => compressed_tokenizer = Some(this_compressed_tokenizer.to_vec())
+        }
+    }
+
+    let slice = &compressed_tokenizer.unwrap()[..];
+    let mut decompressor = Decoder::new(slice)?;
+    let mut decompressed_serialized_tokenizer: Vec<u8> =
+        Vec::with_capacity(slice.len() as usize);
+    decompressor.read_to_end(&mut decompressed_serialized_tokenizer)?;
+
+    let mut result: Vec<String> = Vec::new();
+    let tokenizer = Tokenizer::from_bytes(decompressed_serialized_tokenizer).unwrap();
+
+    for i in 0 .. tokenizer.get_vocab_size(false) {
+        let tok = tokenizer.decode(&vec![i as u32], true).unwrap();
+        result.push(tok);
+    }
+
+    Ok(result)
+        
+}
 
 async fn search_lava_async(
     file_sizes: Vec<usize>,
@@ -103,6 +151,7 @@ async fn search_lava_async(
     let mut plist_result: Vec<(u64,u64)> = Vec::new();
     let mut page_scores: HashMap<(u64,u64), f32> = HashMap::new();
 
+    // need to parallelize this @Rain.
     for ((file_id, chunk_id), token_offsets) in chunks_to_search.into_iter() {
         println!("file_id: {}, chunk_id: {}", file_id, chunk_id);
         let buffer3 = readers[file_id].read_range(
@@ -144,9 +193,7 @@ async fn search_lava_async(
     Ok(plist_result)
 }
 
-#[tokio::main]
-pub async fn search_lava(files: Vec<String>, query_tokens: Vec<u32>, query_weights: Vec<f32>, k: usize ) -> Result<Vec<(u64,u64)>, LavaError> {
-    
+async fn get_file_sizes_and_readers(files: Vec<String>) -> Result<(Vec<usize>, Vec<AsyncReader>), LavaError> {
     let mut readers: Vec<AsyncReader> = Vec::new();
     let mut file_sizes: Vec<usize> = Vec::new();
     for file in files {
@@ -172,9 +219,21 @@ pub async fn search_lava(files: Vec<String>, query_tokens: Vec<u32>, query_weigh
 
         let file_size: u64 = operator.stat(&filename).await?.content_length();
         file_sizes.push(file_size as usize);
-        
     }
+
+    Ok((file_sizes, readers))
+}
+
+#[tokio::main]
+pub async fn search_lava(files: Vec<String>, query_tokens: Vec<u32>, query_weights: Vec<f32>, k: usize ) -> Result<Vec<(u64,u64)>, LavaError> {
+    let (file_sizes, readers) = get_file_sizes_and_readers(files).await?;
     search_lava_async(file_sizes, readers, query_tokens, query_weights, k).await
+}
+
+#[tokio::main]
+pub async fn get_tokenizer_vocab(files: Vec<String>) -> Result<Vec<String>, LavaError> {
+    let (file_sizes, readers) = get_file_sizes_and_readers(files).await?;
+    get_tokenizer_vocab_async(file_sizes, readers).await
 }
 
 #[cfg(test)]
@@ -182,10 +241,18 @@ mod tests {
     use super::search_lava;
 
     #[test]
-    pub fn test_search_lava() {
-        let file = "bump2.lava";
+    pub fn test_search_lava_one() {
+        let file = "condensed.lava";
 
         let res = search_lava(vec![file.to_string()], vec![6300,15050], vec![0.1,0.2], 10).unwrap();
+
+        println!("{:?}", res);
+    }
+
+    #[test]
+    pub fn test_search_lava_two() {
+
+        let res = search_lava(vec!["bump1.lava".to_string(), "bump2.lava".to_string()], vec![6300,15050], vec![0.1,0.2], 10).unwrap();
 
         println!("{:?}", res);
     }

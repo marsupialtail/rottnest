@@ -1,4 +1,5 @@
 use arrow::array::{make_array, Array, ArrayData, StringArray, UInt64Array};
+use serde_json;
 use tokenizers::tokenizer::Tokenizer;
 
 use bincode;
@@ -19,7 +20,7 @@ use libdivsufsort_rs::divsufsort64;
 /*
 Structure of the lava file
 It is important to put the posting lists first. Just trust me bro.
-| compressed posting lists line by line | compressed term dictionary | compressed posting list offsets|
+compressed_serialized_tokenizer | compressed posting lists line by line | compressed term dictionary | compressed posting list offsets|
 8 bytes = offsets of compressed term dict | 8 bytes = offset of compressed posting list offsets
 */
 
@@ -56,6 +57,9 @@ pub async fn build_lava_bm25(
         Tokenizer::from_pretrained("bert-base-uncased", None).unwrap()
     };
 
+    let serialized_tokenizer = serde_json::to_string(&tokenizer).unwrap();
+    let compressed_tokenizer = encode_all(serialized_tokenizer.as_bytes(), 0).expect("Compression failed");
+
     let array: &arrow_array::GenericByteArray<arrow_array::types::GenericStringType<i32>> = array
         .as_any()
         .downcast_ref::<StringArray>()
@@ -70,21 +74,11 @@ pub async fn build_lava_bm25(
             "Expects uint64 array as second argument".to_string(),
         ))?;
 
-    let mut unique_uids: HashSet<u64> = HashSet::new();
-    for i in 0..uid.len() {
-        unique_uids.insert(uid.value(i));
-    }
-    let num_unique_uids = unique_uids.len() as u64;
-
     if array.len() != uid.len() {
         return Err(LavaError::Parse(
             "The length of the array and the uid array must be the same".to_string(),
         ));
     }
-
-    // let mut tokens: Vec<Vec<String>> = Vec::new();
-
-    let mut join_handles: Vec<tokio::task::JoinHandle<(BTreeSet<u32>, u64)>> = Vec::new();
 
     let mut texts: Vec<&str> = Vec::new();
     for i in 0..array.len() {
@@ -123,9 +117,10 @@ pub async fn build_lava_bm25(
     }
 
     let mut file = File::create(output_file_name)?;
+    file.write_all(&compressed_tokenizer)?;
 
     let bytes = bincode::serialize(&token_counts)?;
-    let compressed_token_counts = encode_all(&bytes[..], 0).expect("Compression failed");
+    let compressed_token_counts: Vec<u8> = encode_all(&bytes[..], 0).expect("Compression failed");
 
     // Handle the compressed data (for example, saving to a file or sending over a network)
     println!(
@@ -134,7 +129,7 @@ pub async fn build_lava_bm25(
         inverted_index.len()
     );
 
-    let mut plist_offsets: Vec<u64> = vec![0];
+    let mut plist_offsets: Vec<u64> = vec![file.seek(SeekFrom::Current(0))?];
     let mut plist_elems: Vec<u64> = vec![0];
     let mut plist_chunk = PListChunk::new()?;
     let mut counter: u64 = 0;

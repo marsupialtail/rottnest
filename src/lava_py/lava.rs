@@ -12,6 +12,11 @@ pub fn search_lava(py: Python, files: Vec<String>, query_tokens: Vec<u32>, query
 }
 
 #[pyfunction]
+pub fn get_tokenizer_vocab(py: Python, files: Vec<String>) -> Result<Vec<String>, LavaError> {
+    py.allow_threads(|| lava::get_tokenizer_vocab(files))
+}
+
+#[pyfunction]
 pub fn merge_lava(
     py: Python,
     condensed_lava_file: String,

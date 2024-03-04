@@ -1,4 +1,5 @@
 use bincode;
+use zstd::bulk::compress;
 use std::collections::BTreeSet;
 use std::io::{BufRead, BufReader, Cursor, Read, Seek, SeekFrom, Write};
 use zstd::stream::encode_all;
@@ -96,6 +97,7 @@ async fn hoa(
 
     let mut combined_token_counts: Vec<usize> = Vec::new();
     let mut total_num_documents: u64 = 0;
+    let mut compressed_tokenizer: Option<Vec<u8>> = None;
 
     for file in lava_files {
         let file = file.as_ref();
@@ -147,6 +149,13 @@ async fn hoa(
         }
         let num_elements = this_plist_offsets.len() / 2;
 
+        let this_compressed_tokenizer: bytes::Bytes = reader.read_range(0, this_plist_offsets[0]).await?;
+
+        match &compressed_tokenizer {
+            Some(value) => assert!(this_compressed_tokenizer == value, "detected different tokenizers, cannot merge, something is very wrong."), 
+            None => compressed_tokenizer = Some(this_compressed_tokenizer.to_vec())
+        }
+
         file_sizes.push(file_size);
         plist_chunk_iterators.push(
             PListChunkIterator::new(
@@ -164,12 +173,16 @@ async fn hoa(
             .buffer(WRITER_BUFFER_SIZE)
             .await?;
 
-    let mut new_plist_offsets: Vec<u64> = vec![0];
+    let compressed_tokenizer = compressed_tokenizer.unwrap();
+    let compressed_tokenizer_len = compressed_tokenizer.len();
+    output_file.write(compressed_tokenizer).await?;
+
+    let mut new_plist_offsets: Vec<u64> = vec![compressed_tokenizer_len as u64];
     let mut new_plist_elems: Vec<u64> = vec![0];
     let mut plist_chunk = PListChunk::new()?;
     let mut counter: u64 = 0;
 
-    let mut compressed_term_dict_offset: u64 = 0;
+    let mut compressed_term_dict_offset: u64 = compressed_tokenizer_len as u64;
 
     for tok in 0..combined_token_counts.len() { 
         // Find the smallest current line
@@ -259,7 +272,7 @@ mod tests {
     pub fn test_merge_lava() {
 
         let res = merge_lava(
-            "condensed.lava".to_string(),
+            "merged.lava".to_string(),
             vec![
                 "bump1.lava".to_string(),
                 "bump2.lava".to_string(),
