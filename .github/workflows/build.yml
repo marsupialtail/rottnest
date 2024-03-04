@@ -16,6 +16,8 @@ jobs:
 
       - name: Build with Maturin
         run: |
+          sudo yum update
+          sudo yum install openssl openssl-devel
           rustup default stable
           maturin build --release --features py --out dist
 
