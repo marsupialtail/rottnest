@@ -1,7 +1,7 @@
 use arrow::array::{make_array, Array, ArrayData, StringArray, UInt64Array};
 use serde_json;
+use tokenizers::parallelism::MaybeParallelIterator;
 use tokenizers::tokenizer::Tokenizer;
-use tokio::task::JoinHandle;
 
 use bincode;
 use std::collections::BTreeMap;
@@ -26,7 +26,6 @@ compressed_serialized_tokenizer | compressed posting lists line by line | compre
 */
 
 /// Function that tokenizes the input text and returns a list of tokens.
-
 #[tokio::main]
 pub async fn build_lava_bm25(
     output_file_name: String,
@@ -82,23 +81,19 @@ pub async fn build_lava_bm25(
     }
 
     let vocab_size: usize = tokenizer.get_vocab_size(false);
-    let mut handles = Vec::new();
+
+    let mut texts = Vec::with_capacity(array.len());
     for i in 0..array.len() {
-        let text = array.value(i).to_string();
-        let tokenizer = tokenizer.clone();
-        let handle: JoinHandle<Result<Vec<u32>, LavaError>> = tokio::spawn(async move {
-            let encoding = tokenizer
-                .encode(text, false)
-                .map_err(|_e| LavaError::Unknown)?;
-            let ids = encoding.get_ids().to_vec();
-            Ok(ids)
-        });
-        handles.push(handle);
+        let text = array.value(i);
+        texts.push(text);
     }
-    let encodings = futures::future::join_all(handles)
-        .await
-        .into_iter()
-        .map(|res| res.unwrap().unwrap())
+
+    let encodings = texts
+        .into_maybe_par_iter()
+        .map(|text| {
+            let encoding = tokenizer.encode(text, true).unwrap();
+            encoding.get_ids().to_vec()
+        })
         .collect::<Vec<Vec<u32>>>();
 
     let mut inverted_index: Vec<BTreeMap<usize, f32>> = vec![BTreeMap::new(); vocab_size];
