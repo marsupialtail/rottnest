@@ -1,6 +1,7 @@
 use arrow::array::{make_array, Array, ArrayData, StringArray, UInt64Array};
 use serde_json;
 use tokenizers::tokenizer::Tokenizer;
+use tokio::task::JoinHandle;
 
 use bincode;
 use std::collections::BTreeMap;
@@ -80,13 +81,24 @@ pub async fn build_lava_bm25(
         ));
     }
 
-    let mut texts: Vec<&str> = Vec::new();
-    for i in 0..array.len() {
-        texts.push(array.value(i));
-    }
-
-    let encodings = tokenizer.encode_batch(texts, false).expect("Tokenizer failed");
     let vocab_size: usize = tokenizer.get_vocab_size(false);
+    // let mut encodings: Vec<Vec<u32>> = Vec::new();
+    let mut handles = Vec::new();
+    for i in 0..array.len() {
+        let text = array.value(i).to_string();
+        let tokenizer = tokenizer.clone();
+        let handle: JoinHandle<Result<Vec<u32>, LavaError>> = tokio::spawn(async move {
+        let encoding = tokenizer.encode(text, false).map_err(|_e|LavaError::Unknown)?;
+        // println!("{:?}", encoding.get_ids());
+        let ids = encoding.get_ids().to_vec();
+        Ok(ids)
+        });
+        handles.push(handle);
+    }
+    let encodings = futures::future::join_all(handles).await
+        .into_iter()
+        .map(|res| res.unwrap().unwrap())
+        .collect::<Vec<Vec<u32>>>();
 
     let mut inverted_index: Vec<BTreeMap<usize, f32>> = vec![BTreeMap::new(); vocab_size];
     let mut token_counts: Vec<usize> = vec![0; vocab_size];
@@ -101,7 +113,7 @@ pub async fn build_lava_bm25(
         
         let uid = uid.value(i) as usize;
         let mut local_token_counts: BTreeMap<u32, usize> = BTreeMap::new();
-        for key in encoding.get_ids() {
+        for key in encoding {
             *local_token_counts.entry(*key).or_insert(0) += 1;
         }
         for key in local_token_counts.keys() {
