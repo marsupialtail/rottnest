@@ -153,7 +153,7 @@ async fn search_lava_async(
 
     // need to parallelize this @Rain.
     for ((file_id, chunk_id), token_offsets) in chunks_to_search.into_iter() {
-        println!("file_id: {}, chunk_id: {}", file_id, chunk_id);
+        // println!("file_id: {}, chunk_id: {}", file_id, chunk_id);
         let buffer3 = readers[file_id].read_range(
             all_plist_offsets[file_id][chunk_id],
             all_plist_offsets[file_id][chunk_id + 1],
@@ -186,7 +186,7 @@ async fn search_lava_async(
 
     // get the top k results
     for (uid, score) in page_scores_vec.iter().take(k) {
-        println!("{}", score);
+        // println!("{}", score);
         plist_result.push(*uid);
     }
 

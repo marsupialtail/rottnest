@@ -64,7 +64,7 @@ def merge_index_bm25(new_index_name: str, index_names: List[str]):
     rottnest.merge_lava(f"{new_index_name}.lava", [f"{name}.lava" for name in index_names], offsets)
     polars.concat(metadatas).write_parquet(f"{new_index_name}.meta")
 
-def query_expansion_llm(tokenizer_vocab: List[str], query: str, model = "text-embedding-3-large"):
+def query_expansion_llm(tokenizer_vocab: List[str], query: str, model = "text-embedding-3-large", expansion_tokens = 20):
     import os, pickle
     try:
         import faiss
@@ -106,7 +106,7 @@ def query_expansion_llm(tokenizer_vocab: List[str], query: str, model = "text-em
     index = faiss.IndexFlatL2(db_vectors.shape[1])  # Use the L2 distance for similarity
     index.add(db_vectors) 
     query_vectors = np.expand_dims(np.array(client.embeddings.create(input = query, model = model).data[0].embedding), 0)
-    distances, indices = index.search(query_vectors, 200)  # Perform the search
+    distances, indices = index.search(query_vectors, expansion_tokens)  # Perform the search
     print("Expanded tokens: ", [tokens[i] for i in indices[0]])
 
     return [tokens[i] for i in indices[0]], list(indices[0]), list(1 / (distances[0] + 1))
@@ -136,13 +136,13 @@ def search_index_substring(indices: List[str], query: str):
     # metadata = polars.concat([metadata.filter(polars.col("row_groups") != -1), expanded])
     pass
 
-def search_index_bm25(indices: List[str], query: str, K: int, query_expansion = "openai", quality_factor = 0.2):
+def search_index_bm25(indices: List[str], query: str, K: int, query_expansion = "openai", quality_factor = 0.2, expansion_tokens = 20):
 
     assert query_expansion in {"openai", "keyword"}
     
     tokenizer_vocab = rottnest.get_tokenizer_vocab([f"{index_name}.lava" for index_name in indices])
 
-    tokens, token_ids, weights = query_expansion_llm(tokenizer_vocab, query) if query_expansion == "openai" else query_expansion_keyword(tokenizer_vocab, query)
+    tokens, token_ids, weights = query_expansion_llm(tokenizer_vocab, query, expansion_tokens=expansion_tokens) if query_expansion == "openai" else query_expansion_keyword(tokenizer_vocab, query)
 
     # metadata_file = f"{index_name}.meta"
     index_search_results = rottnest.search_lava([f"{index_name}.lava" for index_name in indices], token_ids, weights, int(K * quality_factor))

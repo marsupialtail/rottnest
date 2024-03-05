@@ -185,14 +185,54 @@ pub async fn build_lava_substring(
     output_file_name: String,
     array: ArrayData,
     uid: ArrayData,
+    tokenizer_file: Option<String>,
 ) -> Result<(), LavaError> {
     let array = make_array(array);
+    // let uid = make_array(ArrayData::from_pyarrow(uid)?);
+    let uid = make_array(uid);
+
+    
+    let tokenizer = if let Some(tokenizer_file) = tokenizer_file {
+        if !std::path::Path::new(&tokenizer_file).exists() {
+            return Err(LavaError::Parse(
+                "Tokenizer file does not exist".to_string(),
+            ));
+        }
+        println!("Tokenizer file: {}", tokenizer_file);
+        Tokenizer::from_file(tokenizer_file).unwrap()
+    } else {
+        Tokenizer::from_pretrained("bert-base-uncased", None).unwrap()
+    };
+
+    let serialized_tokenizer = serde_json::to_string(&tokenizer).unwrap();
+    let compressed_tokenizer = encode_all(serialized_tokenizer.as_bytes(), 0).expect("Compression failed");
+
     let array: &arrow_array::GenericByteArray<arrow_array::types::GenericStringType<i32>> = array
         .as_any()
         .downcast_ref::<StringArray>()
         .ok_or(LavaError::Parse(
             "Expects string array as first argument".to_string(),
         ))?;
+
+    let uid = uid
+        .as_any()
+        .downcast_ref::<UInt64Array>()
+        .ok_or(LavaError::Parse(
+            "Expects uint64 array as second argument".to_string(),
+        ))?;
+
+    if array.len() != uid.len() {
+        return Err(LavaError::Parse(
+            "The length of the array and the uid array must be the same".to_string(),
+        ));
+    }
+
+    let mut texts: Vec<&str> = Vec::new();
+    for i in 0..array.len() {
+        texts.push(array.value(i));
+    }
+
+    let encodings = tokenizer.encode_batch(texts, false).expect("Tokenizer failed");
 
     let mut input = String::new();
     
