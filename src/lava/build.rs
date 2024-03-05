@@ -88,10 +88,13 @@ pub async fn build_lava_bm25(
         texts.push(text);
     }
 
-    let encodings = texts.into_maybe_par_iter().map(|text| {
-        let encoding = tokenizer.encode(text, true).unwrap();
-        encoding.get_ids().to_vec()
-    }).collect::<Vec<Vec<u32>>>();
+    let encodings = texts
+        .into_maybe_par_iter()
+        .map(|text| {
+            let encoding = tokenizer.encode(text, true).unwrap();
+            encoding.get_ids().to_vec()
+        })
+        .collect::<Vec<Vec<u32>>>();
 
     let mut inverted_index: Vec<BTreeMap<usize, f32>> = vec![BTreeMap::new(); vocab_size];
     let mut token_counts: Vec<usize> = vec![0; vocab_size];
