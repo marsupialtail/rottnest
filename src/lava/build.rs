@@ -34,9 +34,8 @@ pub async fn build_lava_bm25(
     uid: ArrayData,
     tokenizer_file: Option<String>,
     k1: Option<f32>,
-    b: Option<f32>
+    b: Option<f32>,
 ) -> Result<(), LavaError> {
-
     // if k1 and b are not provided, set them to default value
     let k1: f32 = k1.unwrap_or(1.2);
     let b: f32 = b.unwrap_or(0.75);
@@ -59,7 +58,8 @@ pub async fn build_lava_bm25(
     };
 
     let serialized_tokenizer = serde_json::to_string(&tokenizer).unwrap();
-    let compressed_tokenizer = encode_all(serialized_tokenizer.as_bytes(), 0).expect("Compression failed");
+    let compressed_tokenizer =
+        encode_all(serialized_tokenizer.as_bytes(), 0).expect("Compression failed");
 
     let array: &arrow_array::GenericByteArray<arrow_array::types::GenericStringType<i32>> = array
         .as_any()
@@ -82,20 +82,21 @@ pub async fn build_lava_bm25(
     }
 
     let vocab_size: usize = tokenizer.get_vocab_size(false);
-    // let mut encodings: Vec<Vec<u32>> = Vec::new();
     let mut handles = Vec::new();
     for i in 0..array.len() {
         let text = array.value(i).to_string();
         let tokenizer = tokenizer.clone();
         let handle: JoinHandle<Result<Vec<u32>, LavaError>> = tokio::spawn(async move {
-        let encoding = tokenizer.encode(text, false).map_err(|_e|LavaError::Unknown)?;
-        // println!("{:?}", encoding.get_ids());
-        let ids = encoding.get_ids().to_vec();
-        Ok(ids)
+            let encoding = tokenizer
+                .encode(text, false)
+                .map_err(|_e| LavaError::Unknown)?;
+            let ids = encoding.get_ids().to_vec();
+            Ok(ids)
         });
         handles.push(handle);
     }
-    let encodings = futures::future::join_all(handles).await
+    let encodings = futures::future::join_all(handles)
+        .await
         .into_iter()
         .map(|res| res.unwrap().unwrap())
         .collect::<Vec<Vec<u32>>>();
@@ -110,7 +111,6 @@ pub async fn build_lava_bm25(
     avg_len /= encodings.len() as f32;
 
     for (i, encoding) in encodings.iter().enumerate() {
-        
         let uid = uid.value(i) as usize;
         let mut local_token_counts: BTreeMap<u32, usize> = BTreeMap::new();
         for key in encoding {
@@ -118,9 +118,11 @@ pub async fn build_lava_bm25(
         }
         for key in local_token_counts.keys() {
             let local_count = local_token_counts[key];
-            let local_factor: f32 = (local_count as f32) * (k1 + 1.0) / (local_count as f32 + k1 * (1.0 - b + b * encoding.len() as f32 / avg_len));
+            let local_factor: f32 = (local_count as f32) * (k1 + 1.0)
+                / (local_count as f32 + k1 * (1.0 - b + b * encoding.len() as f32 / avg_len));
 
-            inverted_index[*key as usize].entry(uid)
+            inverted_index[*key as usize]
+                .entry(uid)
                 .and_modify(|e| *e = (*e).max(local_factor))
                 .or_insert(local_factor);
 
@@ -147,7 +149,6 @@ pub async fn build_lava_bm25(
     let mut counter: u64 = 0;
 
     for (_key, value) in inverted_index.iter().enumerate() {
-
         let plist = if value.len() == 0 {
             vec![]
         } else {
@@ -207,12 +208,12 @@ pub async fn build_lava_substring(
         ))?;
 
     let mut input = String::new();
-    
+
     for i in 0..array.len() {
         let text = array.value(i).to_string();
         input.push_str(&text);
     }
-    
+
     let input = input.as_bytes().to_vec();
     let sa = divsufsort64(&input).unwrap();
 
@@ -226,9 +227,6 @@ pub async fn build_lava_substring(
     }
 
     let compressed_term_dictionary = encode_all(Cursor::new(bwt), 0).expect("Compression failed");
-    println!("{:?}",compressed_term_dictionary.len());
+    println!("{:?}", compressed_term_dictionary.len());
     Ok(())
-
-    
-
 }
