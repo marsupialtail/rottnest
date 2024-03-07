@@ -109,8 +109,10 @@ async fn hoa(
             .await?
             .into();
 
-        let (compressed_term_dict_offset, compressed_plist_offsets_offset, num_documents) =
-            reader.read_offsets().await?;
+        let results = reader.read_usize_from_end(3).await?;
+        let compressed_term_dict_offset = results[0];
+        let compressed_plist_offsets_offset = results[1];
+        let num_documents = results[2];
         total_num_documents += num_documents;
 
         let compressed_token_counts = reader

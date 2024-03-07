@@ -1,14 +1,15 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     io::{BufRead, BufReader, Cursor, Read, SeekFrom},
 };
+use itertools::Itertools;
 use zstd::stream::read::Decoder;
-
+use bytes::Bytes;
 use std::env;
 
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokenizers::tokenizer::Tokenizer;
-
+use crate::lava::constants::*;
 use crate::{formats::io::READER_BUFFER_SIZE, lava::plist::PListChunk};
 use crate::formats::parquet::read_indexed_pages;
 use crate::{
@@ -16,16 +17,16 @@ use crate::{
     lava::error::LavaError,
 };
 
-async fn get_tokenizer_vocab_async(
+async fn get_tokenizer_async(
     file_sizes: Vec<usize>,
     mut readers: Vec<AsyncReader>,
-) -> Result<Vec<String>, LavaError>
+) -> Result<(Tokenizer,Vec<String>), LavaError>
 {
     let mut compressed_tokenizer: Option<Vec<u8>> = None;
 
     for i in 0 .. readers.len() {
-        let (compressed_term_dictionary_offset, compressed_plist_offsets_offset, num_documents) =
-            readers[i].read_offsets().await?;
+        let results = readers[i].read_usize_from_end(3).await?;
+        let compressed_plist_offsets_offset = results[1];
         // now read the term dictionary
         readers[i].seek(SeekFrom::Start(compressed_plist_offsets_offset)).await?;
         let mut buffer2: Vec<u8> = vec![0u8; file_sizes[i] - compressed_plist_offsets_offset as usize - 24];
@@ -58,11 +59,147 @@ async fn get_tokenizer_vocab_async(
         result.push(tok);
     }
 
-    Ok(result)
+    Ok((tokenizer,result))
         
 }
 
-async fn search_lava_async(
+async fn search_substring_async(
+    file_sizes: Vec<usize>,
+    mut readers: Vec<AsyncReader>,
+    query: Vec<u32>,
+    k: usize
+) -> Result<Vec<(u64,u64)>, LavaError> 
+{
+
+    fn search_chunk(chunk: Bytes, token: u32, pos: usize) -> Result<u64, LavaError> {
+        let compressed_counts_size = u64::from_le_bytes(chunk[0 .. 8].try_into().unwrap());
+        let compressed_counts = &chunk[8 .. (compressed_counts_size + 8) as usize];
+        let mut decompressor = Decoder::new(compressed_counts)?;
+        let mut serialized_counts: Vec<u8> = Vec::with_capacity(compressed_counts_size as usize);
+        decompressor.read_to_end(&mut serialized_counts)?;
+        let counts: HashMap<u32, u64> = bincode::deserialize(&serialized_counts)?;
+        let compressed_fm_chunk = &chunk[(compressed_counts_size + 8) as usize ..];
+        let mut decompressor = Decoder::new(compressed_fm_chunk)?;
+        let mut serialized_fm_chunk: Vec<u8> = Vec::with_capacity(compressed_fm_chunk.len() as usize);
+        decompressor.read_to_end(&mut serialized_fm_chunk)?;
+        let fm_chunk: Vec<u32> = bincode::deserialize(&serialized_fm_chunk)?;
+
+        let mut result = *counts.get(&token).unwrap_or(&0);
+        for j in 0 .. pos {
+            if fm_chunk[j] == token {
+                result += 1;
+            }
+        }
+        Ok(result)
+    }
+
+    let mut all_uids: HashSet<(u64,u64)> = HashSet::new();
+
+    // @Rain can you please parallelize this.
+    for file_id in 0 .. readers.len() {
+        let results = readers[file_id].read_usize_from_end(4).await?;
+        let fm_chunk_offsets_offset = results[0];
+        let posting_list_offsets_offset = results[1];
+        let total_counts_offset = results[2];
+        let n = results[3];
+
+        // now read the term dictionary
+        readers[file_id].seek(SeekFrom::Start(fm_chunk_offsets_offset)).await?;
+        let compressed_fm_chunk_offsets = readers[file_id].read_range(fm_chunk_offsets_offset, posting_list_offsets_offset).await?;
+        let mut decompressor = Decoder::new(&compressed_fm_chunk_offsets[..])?;
+        let mut serialized_fm_chunk_offsets: Vec<u8> = Vec::with_capacity(compressed_fm_chunk_offsets.len() as usize);
+        decompressor.read_to_end(&mut serialized_fm_chunk_offsets)?;
+        let fm_chunk_offsets: Vec<u64> = bincode::deserialize(&serialized_fm_chunk_offsets)?;
+
+        // now read the posting list offsets
+        readers[file_id].seek(SeekFrom::Start(posting_list_offsets_offset)).await?;
+        let compressed_posting_list_offsets = readers[file_id].read_range(posting_list_offsets_offset, total_counts_offset).await?;
+        let mut decompressor = Decoder::new(&compressed_posting_list_offsets[..])?;
+        let mut serialized_posting_list_offsets: Vec<u8> = Vec::with_capacity(compressed_posting_list_offsets.len() as usize);
+        decompressor.read_to_end(&mut serialized_posting_list_offsets)?;
+        let posting_list_offsets: Vec<u64> = bincode::deserialize(&serialized_posting_list_offsets)?;
+
+        // now read the total counts
+        readers[file_id].seek(SeekFrom::Start(total_counts_offset)).await?;
+        let compressed_total_counts = readers[file_id].read_range(total_counts_offset, (file_sizes[file_id] - 32) as u64).await?;
+        let mut decompressor = Decoder::new(&compressed_total_counts[..])?;
+        let mut serialized_total_counts: Vec<u8> = Vec::with_capacity(compressed_total_counts.len() as usize);
+        decompressor.read_to_end(&mut serialized_total_counts)?;
+        let total_counts: HashMap<u32, u64> = bincode::deserialize(&serialized_total_counts)?;
+
+        let start: usize = 0;
+        let end: usize = (n + 1) as usize;
+        let previous_range = u64::MAX;
+
+        for i in 1 .. query.len() {
+            let current_token = query[query.len() - i];
+
+            let start_byte = fm_chunk_offsets[start / FM_CHUNK_TOKS];
+            let end_byte = fm_chunk_offsets[start / FM_CHUNK_TOKS + 1];
+            let start_chunk = readers[file_id].read_range(start_byte, end_byte).await?;
+
+            let start_byte = fm_chunk_offsets[end / FM_CHUNK_TOKS];
+            let end_byte = fm_chunk_offsets[end / FM_CHUNK_TOKS + 1];
+            let end_chunk = readers[file_id].read_range(start_byte, end_byte).await?;
+
+            // read the first four bytes
+            let start = total_counts[&current_token] + search_chunk(start_chunk, current_token, start % FM_CHUNK_TOKS)?;
+            let end = total_counts[&current_token] + search_chunk(end_chunk, current_token, end % FM_CHUNK_TOKS)?;
+            
+            if start >= end {
+                break;
+            }
+        }
+
+        if start >= end {
+            continue;
+        } 
+
+        let start_offset = posting_list_offsets[start / FM_CHUNK_TOKS];
+        let end_offset = posting_list_offsets[end / FM_CHUNK_TOKS + 1];
+        let total_chunks = end / FM_CHUNK_TOKS - start / FM_CHUNK_TOKS + 1;
+
+        let plist_chunks = readers[file_id].read_range(start_offset, end_offset).await?;
+        for i in 0 .. total_chunks {
+            let this_start = posting_list_offsets[start / FM_CHUNK_TOKS + i];
+            let this_end = posting_list_offsets[start / FM_CHUNK_TOKS + i + 1];
+            let this_chunk = &plist_chunks[(this_start - start_offset) as usize .. (this_end - start_offset) as usize];
+
+            // decompress this chunk
+            let mut decompressor = Decoder::new(&this_chunk[..])?;
+            let mut serialized_plist_chunk: Vec<u8> = Vec::with_capacity(this_chunk.len() as usize);
+            decompressor.read_to_end(&mut serialized_plist_chunk)?;
+            let plist_chunk: Vec<u64> = bincode::deserialize(&serialized_plist_chunk)?;
+            
+            if i == 0 {
+                if total_chunks == 1 {
+                    for uid in &plist_chunk[start % FM_CHUNK_TOKS .. end % FM_CHUNK_TOKS] {
+                        all_uids.insert((file_id as u64,*uid));
+                    }
+                } else {
+                    for uid in &plist_chunk[start % FM_CHUNK_TOKS .. ] {
+                        all_uids.insert((file_id as u64,*uid));
+                    }
+                }
+            } else if i == total_chunks - 1 { 
+                println!("Warning");
+                for uid in &plist_chunk[ .. end % FM_CHUNK_TOKS] {
+                    all_uids.insert((file_id as u64,*uid));
+                }
+            } else {
+                println!("Warning");
+                for uid in &plist_chunk[..] {
+                    all_uids.insert((file_id as u64,*uid));
+                }
+            }
+        }
+        
+    }
+    Ok(all_uids.into_iter().collect())
+}
+
+
+async fn search_bm25_async(
     file_sizes: Vec<usize>,
     mut readers: Vec<AsyncReader>,
     query_tokens: Vec<u32>,
@@ -80,8 +217,11 @@ async fn search_lava_async(
     let mut chunks_to_search: HashMap<(usize, usize), Vec<(u32,u64)>> = HashMap::new();
     
     for i in 0 .. readers.len() {
-        let (compressed_term_dictionary_offset, compressed_plist_offsets_offset, num_documents) =
-            readers[i].read_offsets().await?;
+        let results = readers[i].read_usize_from_end(3).await?;
+        let compressed_term_dictionary_offset = results[0];
+        let compressed_plist_offsets_offset = results[1];
+        let num_documents = results[2];
+
         // now read the term dictionary
         let compressed_term_dictionary = readers[i]
             .read_range(
@@ -193,7 +333,7 @@ async fn search_lava_async(
     Ok(plist_result)
 }
 
-async fn get_file_sizes_and_readers(files: Vec<String>) -> Result<(Vec<usize>, Vec<AsyncReader>), LavaError> {
+async fn get_file_sizes_and_readers(files: &Vec<String>) -> Result<(Vec<usize>, Vec<AsyncReader>), LavaError> {
     let mut readers: Vec<AsyncReader> = Vec::new();
     let mut file_sizes: Vec<usize> = Vec::new();
     for file in files {
@@ -226,14 +366,39 @@ async fn get_file_sizes_and_readers(files: Vec<String>) -> Result<(Vec<usize>, V
 
 #[tokio::main]
 pub async fn search_lava(files: Vec<String>, query_tokens: Vec<u32>, query_weights: Vec<f32>, k: usize ) -> Result<Vec<(u64,u64)>, LavaError> {
-    let (file_sizes, readers) = get_file_sizes_and_readers(files).await?;
-    search_lava_async(file_sizes, readers, query_tokens, query_weights, k).await
+    let (file_sizes, readers) = get_file_sizes_and_readers(&files).await?;
+    search_bm25_async(file_sizes, readers, query_tokens, query_weights, k).await
 }
 
 #[tokio::main]
+pub async fn search_substring(files: Vec<String>, query: String, k: usize) -> Result<Vec<(u64,u64)>, LavaError> {
+    let (file_sizes, readers) = get_file_sizes_and_readers(&files).await?;
+    let tokenizer = get_tokenizer_async(file_sizes, readers).await?.0;
+
+    let mut skip_tokens: HashSet<u32> = HashSet::new();
+    for char in SKIP.chars() {
+        let char_str = char.to_string(); 
+        skip_tokens.extend(tokenizer.encode(char_str.clone(), false).unwrap().get_ids().to_vec());
+        skip_tokens.extend(tokenizer.encode(format!(" {}", char_str), false).unwrap().get_ids().to_vec());
+        skip_tokens.extend(tokenizer.encode(format!("{} ", char_str), false).unwrap().get_ids().to_vec());
+    }
+
+
+    let encoding = tokenizer.encode(query, false).unwrap();
+    let result: Vec<u32> = encoding.get_ids().iter()
+        .filter(|id| !skip_tokens.contains(id))
+        .cloned()
+        .collect();
+
+    let (file_sizes, readers) = get_file_sizes_and_readers(&files).await?;
+    search_substring_async(file_sizes, readers, result, k).await
+}
+
+
+#[tokio::main]
 pub async fn get_tokenizer_vocab(files: Vec<String>) -> Result<Vec<String>, LavaError> {
-    let (file_sizes, readers) = get_file_sizes_and_readers(files).await?;
-    get_tokenizer_vocab_async(file_sizes, readers).await
+    let (file_sizes, readers) = get_file_sizes_and_readers(&files).await?;
+    Ok(get_tokenizer_async(file_sizes, readers).await?.1)
 }
 
 #[cfg(test)]

@@ -3,6 +3,7 @@ pub mod error;
 mod merge;
 mod search;
 mod plist;
+mod constants;
 
 pub use build::build_lava_bm25;
 pub use build::build_lava_substring;

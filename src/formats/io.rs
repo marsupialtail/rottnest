@@ -71,18 +71,15 @@ impl AsyncReader {
         Ok(res.freeze())
     }
 
-    pub async fn read_offsets(&mut self) -> Result<(u64, u64, u64), LavaError> {
+    pub async fn read_usize_from_end(&mut self, n: u64) -> Result<Vec<u64>, LavaError> {
         let reader = self;
         pin!(reader);
-        reader.seek(SeekFrom::End(-24)).await?;
-        let compressed_term_dictionary_offset = reader.read_u64_le().await?;
-        let compressed_plist_offsets_offset = reader.read_u64_le().await?;
-        let num_documents = reader.read_u64_le().await?;
-        Ok((
-            compressed_term_dictionary_offset,
-            compressed_plist_offsets_offset,
-            num_documents
-        ))
+        reader.seek(SeekFrom::End(-(n as i64 * 8))).await?;
+        let mut result: Vec<u64> = vec![];
+        for i in 0..n {
+            result.push(reader.read_u64_le().await?);
+        }
+        Ok(result)
     }
 }
 

@@ -16,6 +16,7 @@ use std::io::Cursor;
 
 use crate::lava::error::LavaError;
 use crate::lava::plist::PListChunk;
+use crate::lava::constants::*;
 
 use libdivsufsort_rs::divsufsort64;
 
@@ -189,7 +190,7 @@ pub async fn build_lava_bm25(
     Ok(())
 }
 
-const FM_CHUNK_TOKS: usize = 1000000;
+
 
 #[tokio::main]
 pub async fn build_lava_substring(
@@ -246,10 +247,8 @@ pub async fn build_lava_substring(
         texts.push((uid.value(i), text));
     }
 
-    let skip = "!#$%&'()*+,-./:;<=>?@[^_`{|}~ ，。、；：！？“”‘’《》（）【】——…";
     let mut skip_tokens: HashSet<u32> = HashSet::new();
-
-    for char in skip.chars() {
+    for char in SKIP.chars() {
         let char_str = char.to_string(); 
         skip_tokens.extend(tokenizer.encode(char_str.clone(), false).unwrap().get_ids().to_vec());
         skip_tokens.extend(tokenizer.encode(format!(" {}", char_str), false).unwrap().get_ids().to_vec());
