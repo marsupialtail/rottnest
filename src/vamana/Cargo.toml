@@ -1,0 +1,21 @@
+[package]
+name = "twang"
+version = "0.1.0"
+edition = "2021"
+
+[profile.relwithdebinfo]
+inherits = "release"
+debug = 2
+
+[lints.rust]
+unused_parens = "allow"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+bitvector = "0.1.5"
+hdf5 = "0.8.1"
+ndarray = { version = "0.15.6", features = ["rayon"] }
+num-traits = "0.2.18"
+rand = "0.8.5"
+rayon = "1.8.1"
