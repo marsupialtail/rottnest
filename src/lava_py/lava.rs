@@ -49,11 +49,12 @@ pub fn build_lava_substring(
     array: &PyAny,
     uid: &PyAny,
     tokenizer_file: Option<&PyString>,
+    token_skip_factor: Option<u32>
 ) -> Result<(), LavaError> {
     let output_file_name = output_file_name.to_string();
     let array = ArrayData::from_pyarrow(array)?;
     let uid = ArrayData::from_pyarrow(uid)?;
     let tokenizer_file = tokenizer_file.map(|x| x.to_string());
 
-    py.allow_threads(|| lava::build_lava_substring(output_file_name, array, uid))
+    py.allow_threads(|| lava::build_lava_substring(output_file_name, array, uid, tokenizer_file, token_skip_factor))
 }

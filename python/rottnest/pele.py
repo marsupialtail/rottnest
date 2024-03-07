@@ -31,7 +31,7 @@ def index_file_bm25(file_path: List[str], column_name: str, name = None, tokeniz
     file_data.write_parquet(f"{name}.meta")
     print(rottnest.build_lava_bm25(f"{name}.lava", arr, pyarrow.array(uid.astype(np.uint64)), tokenizer_file))
 
-def index_file_substring(file_path: List[str], column_name: str, name: Optional[str]):
+def index_file_substring(file_path: List[str], column_name: str, name = None, tokenizer_file = None):
 
     arr, layout = rottnest.get_parquet_layout(column_name, file_path)
     data_page_num_rows = np.array(layout.data_page_num_rows)
@@ -47,11 +47,10 @@ def index_file_substring(file_path: List[str], column_name: str, name: Optional[
             "row_groups": np.hstack([[-1] , np.repeat(np.arange(layout.num_row_groups), layout.row_group_data_pages)]),
         }
     )
-
     name = uuid.uuid4().hex if name is None else name
 
     file_data.write_parquet(f"{name}.meta")
-    print(rottnest.build_lava_substring(f"{name}.lava", arr, pyarrow.array(uid.astype(np.uint64))))
+    print(rottnest.build_lava_substring(f"{name}.lava", arr, pyarrow.array(uid.astype(np.uint64)), tokenizer_file))
 
 def merge_index_bm25(new_index_name: str, index_names: List[str]):
     assert len(index_names) > 1
@@ -138,11 +137,21 @@ def search_index_substring(indices: List[str], query: str):
 
 def search_index_bm25(indices: List[str], query: str, K: int, query_expansion = "openai", quality_factor = 0.2, expansion_tokens = 20):
 
-    assert query_expansion in {"openai", "keyword"}
+    assert query_expansion in {"openai", "keyword", "none"}
     
     tokenizer_vocab = rottnest.get_tokenizer_vocab([f"{index_name}.lava" for index_name in indices])
 
-    tokens, token_ids, weights = query_expansion_llm(tokenizer_vocab, query, expansion_tokens=expansion_tokens) if query_expansion == "openai" else query_expansion_keyword(tokenizer_vocab, query)
+    if query_expansion == "openai":
+        tokens, token_ids, weights = query_expansion_llm(tokenizer_vocab, query, expansion_tokens=expansion_tokens)
+    elif query_expansion == "keyword":
+        tokens, token_ids, weights = query_expansion_keyword(tokenizer_vocab, query)
+    else:
+        from tokenizers import Tokenizer
+        tok = Tokenizer.from_file("../tok/tokenizer.json")
+        token_ids = tok.encode(query).ids
+        tokens = [tokenizer_vocab[i] for i in token_ids]
+        weights = [1] * len(token_ids)
+        print(tokens)
 
     # metadata_file = f"{index_name}.meta"
     index_search_results = rottnest.search_lava([f"{index_name}.lava" for index_name in indices], token_ids, weights, int(K * quality_factor))

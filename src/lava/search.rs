@@ -39,7 +39,7 @@ async fn get_tokenizer_vocab_async(
         let this_compressed_tokenizer: bytes::Bytes = readers[i].read_range(0, plist_offsets[0]).await?;
 
         match &compressed_tokenizer {
-            Some(value) => assert!(this_compressed_tokenizer == value, "detected different tokenizers, cannot merge, something is very wrong."), 
+            Some(value) => assert!(this_compressed_tokenizer == value, "detected different tokenizers between different lava files, can't search across them."), 
             None => compressed_tokenizer = Some(this_compressed_tokenizer.to_vec())
         }
     }
@@ -54,7 +54,7 @@ async fn get_tokenizer_vocab_async(
     let tokenizer = Tokenizer::from_bytes(decompressed_serialized_tokenizer).unwrap();
 
     for i in 0 .. tokenizer.get_vocab_size(false) {
-        let tok = tokenizer.decode(&vec![i as u32], true).unwrap();
+        let tok = tokenizer.decode(&vec![i as u32], false).unwrap();
         result.push(tok);
     }
 

@@ -6,6 +6,7 @@ use tokenizers::tokenizer::Tokenizer;
 use bincode;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fs::File;
 use std::io::{Seek, SeekFrom, Write};
@@ -91,7 +92,7 @@ pub async fn build_lava_bm25(
     let encodings = texts
         .into_maybe_par_iter()
         .map(|text| {
-            let encoding = tokenizer.encode(text, true).unwrap();
+            let encoding = tokenizer.encode(text, false).unwrap();
             encoding.get_ids().to_vec()
         })
         .collect::<Vec<Vec<u32>>>();
@@ -188,17 +189,21 @@ pub async fn build_lava_bm25(
     Ok(())
 }
 
+const FM_CHUNK_TOKS: usize = 1000000;
+
 #[tokio::main]
 pub async fn build_lava_substring(
     output_file_name: String,
     array: ArrayData,
     uid: ArrayData,
     tokenizer_file: Option<String>,
+    token_skip_factor: Option<u32>
 ) -> Result<(), LavaError> {
     let array = make_array(array);
     // let uid = make_array(ArrayData::from_pyarrow(uid)?);
     let uid = make_array(uid);
 
+    let token_skip_factor = token_skip_factor.unwrap_or(1);
     
     let tokenizer = if let Some(tokenizer_file) = tokenizer_file {
         if !std::path::Path::new(&tokenizer_file).exists() {
@@ -235,33 +240,147 @@ pub async fn build_lava_substring(
         ));
     }
 
-    let mut texts: Vec<&str> = Vec::new();
+    let mut texts: Vec<(u64, &str)> = Vec::with_capacity(array.len());
     for i in 0..array.len() {
-        texts.push(array.value(i));
+        let text = array.value(i);
+        texts.push((uid.value(i), text));
     }
 
-    let encodings = tokenizer.encode_batch(texts, false).expect("Tokenizer failed");
+    let skip = "!#$%&'()*+,-./:;<=>?@[^_`{|}~ ，。、；：！？“”‘’《》（）【】——…";
+    let mut skip_tokens: HashSet<u32> = HashSet::new();
 
-    let mut input = String::new();
-
-    for i in 0..array.len() {
-        let text = array.value(i).to_string();
-        input.push_str(&text);
+    for char in skip.chars() {
+        let char_str = char.to_string(); 
+        skip_tokens.extend(tokenizer.encode(char_str.clone(), false).unwrap().get_ids().to_vec());
+        skip_tokens.extend(tokenizer.encode(format!(" {}", char_str), false).unwrap().get_ids().to_vec());
+        skip_tokens.extend(tokenizer.encode(format!("{} ", char_str), false).unwrap().get_ids().to_vec());
     }
 
-    let input = input.as_bytes().to_vec();
-    let sa = divsufsort64(&input).unwrap();
+    let named_encodings = texts
+        .into_maybe_par_iter()
+        .map(|(uid, text)| {
+            // strip out things in skip in text
 
-    let mut bwt = Vec::with_capacity(input.len());
+            // let lower: String = text.chars().flat_map(|c| c.to_lowercase()).collect();            
+            let encoding = tokenizer.encode(text, false).unwrap();
+            let result: Vec<u32> = encoding.get_ids().iter()
+                .filter(|id| !skip_tokens.contains(id))
+                .cloned()
+                .collect();
+            (vec![uid; result.len()], result)
+        })
+        .collect::<Vec<(Vec<u64>, Vec<u32>)>>();
+
+    let uids: Vec<u64> = named_encodings.iter().map(|(uid, _)| uid).flatten().cloned().collect::<Vec<u64>>();
+    let encodings: Vec<u32> = named_encodings.into_iter().map(|(_, text)| text).flatten().collect::<Vec<u32>>();
+    
+    let (encodings, uids) = if token_skip_factor > 1 {
+        let encodings: Vec<u32> = encodings.into_iter()
+            .enumerate() // Enumerate to get the index and value
+            .filter(|&(index, _)| index % token_skip_factor as usize == 1) // Keep only elements with odd indices (every second element)
+            .map(|(_, value)| value) // Extract the value
+            .collect(); // Collect into a vector
+
+        let uids: Vec<u64> = uids.into_iter()
+            .enumerate() // Enumerate to get the index and value
+            .filter(|&(index, _)| index % token_skip_factor as usize == 1) // Keep only elements with odd indices (every second element)
+            .map(|(_, value)| value) // Extract the value
+            .collect(); 
+        (encodings, uids)
+    } else {
+        (encodings, uids)
+    };
+    
+    let u8_encodings: Vec<u8> = encodings.iter()
+        .flat_map(|&num| num.to_be_bytes())
+        .collect();
+
+    let sa: Vec<i64> = divsufsort64(&u8_encodings).unwrap();
+
+    // implement this line: result = out[out % dtype.itemsize == 0] // dtype.itemsize
+    let sa: Vec<i64> = sa.iter().filter(|x| *x % 4 == 0).map(|x| *x / 4).collect();
+
+    let mut idx: Vec<u64> = Vec::with_capacity(encodings.len());
+    let mut bwt: Vec<u32> = Vec::with_capacity(encodings.len());
     for i in 0..sa.len() {
         if sa[i] == 0 {
-            bwt.push(input[input.len() - 1]);
+            bwt.push(encodings[encodings.len() - 1]);
+            idx.push(uids[uids.len() - 1]);
         } else {
-            bwt.push(input[(sa[i] - 1) as usize]);
+            bwt.push(encodings[(sa[i] - 1) as usize]);
+            idx.push(uids[(sa[i] - 1) as usize]);
         }
     }
 
-    let compressed_term_dictionary = encode_all(Cursor::new(bwt), 0).expect("Compression failed");
-    println!("{:?}", compressed_term_dictionary.len());
+    println!("{:?}", &idx[0 .. 100]);
+    println!("{:?}", &bwt[0 .. 100]);
+
+    let bytes = bincode::serialize(&bwt)?;
+    let compressed_bwt: Vec<u8> = encode_all(&bytes[..], 0).expect("Compression failed");
+    println!("{:?}", compressed_bwt.len());
+
+    let bytes = bincode::serialize(&idx)?;
+    let compressed_idx: Vec<u8> = encode_all(&bytes[..], 0).expect("Compression failed");
+    println!("{:?}", compressed_idx.len());
+
+    let mut file = File::create(output_file_name)?;
+    file.write_all(&compressed_tokenizer)?;
+
+    let mut fm_chunk_offsets: Vec<usize> = vec![file.seek(SeekFrom::Current(0))? as usize];
+
+    let mut current_chunk: Vec<u32> = vec![];
+    let mut current_chunk_counts: HashMap<u32, u64> = HashMap::new();
+    let mut next_chunk_counts: HashMap<u32, u64> = HashMap::new();
+
+    for i in 0 .. bwt.len() {
+        let current_tok = bwt[i];
+        next_chunk_counts.entry(current_tok).and_modify(|count| *count += 1).or_insert(1);
+        current_chunk.push(current_tok);
+
+        if i % FM_CHUNK_TOKS == 0 || i == bwt.len() - 1 { 
+            let serialized_counts = bincode::serialize(&current_chunk_counts)?;
+            let compressed_counts = encode_all(&serialized_counts[..], 0).expect("Compression failed");
+            file.write_all(&(compressed_counts.len() as u64).to_le_bytes())?;
+            file.write_all(&compressed_counts)?;
+            current_chunk_counts = next_chunk_counts.clone();
+            next_chunk_counts.clear();
+            let serialized_chunk = bincode::serialize(&current_chunk)?;
+            let compressed_chunk = encode_all(&serialized_chunk[..], 0).expect("Compression failed");
+            file.write_all(&compressed_chunk)?;
+            fm_chunk_offsets.push(file.seek(SeekFrom::Current(0))? as usize);
+            current_chunk = vec![];
+        }
+    };
+
+    let mut posting_list_offsets: Vec<usize> = vec![file.seek(SeekFrom::Current(0))? as usize];
+
+    for i in (0 .. idx.len()).step_by(FM_CHUNK_TOKS) {
+        let slice = &idx[i.. std::cmp::min(idx.len(), i + FM_CHUNK_TOKS)];
+        let serialized_slice = bincode::serialize(slice)?;
+        let compressed_slice = encode_all(&serialized_slice[..], 0).expect("Compression failed");
+        file.write_all(&compressed_slice)?;
+        posting_list_offsets.push(file.seek(SeekFrom::Current(0))? as usize);
+    }
+
+    let fm_chunk_offsets_offset = file.seek(SeekFrom::Current(0))? as usize;
+    let serialized_fm_chunk_offsets = bincode::serialize(&fm_chunk_offsets)?;
+    let compressed_fm_chunk_offsets = encode_all(&serialized_fm_chunk_offsets[..], 0).expect("Compression failed");
+    file.write_all(&compressed_fm_chunk_offsets)?;
+
+    let posting_list_offsets_offset = file.seek(SeekFrom::Current(0))? as usize;
+    let serialized_posting_list_offsets = bincode::serialize(&posting_list_offsets)?;
+    let compressed_posting_list_offsets = encode_all(&serialized_posting_list_offsets[..], 0).expect("Compression failed");
+    file.write_all(&compressed_posting_list_offsets)?;
+
+    let total_counts_offset = file.seek(SeekFrom::Current(0))? as usize;
+    let serialized_total_counts = bincode::serialize(&current_chunk_counts)?;
+    let compressed_total_counts = encode_all(&serialized_total_counts[..], 0).expect("Compression failed");
+    file.write_all(&compressed_total_counts)?;
+
+    file.write_all(&(fm_chunk_offsets_offset as u64).to_le_bytes())?;
+    file.write_all(&(posting_list_offsets_offset as u64).to_le_bytes())?;
+    file.write_all(&(total_counts_offset as u64).to_le_bytes())?;
+    file.write_all(&(bwt.len() as u64).to_le_bytes())?;
+
     Ok(())
 }

@@ -51,8 +51,8 @@ def merge_test():
 # basic_test()
 # merge_test()
 
-# rottnest.index_file_bm25("msmarco/chunk_1.parquet","body", name = "bump1")
+rottnest.index_file_bm25("msmarco/chunk_1.parquet","body", name = "bump1")
 # rottnest.index_file_bm25("msmarco/chunk_2.parquet","body", name = "bump2")
 # rottnest.merge_index_bm25("merged", ["bump1", "bump2"])
-result = rottnest.search_index_bm25(["merged"], "cell phones", 50)
-print(result)
+# result = rottnest.search_index_bm25(["merged"], "cell phones", 50)
+# print(result)
