@@ -192,6 +192,13 @@ async fn search_substring_async(
                     all_uids.insert((file_id as u64,*uid));
                 }
             }
+
+            if all_uids.len() > k {
+                break;
+            }
+        }
+        if all_uids.len() > k {
+            break;
         }
         
     }
