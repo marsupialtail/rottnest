@@ -60,7 +60,7 @@ def merge_index_bm25(new_index_name: str, index_names: List[str]):
     metadata_lens = [len(metadata) for metadata in metadatas]
     offsets = np.cumsum([0] + metadata_lens)[:-1]
     metadatas = [metadata.with_columns(polars.col("uid") + offsets[i]) for i, metadata in enumerate(metadatas)]
-    rottnest.merge_lava(f"{new_index_name}.lava", [f"{name}.lava" for name in index_names], offsets)
+    rottnest.merge_lava_bm25(f"{new_index_name}.lava", [f"{name}.lava" for name in index_names], offsets)
     polars.concat(metadatas).write_parquet(f"{new_index_name}.meta")
 
 def query_expansion_llm(tokenizer_vocab: List[str], query: str, model = "text-embedding-3-large", expansion_tokens = 20):
@@ -125,15 +125,28 @@ def query_expansion_keyword(tokenizer_vocab: List[str], query: str):
     print("Expanded tokens: ", tokens)
     return tokens, token_ids, weights
 
-def search_index_substring(indices: List[str], query: str):
-    # expanded = metadata.filter(polars.col("row_groups") == -1)\
-    #     .select(["file_path"])\
-    #     .join(metadata_orig, on = "file_path")\
-    #     .filter(polars.col("row_groups") != -1)\
-    #     .select(["uid", "file_path", "column_name", "data_page_offsets", "data_page_sizes", "dictionary_page_sizes", "row_groups"])
-        
-    # metadata = polars.concat([metadata.filter(polars.col("row_groups") != -1), expanded])
-    pass
+def search_index_substring(indices: List[str], query: str, K: int):
+    
+    index_search_results = rottnest.search_lava_substring([f"{index_name}.lava" for index_name in indices], query, K)
+    print(index_search_results)
+
+    if len(index_search_results) == 0:
+        return None
+
+    uids = polars.from_dict({"file_id": [i[0] for i in index_search_results], "uid": [i[1] for i in index_search_results]})
+
+    metadatas = [polars.read_parquet(f"{index_name}.meta").with_columns(polars.lit(i).alias("file_id").cast(polars.Int64)) for i, index_name in enumerate(indices)]
+    metadata = polars.concat(metadatas)
+    metadata = metadata.join(uids, on = ["file_id", "uid"])
+    
+    assert len(metadata["column_name"].unique()) == 1, "index is not allowed to span multiple column names"
+    column_name = metadata["column_name"].unique()[0]
+
+    result = pyarrow.chunked_array(rottnest.read_indexed_pages(column_name, metadata["file_path"].to_list(), metadata["row_groups"].to_list(),
+                                     metadata["data_page_offsets"].to_list(), metadata["data_page_sizes"].to_list(), metadata["dictionary_page_sizes"].to_list()))
+    result = pyarrow.table([result], names = ["text"])
+    
+    return polars.from_arrow(result).filter(polars.col("text").str.contains(query))
 
 def search_index_bm25(indices: List[str], query: str, K: int, query_expansion = "openai", quality_factor = 0.2, expansion_tokens = 20):
 
@@ -154,7 +167,11 @@ def search_index_bm25(indices: List[str], query: str, K: int, query_expansion = 
         print(tokens)
 
     # metadata_file = f"{index_name}.meta"
-    index_search_results = rottnest.search_lava([f"{index_name}.lava" for index_name in indices], token_ids, weights, int(K * quality_factor))
+    index_search_results = rottnest.search_lava_bm25([f"{index_name}.lava" for index_name in indices], token_ids, weights, int(K * quality_factor))
+    
+    if len(index_search_results) == 0:
+        return None
+    
     uids = polars.from_dict({"file_id": [i[0] for i in index_search_results], "uid": [i[1] for i in index_search_results]})
 
     metadatas = [polars.read_parquet(f"{index_name}.meta").with_columns(polars.lit(i).alias("file_id").cast(polars.Int64)) for i, index_name in enumerate(indices)]

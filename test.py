@@ -43,7 +43,7 @@ def merge_test():
 
     print("search result", rottnest.rottnest.search_lava("1.lava", "d"))
 
-    rottnest.rottnest.merge_lava("merged.lava", ["1.lava", "2.lava", "3.lava"], [0,10,20])
+    rottnest.rottnest.merge_lava_bm25("merged.lava", ["1.lava", "2.lava", "3.lava"], [0,10,20])
 
     assert rottnest.rottnest.search_lava("merged.lava", "d") == [2]
     assert rottnest.rottnest.search_lava("merged.lava", "f") == [5,20] # the second one will be 20 because short uid list

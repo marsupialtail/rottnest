@@ -18,27 +18,17 @@ use crate::{
 };
 
 async fn get_tokenizer_async(
-    file_sizes: Vec<usize>,
     mut readers: Vec<AsyncReader>,
 ) -> Result<(Tokenizer,Vec<String>), LavaError>
 {
     let mut compressed_tokenizer: Option<Vec<u8>> = None;
 
     for i in 0 .. readers.len() {
-        let results = readers[i].read_usize_from_end(3).await?;
-        let compressed_plist_offsets_offset = results[1];
-        // now read the term dictionary
-        readers[i].seek(SeekFrom::Start(compressed_plist_offsets_offset)).await?;
-        let mut buffer2: Vec<u8> = vec![0u8; file_sizes[i] - compressed_plist_offsets_offset as usize - 24];
-        readers[i].read(&mut buffer2).await?;
-        let mut decompressor = Decoder::new(&buffer2[..])?;
-        let mut decompressed_serialized_plist_offsets: Vec<u8> =
-            Vec::with_capacity(buffer2.len() as usize);
-        decompressor.read_to_end(&mut decompressed_serialized_plist_offsets)?;
-        let plist_offsets: Vec<u64> = bincode::deserialize(&decompressed_serialized_plist_offsets)?;
-
-        let this_compressed_tokenizer: bytes::Bytes = readers[i].read_range(0, plist_offsets[0]).await?;
-
+        
+        // now interpret this as a usize
+        readers[i].seek(SeekFrom::Start(0)).await?;
+        let compressed_tokenizer_size = readers[i].read_u64_le().await?;
+        let this_compressed_tokenizer: bytes::Bytes = readers[i].read_range(8, 8 + compressed_tokenizer_size).await?;
         match &compressed_tokenizer {
             Some(value) => assert!(this_compressed_tokenizer == value, "detected different tokenizers between different lava files, can't search across them."), 
             None => compressed_tokenizer = Some(this_compressed_tokenizer.to_vec())
@@ -71,7 +61,7 @@ async fn search_substring_async(
 ) -> Result<Vec<(u64,u64)>, LavaError> 
 {
 
-    fn search_chunk(chunk: Bytes, token: u32, pos: usize) -> Result<u64, LavaError> {
+    fn search_chunk(chunk: Bytes, token: u32, pos: usize) -> Result<usize, LavaError> {
         let compressed_counts_size = u64::from_le_bytes(chunk[0 .. 8].try_into().unwrap());
         let compressed_counts = &chunk[8 .. (compressed_counts_size + 8) as usize];
         let mut decompressor = Decoder::new(compressed_counts)?;
@@ -90,7 +80,8 @@ async fn search_substring_async(
                 result += 1;
             }
         }
-        Ok(result)
+
+        Ok(result as usize)
     }
 
     let mut all_uids: HashSet<(u64,u64)> = HashSet::new();
@@ -104,7 +95,6 @@ async fn search_substring_async(
         let n = results[3];
 
         // now read the term dictionary
-        readers[file_id].seek(SeekFrom::Start(fm_chunk_offsets_offset)).await?;
         let compressed_fm_chunk_offsets = readers[file_id].read_range(fm_chunk_offsets_offset, posting_list_offsets_offset).await?;
         let mut decompressor = Decoder::new(&compressed_fm_chunk_offsets[..])?;
         let mut serialized_fm_chunk_offsets: Vec<u8> = Vec::with_capacity(compressed_fm_chunk_offsets.len() as usize);
@@ -112,7 +102,6 @@ async fn search_substring_async(
         let fm_chunk_offsets: Vec<u64> = bincode::deserialize(&serialized_fm_chunk_offsets)?;
 
         // now read the posting list offsets
-        readers[file_id].seek(SeekFrom::Start(posting_list_offsets_offset)).await?;
         let compressed_posting_list_offsets = readers[file_id].read_range(posting_list_offsets_offset, total_counts_offset).await?;
         let mut decompressor = Decoder::new(&compressed_posting_list_offsets[..])?;
         let mut serialized_posting_list_offsets: Vec<u8> = Vec::with_capacity(compressed_posting_list_offsets.len() as usize);
@@ -120,19 +109,18 @@ async fn search_substring_async(
         let posting_list_offsets: Vec<u64> = bincode::deserialize(&serialized_posting_list_offsets)?;
 
         // now read the total counts
-        readers[file_id].seek(SeekFrom::Start(total_counts_offset)).await?;
         let compressed_total_counts = readers[file_id].read_range(total_counts_offset, (file_sizes[file_id] - 32) as u64).await?;
         let mut decompressor = Decoder::new(&compressed_total_counts[..])?;
         let mut serialized_total_counts: Vec<u8> = Vec::with_capacity(compressed_total_counts.len() as usize);
         decompressor.read_to_end(&mut serialized_total_counts)?;
         let total_counts: HashMap<u32, u64> = bincode::deserialize(&serialized_total_counts)?;
 
-        let start: usize = 0;
-        let end: usize = (n + 1) as usize;
+        let mut start: usize = 0;
+        let mut end: usize = n as usize;
         let previous_range = u64::MAX;
 
-        for i in 1 .. query.len() {
-            let current_token = query[query.len() - i];
+        for i in (0 .. query.len()).rev() {
+            let current_token = query[i];
 
             let start_byte = fm_chunk_offsets[start / FM_CHUNK_TOKS];
             let end_byte = fm_chunk_offsets[start / FM_CHUNK_TOKS + 1];
@@ -143,8 +131,8 @@ async fn search_substring_async(
             let end_chunk = readers[file_id].read_range(start_byte, end_byte).await?;
 
             // read the first four bytes
-            let start = total_counts[&current_token] + search_chunk(start_chunk, current_token, start % FM_CHUNK_TOKS)?;
-            let end = total_counts[&current_token] + search_chunk(end_chunk, current_token, end % FM_CHUNK_TOKS)?;
+            start = total_counts[&current_token] as usize + search_chunk(start_chunk, current_token, start % FM_CHUNK_TOKS)?;
+            end = total_counts[&current_token] as usize + search_chunk(end_chunk, current_token, end % FM_CHUNK_TOKS)?;
             
             if start >= end {
                 break;
@@ -372,15 +360,15 @@ async fn get_file_sizes_and_readers(files: &Vec<String>) -> Result<(Vec<usize>, 
 }
 
 #[tokio::main]
-pub async fn search_lava(files: Vec<String>, query_tokens: Vec<u32>, query_weights: Vec<f32>, k: usize ) -> Result<Vec<(u64,u64)>, LavaError> {
+pub async fn search_lava_bm25(files: Vec<String>, query_tokens: Vec<u32>, query_weights: Vec<f32>, k: usize ) -> Result<Vec<(u64,u64)>, LavaError> {
     let (file_sizes, readers) = get_file_sizes_and_readers(&files).await?;
     search_bm25_async(file_sizes, readers, query_tokens, query_weights, k).await
 }
 
 #[tokio::main]
-pub async fn search_substring(files: Vec<String>, query: String, k: usize) -> Result<Vec<(u64,u64)>, LavaError> {
+pub async fn search_lava_substring(files: Vec<String>, query: String, k: usize) -> Result<Vec<(u64,u64)>, LavaError> {
     let (file_sizes, readers) = get_file_sizes_and_readers(&files).await?;
-    let tokenizer = get_tokenizer_async(file_sizes, readers).await?.0;
+    let tokenizer = get_tokenizer_async(readers).await?.0;
 
     let mut skip_tokens: HashSet<u32> = HashSet::new();
     for char in SKIP.chars() {
@@ -389,7 +377,6 @@ pub async fn search_substring(files: Vec<String>, query: String, k: usize) -> Re
         skip_tokens.extend(tokenizer.encode(format!(" {}", char_str), false).unwrap().get_ids().to_vec());
         skip_tokens.extend(tokenizer.encode(format!("{} ", char_str), false).unwrap().get_ids().to_vec());
     }
-
 
     let encoding = tokenizer.encode(query, false).unwrap();
     let result: Vec<u32> = encoding.get_ids().iter()
@@ -405,18 +392,19 @@ pub async fn search_substring(files: Vec<String>, query: String, k: usize) -> Re
 #[tokio::main]
 pub async fn get_tokenizer_vocab(files: Vec<String>) -> Result<Vec<String>, LavaError> {
     let (file_sizes, readers) = get_file_sizes_and_readers(&files).await?;
-    Ok(get_tokenizer_async(file_sizes, readers).await?.1)
+    Ok(get_tokenizer_async(readers).await?.1)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::search_lava;
+    use super::search_lava_bm25;
+    use super::search_lava_substring;
 
     #[test]
     pub fn test_search_lava_one() {
         let file = "condensed.lava";
 
-        let res = search_lava(vec![file.to_string()], vec![6300,15050], vec![0.1,0.2], 10).unwrap();
+        let res = search_lava_bm25(vec![file.to_string()], vec![6300,15050], vec![0.1,0.2], 10).unwrap();
 
         println!("{:?}", res);
     }
@@ -424,8 +412,15 @@ mod tests {
     #[test]
     pub fn test_search_lava_two() {
 
-        let res = search_lava(vec!["bump1.lava".to_string(), "bump2.lava".to_string()], vec![6300,15050], vec![0.1,0.2], 10).unwrap();
+        let res = search_lava_bm25(vec!["bump1.lava".to_string(), "bump2.lava".to_string()], vec![6300,15050], vec![0.1,0.2], 10).unwrap();
 
         println!("{:?}", res);
     }
+
+    #[test]
+    pub fn test_search_substring() {
+        let result = search_lava_substring(vec!["chinese_index/0.lava".to_string()], "iPhone 13 Pro".to_string(), 10);
+        println!("{:?}", result.unwrap());
+    }
+
 }

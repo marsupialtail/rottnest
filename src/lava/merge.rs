@@ -4,6 +4,7 @@ use std::collections::BTreeSet;
 use std::io::{BufRead, BufReader, Cursor, Read, Seek, SeekFrom, Write};
 use zstd::stream::encode_all;
 use zstd::stream::read::Decoder;
+use tokio::io::AsyncReadExt;
 
 use opendal::raw::oio::ReadExt;
 use opendal::services::Fs;
@@ -14,6 +15,36 @@ use std::env;
 use crate::formats::io::{AsyncReader, READER_BUFFER_SIZE, WRITER_BUFFER_SIZE};
 use crate::lava::error::LavaError;
 use crate::lava::plist::PListChunk;
+use crate::lava::fm_chunk::FMChunk;
+use std::collections::HashMap;
+
+struct FMChunkIterator {
+    reader: AsyncReader,
+    fm_chunk_offsets: Vec<u64>,
+    current_chunk_offset: usize,
+    current_chunk: FMChunk
+}
+
+impl FMChunkIterator {
+    // take ownership of the data structures
+    pub async fn new(
+        mut reader: AsyncReader,
+        fm_chunk_offsets: Vec<u64>,
+    ) -> Result<Self, LavaError> {
+
+        let buffer3 = reader.read_range(fm_chunk_offsets[0], fm_chunk_offsets[1]).await?;
+        let current_chunk = FMChunk::new(buffer3)?;
+
+        Ok(Self {
+            reader: reader,
+            fm_chunk_offsets: fm_chunk_offsets,
+            current_chunk_offset: 0,
+            current_chunk: current_chunk,
+        })
+    }
+
+    
+}
 
 struct PListChunkIterator {
     reader: AsyncReader,
@@ -77,23 +108,19 @@ impl PListChunkIterator {
 }
 
 #[tokio::main]
-async fn hoa(
+pub async fn merge_lava_bm25(
     condensed_lava_file: &str,
-    operator: &mut Operator,
     lava_files: Vec<String>,
     uid_offsets: Vec<u64>,
 ) -> Result<(), LavaError> // hawaiian for lava condensation
 {
-    // instantiate a list of readers from lava_files
-    // let mut readers: Vec<Reader> = Vec::with_capacity(lava_files.len());
-    
+    let mut builder = Fs::default();
+    let current_path = env::current_dir()?;
+    builder.root(current_path.to_str().expect("no path"));
+    let operator = Operator::new(builder)?.finish();
+
     let mut file_sizes: Vec<u64> = Vec::with_capacity(lava_files.len());
-    // let mut plist_offsets: Vec<Vec<u64>> = Vec::with_capacity(lava_files.len());
-    // let mut plist_elems: Vec<Vec<u64>> = Vec::with_capacity(lava_files.len());
-
     let mut plist_chunk_iterators: Vec<PListChunkIterator> = Vec::with_capacity(lava_files.len());
-
-    // read in and decompress all the term dictionaries in memory. The term dictionaries corresponding to English language should be small.
 
     let mut combined_token_counts: Vec<usize> = Vec::new();
     let mut total_num_documents: u64 = 0;
@@ -151,7 +178,9 @@ async fn hoa(
         }
         let num_elements = this_plist_offsets.len() / 2;
 
-        let this_compressed_tokenizer: bytes::Bytes = reader.read_range(0, this_plist_offsets[0]).await?;
+        reader.seek(SeekFrom::Start(0)).await?;
+        let compressed_tokenizer_size = reader.read_u64_le().await?;
+        let this_compressed_tokenizer: bytes::Bytes = reader.read_range(8, 8 + compressed_tokenizer_size).await?;
 
         match &compressed_tokenizer {
             Some(value) => assert!(this_compressed_tokenizer == value, "detected different tokenizers, cannot merge, something is very wrong."), 
@@ -246,35 +275,92 @@ async fn hoa(
     Ok(())
 }
 
-pub fn merge_lava(
-    condensed_lava_file: String,
+async fn compute_interleave(bwt0_reader: &mut Reader, bwt1_reader: &mut Reader, lens: (usize, usize), counts: &[usize; 256]) -> Result<BitVec, Error> {
+    let (bwt0_len, bwt1_len) = lens;
+
+    // construct character starts array
+    let mut starts: [usize; 256] = [0; 256];
+    let mut sum = 0;
+    for i in 0..256 {
+        starts[i] = sum;
+        sum += counts[i];
+    }
+
+    let mut interleave = BitVec::from_elem(bwt0_len + bwt1_len, true);
+    for i in 0..bwt0_len {
+        interleave.set(i, false);
+    }
+
+    let mut interleave_iterations = 0;
+
+    loop {
+        let mut ind: [usize; 2] = [0, 0];
+
+        // reset readers
+        bwt0_reader.seek(std::io::SeekFrom::Start(0)).await?;
+        bwt1_reader.seek(std::io::SeekFrom::Start(0)).await?;
+
+        let mut bwt0 = vec![0u8; BUFFER_SIZE];
+        let mut bwt1 = vec![0u8; BUFFER_SIZE];
+        bwt0_reader.read(&mut bwt0).await?;
+        bwt1_reader.read(&mut bwt1).await?;
+
+        let mut offsets = starts.clone();
+        let mut new_interleave = BitVec::from_elem(interleave.len(), false);
+        for i in 0..interleave.len() {
+            if interleave[i] {
+                new_interleave.set(offsets[bwt1[ind[1]] as usize], true);
+                offsets[bwt1[ind[1]] as usize] += 1;
+                ind[1] += 1;
+
+                if ind[1] == BUFFER_SIZE {
+                    bwt1_reader.read(&mut bwt1).await?;
+                    ind[1] = 0;
+                }
+            } else {
+                offsets[bwt0[ind[0]] as usize] += 1;
+                ind[0] += 1;
+
+                if ind[0] == BUFFER_SIZE {
+                    bwt0_reader.read(&mut bwt0).await?;
+                    ind[0] = 0;
+                }
+            }
+        }
+
+        interleave_iterations += 1;
+
+        if new_interleave == interleave {
+            break;
+        }
+        interleave = new_interleave;
+    }
+
+    println!("interleave iterations: {}", interleave_iterations);
+    Ok(interleave)
+}
+
+#[tokio::main]
+pub async fn merge_lava_substring(
+    condensed_lava_file: &str,
     lava_files: Vec<String>,
     uid_offsets: Vec<u64>,
-) -> Result<(), LavaError> {
-    // you should only merge them on local disk. It's not worth random accessing S3 for this because of the request costs.
-    // worry about running out of disk later. Assume you have a fast SSD for now.
-    let mut builder = Fs::default();
-    let current_path = env::current_dir()?;
-    builder.root(current_path.to_str().expect("no path"));
-    let mut operator = Operator::new(builder)?.finish();
+) -> Result<(), LavaError> // hawaiian for lava condensation
+{
+    // first merge the tokenizer, then merge the fm indices then merge the posting lists. 
+    Ok(())
 
-    hoa(
-        condensed_lava_file.as_ref(),
-        &mut operator,
-        lava_files,
-        uid_offsets,
-    )
 }
 
 #[cfg(test)]
 mod tests {
-    use super::merge_lava;
+    use super::merge_lava_bm25;
 
     #[test]
-    pub fn test_merge_lava() {
+    pub fn test_merge_lava_bm25() {
 
-        let res = merge_lava(
-            "merged.lava".to_string(),
+        let res = merge_lava_bm25(
+            "merged.lava",
             vec![
                 "bump1.lava".to_string(),
                 "bump2.lava".to_string(),

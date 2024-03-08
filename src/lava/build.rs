@@ -128,6 +128,7 @@ pub async fn build_lava_bm25(
     }
 
     let mut file = File::create(output_file_name)?;
+    file.write_all(&(compressed_tokenizer.len() as u64).to_le_bytes())?;
     file.write_all(&compressed_tokenizer)?;
 
     let bytes = bincode::serialize(&token_counts)?;
@@ -323,6 +324,7 @@ pub async fn build_lava_substring(
     println!("{:?}", compressed_idx.len());
 
     let mut file = File::create(output_file_name)?;
+    file.write_all(&(compressed_tokenizer.len() as u64).to_le_bytes())?;
     file.write_all(&compressed_tokenizer)?;
 
     let mut fm_chunk_offsets: Vec<usize> = vec![file.seek(SeekFrom::Current(0))? as usize];
@@ -336,20 +338,32 @@ pub async fn build_lava_substring(
         next_chunk_counts.entry(current_tok).and_modify(|count| *count += 1).or_insert(1);
         current_chunk.push(current_tok);
 
-        if i % FM_CHUNK_TOKS == 0 || i == bwt.len() - 1 { 
+        if ((i + 1) % FM_CHUNK_TOKS == 0) || i == bwt.len() - 1 { 
             let serialized_counts = bincode::serialize(&current_chunk_counts)?;
             let compressed_counts = encode_all(&serialized_counts[..], 0).expect("Compression failed");
             file.write_all(&(compressed_counts.len() as u64).to_le_bytes())?;
             file.write_all(&compressed_counts)?;
-            current_chunk_counts = next_chunk_counts.clone();
-            next_chunk_counts.clear();
             let serialized_chunk = bincode::serialize(&current_chunk)?;
             let compressed_chunk = encode_all(&serialized_chunk[..], 0).expect("Compression failed");
             file.write_all(&compressed_chunk)?;
             fm_chunk_offsets.push(file.seek(SeekFrom::Current(0))? as usize);
+            current_chunk_counts = next_chunk_counts.clone();
             current_chunk = vec![];
         }
     };
+
+    // current_chunk_counts should contain the cumulative counts up for each token
+    
+    let mut cumulative_counts: HashMap<u32, u64> = HashMap::new();
+    cumulative_counts.entry(0).or_insert(0);
+
+    for i in 1 .. tokenizer.get_vocab_size(false) {
+        for j in 0 .. i {
+            cumulative_counts.entry(i as u32)
+                .and_modify(|count| *count += current_chunk_counts.get(&(j as u32)).unwrap_or(&0))
+                .or_insert_with(|| current_chunk_counts.get(&(j as u32)).unwrap_or(&0).clone());
+        }
+    }
 
     let mut posting_list_offsets: Vec<usize> = vec![file.seek(SeekFrom::Current(0))? as usize];
 
@@ -372,8 +386,8 @@ pub async fn build_lava_substring(
     file.write_all(&compressed_posting_list_offsets)?;
 
     let total_counts_offset = file.seek(SeekFrom::Current(0))? as usize;
-    let serialized_total_counts = bincode::serialize(&current_chunk_counts)?;
-    let compressed_total_counts = encode_all(&serialized_total_counts[..], 0).expect("Compression failed");
+    let serialized_total_counts = bincode::serialize(&cumulative_counts)?;
+    let compressed_total_counts: Vec<u8> = encode_all(&serialized_total_counts[..], 0).expect("Compression failed");
     file.write_all(&compressed_total_counts)?;
 
     file.write_all(&(fm_chunk_offsets_offset as u64).to_le_bytes())?;

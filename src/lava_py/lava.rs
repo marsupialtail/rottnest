@@ -7,13 +7,13 @@ use crate::lava;
 use crate::lava::error::LavaError;
 
 #[pyfunction]
-pub fn search_lava(py: Python, files: Vec<String>, query_tokens: Vec<u32>, query_weights: Vec<f32>, k: usize) -> Result<Vec<(u64, u64)>, LavaError> {
-    py.allow_threads(|| lava::search_lava(files, query_tokens, query_weights, k))
+pub fn search_lava_bm25(py: Python, files: Vec<String>, query_tokens: Vec<u32>, query_weights: Vec<f32>, k: usize) -> Result<Vec<(u64, u64)>, LavaError> {
+    py.allow_threads(|| lava::search_lava_bm25(files, query_tokens, query_weights, k))
 }
 
 #[pyfunction]
-pub fn search_substring(py: Python, files: Vec<String>, k: usize) -> Result<Vec<(u64, u64)>, LavaError> {
-    py.allow_threads(|| lava::search_lava(files, query_tokens, query_weights, k))
+pub fn search_lava_substring(py: Python, files: Vec<String>, query: String, k: usize) -> Result<Vec<(u64, u64)>, LavaError> {
+    py.allow_threads(|| lava::search_lava_substring(files, query, k))
 }
 
 #[pyfunction]
@@ -22,13 +22,13 @@ pub fn get_tokenizer_vocab(py: Python, files: Vec<String>) -> Result<Vec<String>
 }
 
 #[pyfunction]
-pub fn merge_lava(
+pub fn merge_lava_bm25(
     py: Python,
     condensed_lava_file: String,
     lava_files: Vec<String>,
     uid_offsets: Vec<u64>,
 ) -> Result<(), LavaError> {
-    py.allow_threads(|| lava::merge_lava(condensed_lava_file, lava_files, uid_offsets))
+    py.allow_threads(|| lava::merge_lava_bm25(&condensed_lava_file, lava_files, uid_offsets))
 }
 
 #[pyfunction]
