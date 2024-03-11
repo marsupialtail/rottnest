@@ -5,8 +5,8 @@ use std::io::Read;
 use zstd::stream::encode_all;
 use super::error::LavaError;
 pub(crate) struct FMChunk {
-    counts_so_far : HashMap<u32, u64>,
-    bwt_chunk : Vec<u32>,
+    pub counts_so_far : HashMap<u32, u64>,
+    pub bwt_chunk : Vec<u32>,
 }
 
 impl FMChunk {
@@ -42,5 +42,16 @@ impl FMChunk {
         result.append(&mut compressed_chunk);
         Ok(result)
     }
+
+    pub fn search(& self, token: u32, pos: usize) -> Result<u64, LavaError> {
+        let mut result = *self.counts_so_far.get(&token).unwrap_or(&0);
+        for j in 0 .. pos {
+            if self.bwt_chunk[j] == token {
+                result += 1;
+            }
+        }
+        Ok(result)
+    }
+
 
 }

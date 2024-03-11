@@ -63,6 +63,17 @@ def merge_index_bm25(new_index_name: str, index_names: List[str]):
     rottnest.merge_lava_bm25(f"{new_index_name}.lava", [f"{name}.lava" for name in index_names], offsets)
     polars.concat(metadatas).write_parquet(f"{new_index_name}.meta")
 
+def merge_index_substring(new_index_name: str, index_names: List[str]):
+    assert len(index_names) > 1
+
+    # first read the metadata files and merge those
+    metadatas = [polars.read_parquet(f"{name}.meta")for name in index_names]
+    metadata_lens = [len(metadata) for metadata in metadatas]
+    offsets = np.cumsum([0] + metadata_lens)[:-1]
+    metadatas = [metadata.with_columns(polars.col("uid") + offsets[i]) for i, metadata in enumerate(metadatas)]
+    rottnest.merge_lava_substring(f"{new_index_name}.lava", [f"{name}.lava" for name in index_names], offsets)
+    polars.concat(metadatas).write_parquet(f"{new_index_name}.meta")
+
 def query_expansion_llm(tokenizer_vocab: List[str], query: str, model = "text-embedding-3-large", expansion_tokens = 20):
     import os, pickle
     try:

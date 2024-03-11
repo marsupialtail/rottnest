@@ -3,9 +3,9 @@ use opendal::services::{Fs, S3};
 use opendal::Operator;
 use opendal::Reader;
 use std::env;
-use std::io::SeekFrom;
+use std::io::{Read,SeekFrom};
 use std::ops::{Deref, DerefMut};
-
+use zstd::stream::read::Decoder;
 use tokio::pin;
 
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
@@ -69,6 +69,16 @@ impl AsyncReader {
         }
 
         Ok(res.freeze())
+    }
+
+    // theoretically we should try to return different types here, but Vec<u64> is def. the most common
+    pub async fn read_range_and_decompress(&mut self, from: u64, to: u64) -> Result<Vec<u64>, LavaError> {
+        let compressed_posting_list_offsets = self.read_range(from, to).await?;
+        let mut decompressor = Decoder::new(&compressed_posting_list_offsets[..])?;
+        let mut serialized_posting_list_offsets: Vec<u8> = Vec::with_capacity(compressed_posting_list_offsets.len() as usize);
+        decompressor.read_to_end(&mut serialized_posting_list_offsets)?;
+        let result: Vec<u64> = bincode::deserialize(&serialized_posting_list_offsets)?;
+        Ok(result)
     }
 
     pub async fn read_usize_from_end(&mut self, n: u64) -> Result<Vec<u64>, LavaError> {
