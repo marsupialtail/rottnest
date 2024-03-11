@@ -375,7 +375,8 @@ pub async fn search_lava_substring(
         );
     }
 
-    let encoding = tokenizer.encode(query, false).unwrap();
+    let lower: String = query.chars().flat_map(|c| c.to_lowercase()).collect();
+    let encoding = tokenizer.encode(lower, false).unwrap();
     let result: Vec<u32> = encoding
         .get_ids()
         .iter()
@@ -429,8 +430,8 @@ mod tests {
     #[test]
     pub fn test_search_substring() {
         let result = search_lava_substring(
-            vec!["chinese_index/1.lava".to_string()],
-            "iPhone 13 Pro".to_string(),
+            vec!["chinese_index/0.lava".to_string()],
+            "Samsung Galaxy Note".to_string(),
             10,
         );
         println!("{:?}", result.unwrap());

@@ -19,6 +19,7 @@ use crate::lava::error::LavaError;
 use crate::lava::plist::PListChunk;
 
 use libdivsufsort_rs::divsufsort64;
+use rayon::prelude::*;
 
 /*
 Structure of the lava file
@@ -278,8 +279,8 @@ pub async fn build_lava_substring(
         .map(|(uid, text)| {
             // strip out things in skip in text
 
-            // let lower: String = text.chars().flat_map(|c| c.to_lowercase()).collect();
-            let encoding = tokenizer.encode(text, false).unwrap();
+            let lower: String = text.chars().flat_map(|c| c.to_lowercase()).collect();
+            let encoding = tokenizer.encode(lower, false).unwrap();
             let result: Vec<u32> = encoding
                 .get_ids()
                 .iter()
@@ -323,16 +324,30 @@ pub async fn build_lava_substring(
         (encodings, uids)
     };
 
+    // for i in 10..encodings.len() {
+    //     suffices.push(encodings[i - 10..i].to_vec());
+    // }
+
+    // for i in 0..10 {
+    //     let mut suffix: Vec<u32> = vec![tokenizer.get_vocab_size(false) as u32 - 1; 10 - i];
+    //     suffix.append(&mut encodings[0..i].to_vec());
+    //     suffices.push(suffix);
+    // }
+
     for i in 10..encodings.len() {
         suffices.push(encodings[i - 10..i].to_vec());
     }
 
     let mut sa: Vec<usize> = (0..suffices.len()).collect();
 
-    // Step 2: Sort the vector of indices based on suffices
-    sa.sort_by(|&a, &b| suffices[a].cmp(&suffices[b]));
+    let start = std::time::Instant::now();
 
-    // Now, `indices` is sorted according to the order of the sorted suffices
+    // sa.sort_by(|&a, &b| suffices[a].cmp(&suffices[b]));
+
+    sa.par_sort_by(|&a, &b| suffices[a].cmp(&suffices[b]));
+
+    let duration = start.elapsed();
+    println!("sufsort time: {:?}", duration);
 
     // let u8_encodings: Vec<u8> = encodings
     //     .iter()

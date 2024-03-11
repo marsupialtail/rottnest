@@ -157,7 +157,7 @@ def search_index_substring(indices: List[str], query: str, K: int):
                                      metadata["data_page_offsets"].to_list(), metadata["data_page_sizes"].to_list(), metadata["dictionary_page_sizes"].to_list()))
     result = pyarrow.table([result], names = ["text"])
     
-    return polars.from_arrow(result).filter(polars.col("text").str.contains(query))
+    return polars.from_arrow(result).filter(polars.col("text").str.to_lowercase().str.contains(query.lower()))
 
 def search_index_bm25(indices: List[str], query: str, K: int, query_expansion = "openai", quality_factor = 0.2, expansion_tokens = 20):
 
