@@ -1,7 +1,7 @@
+use arrow::array::ArrayData;
 use arrow::datatypes::ToByteSlice;
 use arrow::error::ArrowError;
 use arrow_array::{Array, StringArray};
-use arrow::array::ArrayData;
 use log::debug;
 use parquet::{
     arrow::array_reader::make_byte_array_reader,
@@ -73,10 +73,12 @@ async fn parse_metadata(
 ) -> Result<ParquetMetaData, LavaError> {
     // check file is large enough to hold footer
 
-    let mut footer = [0_u8; 8];
-
-    reader.seek(SeekFrom::End(-8)).await.unwrap();
-    reader.read(&mut footer).await.unwrap();
+    let footer: [u8; 8] = reader
+        .read_range(file_size as u64 - 8, file_size as u64)
+        .await?
+        .to_byte_slice()
+        .try_into()
+        .unwrap();
 
     let metadata_len = decode_footer(&footer)?;
     let footer_metadata_len = FOOTER_SIZE + metadata_len;
@@ -88,9 +90,9 @@ async fn parse_metadata(
     }
 
     let start = file_size as u64 - footer_metadata_len as u64;
-    let mut bytes = vec![0_u8; metadata_len];
-    reader.seek(SeekFrom::Start(start)).await.unwrap();
-    reader.read(&mut bytes).await.unwrap();
+    let bytes = reader
+        .read_range(start, start + metadata_len as u64)
+        .await?;
 
     decode_metadata(bytes.to_byte_slice()).map_err(LavaError::from)
 }
@@ -479,10 +481,11 @@ pub async fn read_indexed_pages(
                         get_reader_and_size_from_file(&file_path).await.unwrap();
                     let mut pages: Vec<parquet::column::page::Page> = Vec::new();
                     if dict_page_size > 0 {
-                        let start = dict_page_offset.unwrap();
-                        let mut dict_page_bytes = vec![0; dict_page_size];
-                        reader.seek(SeekFrom::Start(start as u64)).await.unwrap();
-                        reader.read(&mut dict_page_bytes).await.unwrap();
+                        let start = dict_page_offset.unwrap() as u64;
+                        let dict_page_bytes = reader
+                            .read_range(start, start + dict_page_size as u64)
+                            .await
+                            .unwrap();
                         let dict_page_bytes = Bytes::from(dict_page_bytes);
                         let (dict_header_len, dict_header) =
                             read_page_header(&dict_page_bytes, 0).unwrap();
