@@ -39,7 +39,9 @@ pub fn merge_lava_bm25(
     lava_files: Vec<String>,
     uid_offsets: Vec<u64>,
 ) -> Result<(), LavaError> {
-    py.allow_threads(|| lava::merge_lava_bm25(&condensed_lava_file, lava_files, uid_offsets))
+    py.allow_threads(|| {
+        lava::parallel_merge_files(condensed_lava_file, lava_files, uid_offsets, 2, 0)
+    })
 }
 
 #[pyfunction]
@@ -49,7 +51,9 @@ pub fn merge_lava_substring(
     lava_files: Vec<String>,
     uid_offsets: Vec<u64>,
 ) -> Result<(), LavaError> {
-    py.allow_threads(|| lava::merge_lava_substring(&condensed_lava_file, lava_files, uid_offsets))
+    py.allow_threads(|| {
+        lava::parallel_merge_files(condensed_lava_file, lava_files, uid_offsets, 2, 1)
+    })
 }
 
 #[pyfunction]

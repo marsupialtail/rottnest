@@ -9,7 +9,7 @@ import numpy as np
 from tqdm import tqdm
 import hashlib
 
-def index_file_bm25(file_path: List[str], column_name: str, name = None, tokenizer_file = None):
+def index_file_bm25(file_path: str, column_name: str, name = None, tokenizer_file = None):
 
     arr, layout = rottnest.get_parquet_layout(column_name, file_path)
     data_page_num_rows = np.array(layout.data_page_num_rows)
@@ -19,7 +19,7 @@ def index_file_bm25(file_path: List[str], column_name: str, name = None, tokeniz
     # The following three lines are definitely easier to read than to write.
 
     x = np.cumsum(np.hstack([[0],layout.data_page_num_rows[:-1]]))
-    y = np.repeat(x[np.cumsum(np.hstack([[0],layout.row_group_data_pages[:-1]]))], layout.row_group_data_pages)
+    y = np.repeat(x[np.cumsum(np.hstack([[0],layout.row_group_data_pages[:-1]])).astype(np.uint64)], layout.row_group_data_pages)
     page_row_offsets_in_row_group = x - y
 
     file_data = polars.from_dict({
@@ -39,14 +39,14 @@ def index_file_bm25(file_path: List[str], column_name: str, name = None, tokeniz
     file_data.write_parquet(f"{name}.meta")
     print(rottnest.build_lava_bm25(f"{name}.lava", arr, pyarrow.array(uid.astype(np.uint64)), tokenizer_file))
 
-def index_file_substring(file_path: List[str], column_name: str, name = None, tokenizer_file = None):
+def index_file_substring(file_path: str, column_name: str, name = None, tokenizer_file = None):
 
     arr, layout = rottnest.get_parquet_layout(column_name, file_path)
     data_page_num_rows = np.array(layout.data_page_num_rows)
     uid = np.repeat(np.arange(len(data_page_num_rows)), data_page_num_rows) + 1
 
     x = np.cumsum(np.hstack([[0],layout.data_page_num_rows[:-1]]))
-    y = np.repeat(x[np.cumsum(np.hstack([[0],layout.row_group_data_pages[:-1]]))], layout.row_group_data_pages)
+    y = np.repeat(x[np.cumsum(np.hstack([[0],layout.row_group_data_pages[:-1]])).astype(np.uint64)], layout.row_group_data_pages)
     page_row_offsets_in_row_group = x - y
 
     file_data = polars.from_dict({
@@ -83,6 +83,7 @@ def merge_index_substring(new_index_name: str, index_names: List[str]):
     metadatas = [polars.read_parquet(f"{name}.meta")for name in index_names]
     metadata_lens = [len(metadata) for metadata in metadatas]
     offsets = np.cumsum([0] + metadata_lens)[:-1]
+    print(offsets)
     metadatas = [metadata.with_columns(polars.col("uid") + offsets[i]) for i, metadata in enumerate(metadatas)]
     rottnest.merge_lava_substring(f"{new_index_name}.lava", [f"{name}.lava" for name in index_names], offsets)
     polars.concat(metadatas).write_parquet(f"{new_index_name}.meta")

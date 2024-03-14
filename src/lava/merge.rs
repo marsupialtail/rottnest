@@ -10,8 +10,11 @@ use zstd::bulk::compress;
 use zstd::stream::encode_all;
 use zstd::stream::read::Decoder;
 
+use async_recursion::async_recursion;
+use itertools::Itertools;
 use opendal::{Operator, Writer};
 use std::env;
+use std::sync::{Arc, Mutex};
 
 use crate::formats::io::{AsyncReader, READER_BUFFER_SIZE, WRITER_BUFFER_SIZE};
 use crate::lava::constants::*;
@@ -184,8 +187,7 @@ impl PListChunkIterator {
     }
 }
 
-#[tokio::main]
-pub async fn merge_lava_bm25(
+async fn merge_lava_bm25(
     condensed_lava_file: &str,
     lava_files: Vec<String>,
     uid_offsets: Vec<u64>,
@@ -422,8 +424,7 @@ async fn compute_interleave(
     Ok(interleave)
 }
 
-#[tokio::main]
-pub async fn merge_lava_substring(
+async fn merge_lava_substring(
     condensed_lava_file: &str,
     lava_files: Vec<String>,
     uid_offsets: Vec<u64>,
@@ -496,6 +497,8 @@ pub async fn merge_lava_substring(
         let cumulative_counts: Vec<u64> = reader
             .read_range_and_decompress(total_counts_offset, (file_size - 32) as u64)
             .await?;
+
+        println!("{} {}", file, cumulative_counts.len());
 
         fm_chunk_iterators.push(FMChunkIterator::new(reader, fm_chunk_offsets).await?);
         plist_iterators.push(PListIterator::new(reader1, posting_list_offsets).await?);
@@ -615,12 +618,6 @@ pub async fn merge_lava_substring(
         }
     }
 
-    let mut cumulative_counts: Vec<u64> = vec![0];
-    for i in 0..combined_cumulative_counts.len() {
-        cumulative_counts
-            .push(cumulative_counts[i] + *current_chunk_counts.get(&(i as u32)).unwrap_or(&0));
-    }
-
     let mut posting_list_offsets: Vec<usize> =
         vec![output_file.seek(SeekFrom::Current(0))? as usize];
 
@@ -645,7 +642,7 @@ pub async fn merge_lava_substring(
     output_file.write_all(&compressed_posting_list_offsets)?;
 
     let total_counts_offset = output_file.seek(SeekFrom::Current(0))? as usize;
-    let serialized_total_counts = bincode::serialize(&cumulative_counts)?;
+    let serialized_total_counts = bincode::serialize(&combined_cumulative_counts)?;
     let compressed_total_counts: Vec<u8> =
         encode_all(&serialized_total_counts[..], 0).expect("Compression failed");
     output_file.write_all(&compressed_total_counts)?;
@@ -658,17 +655,148 @@ pub async fn merge_lava_substring(
     Ok(())
 }
 
+#[async_recursion]
+async fn async_parallel_merge_files(
+    condensed_lava_file: String,
+    files: Vec<String>,
+    uid_offsets: Vec<u64>,
+    K: usize,
+    mode: usize, // 0 for bm25 1 for substring
+) -> Result<(), LavaError> {
+    assert!(mode == 1 || mode == 0);
+    if mode == 1 {
+        assert_eq!(K, 2);
+    }
+
+    match files.len() {
+        0 => Err(LavaError::Parse("out of chunks".to_string())), // Assuming LavaError can be constructed like this
+        1 => {
+            // the recursion will end here in this case. rename the files[0] to the supposed output name
+            std::fs::rename(files[0].clone(), condensed_lava_file).unwrap();
+            Ok(())
+        }
+        _ => {
+            // More than one file, need to merge
+            let mut tasks = vec![];
+            let merged_files_shared = Arc::new(Mutex::new(vec![]));
+            let new_uid_offsets_shared = Arc::new(Mutex::new(vec![]));
+
+            let chunked_files: Vec<Vec<String>> = files
+                .into_iter()
+                .chunks(K)
+                .into_iter()
+                .map(|chunk| chunk.collect())
+                .collect();
+
+            let chunked_uid_offsets: Vec<Vec<u64>> = uid_offsets
+                .into_iter()
+                .chunks(K)
+                .into_iter()
+                .map(|chunk| chunk.collect())
+                .collect();
+
+            for (file_chunk, uid_chunk) in chunked_files
+                .into_iter()
+                .zip(chunked_uid_offsets.into_iter())
+            {
+                if file_chunk.len() == 1 {
+                    // If there's an odd file out, directly move it to the next level
+                    merged_files_shared
+                        .lock()
+                        .unwrap()
+                        .push(file_chunk[0].clone());
+                    new_uid_offsets_shared
+                        .lock()
+                        .unwrap()
+                        .push(uid_chunk[0].clone());
+                    continue;
+                }
+
+                let merged_files_clone = Arc::clone(&merged_files_shared);
+                let new_uid_offsets_clone = Arc::clone(&new_uid_offsets_shared);
+
+                let task = tokio::spawn(async move {
+                    let my_uuid = uuid::Uuid::new_v4();
+                    let merged_filename = my_uuid.to_string(); // Define this function based on your requirements
+
+                    println!("mergin {:?}", file_chunk);
+
+                    if mode == 0 {
+                        merge_lava_bm25(&merged_filename, file_chunk.to_vec(), uid_chunk.to_vec())
+                            .await
+                    } else {
+                        merge_lava_substring(
+                            &merged_filename,
+                            file_chunk.to_vec(),
+                            uid_chunk.to_vec(),
+                        )
+                        .await
+                    }
+                    .unwrap();
+
+                    // now go delete the input files
+                    for file in file_chunk {
+                        std::fs::remove_file(file).unwrap();
+                    }
+
+                    merged_files_clone.lock().unwrap().push(merged_filename);
+                    new_uid_offsets_clone.lock().unwrap().push(0);
+                    Result::<(), LavaError>::Ok(())
+                });
+
+                tasks.push(task);
+            }
+
+            // Wait for all tasks to complete
+            let _: Vec<_> = futures::future::join_all(tasks)
+                .await
+                .into_iter()
+                .collect::<Result<_, _>>()
+                .unwrap();
+
+            // Extract the merged files for the next level of merging
+            let merged_files: Vec<String> = Arc::try_unwrap(merged_files_shared)
+                .expect("Lock still has multiple owners")
+                .into_inner()
+                .unwrap();
+
+            let new_uid_offsets = Arc::try_unwrap(new_uid_offsets_shared)
+                .expect("Lock still has multiple owners")
+                .into_inner()
+                .unwrap();
+
+            // Recurse with the newly merged files
+            async_parallel_merge_files(condensed_lava_file, merged_files, new_uid_offsets, K, mode)
+                .await
+        }
+    }
+}
+
+#[tokio::main]
+pub async fn parallel_merge_files(
+    condensed_lava_file: String,
+    files: Vec<String>,
+    uid_offsets: Vec<u64>,
+    K: usize,
+    mode: usize, // 0 for bm25 1 for substring
+) -> Result<(), LavaError> {
+    let result =
+        async_parallel_merge_files(condensed_lava_file, files, uid_offsets, K, mode).await?;
+    Ok(result)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::merge_lava_bm25;
-    use super::merge_lava_substring;
+    use crate::lava::merge::parallel_merge_files;
 
     #[test]
     pub fn test_merge_lava_bm25() {
-        let res = merge_lava_bm25(
-            "merged.lava",
-            vec!["bump1.lava".to_string(), "bump2.lava".to_string()],
+        let res = parallel_merge_files(
+            "merged.lava".to_string(),
+            vec!["bump0.lava".to_string(), "bump1.lava".to_string()],
             vec![0, 1000000],
+            2,
+            0,
         );
 
         println!("{:?}", res);
@@ -676,13 +804,15 @@ mod tests {
 
     #[test]
     pub fn test_merge_lava_substring() {
-        let res = merge_lava_substring(
-            "merged.lava",
+        let res = parallel_merge_files(
+            "merged.lava".to_string(),
             vec![
                 "chinese_index/0.lava".to_string(),
                 "chinese_index/1.lava".to_string(),
             ],
             vec![0, 1000000],
+            2,
+            1,
         );
 
         println!("{:?}", res);
