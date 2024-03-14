@@ -45,6 +45,10 @@ def index_file_substring(file_path: List[str], column_name: str, name = None, to
     data_page_num_rows = np.array(layout.data_page_num_rows)
     uid = np.repeat(np.arange(len(data_page_num_rows)), data_page_num_rows) + 1
 
+    x = np.cumsum(np.hstack([[0],layout.data_page_num_rows[:-1]]))
+    y = np.repeat(x[np.cumsum(np.hstack([[0],layout.row_group_data_pages[:-1]]))], layout.row_group_data_pages)
+    page_row_offsets_in_row_group = x - y
+
     file_data = polars.from_dict({
             "uid": np.arange(len(data_page_num_rows) + 1),
             "file_path": [file_path] * (len(data_page_num_rows) + 1),
@@ -53,6 +57,7 @@ def index_file_substring(file_path: List[str], column_name: str, name = None, to
             "data_page_sizes": [-1] + layout.data_page_sizes,
             "dictionary_page_sizes": [-1] + layout.dictionary_page_sizes,
             "row_groups": np.hstack([[-1] , np.repeat(np.arange(layout.num_row_groups), layout.row_group_data_pages)]),
+            "page_row_offset_in_row_group": np.hstack([[-1], page_row_offsets_in_row_group])
         }
     )
     name = uuid.uuid4().hex if name is None else name
