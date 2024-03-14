@@ -25,9 +25,42 @@ jobs:
         with:
           name: wheels-linux
           path: dist/*
+  
+  build-macos-arm:
+    name: Build Rust Project on macOS Arm
+    runs-on: macos-14
 
-  build-macos:
-    name: Build Rust Project on macOS
+    steps:
+      - uses: actions/checkout@v2
+        name: Checkout code
+
+      - name: Setup Python
+        uses: actions/setup-python@v2
+        with:
+          python-version: '3.x'
+
+      - name: Install Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          default: true
+          profile: minimal
+
+      - name: Install Maturin
+        run: |
+          python -m pip install maturin
+
+      - name: Build with Maturin
+        run: |
+          maturin build --release --features py --out dist
+
+      - uses: actions/upload-artifact@v2
+        with:
+          name: wheels-macos
+          path: dist/*
+
+  build-macos-x86:
+    name: Build Rust Project on macOS x86
     runs-on: macos-latest
 
     steps:
