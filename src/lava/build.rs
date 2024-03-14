@@ -18,7 +18,6 @@ use crate::lava::constants::*;
 use crate::lava::error::LavaError;
 use crate::lava::plist::PListChunk;
 
-use libdivsufsort_rs::divsufsort64;
 use rayon::prelude::*;
 
 /*
@@ -338,24 +337,19 @@ pub async fn build_lava_substring(
         suffices.push(encodings[i - 10..i].to_vec());
     }
 
+    for i in encodings.len()..encodings.len() + 10 {
+        let mut suffix = encodings[i - 10..encodings.len()].to_vec();
+        suffix.append(&mut vec![0; i - encodings.len()]);
+        suffices.push(suffix);
+    }
+
     let mut sa: Vec<usize> = (0..suffices.len()).collect();
 
     let start = std::time::Instant::now();
 
-    // sa.sort_by(|&a, &b| suffices[a].cmp(&suffices[b]));
-
     sa.par_sort_by(|&a, &b| suffices[a].cmp(&suffices[b]));
 
     let duration = start.elapsed();
-    println!("sufsort time: {:?}", duration);
-
-    // let u8_encodings: Vec<u8> = encodings
-    //     .iter()
-    //     .flat_map(|&num| num.to_be_bytes())
-    //     .collect();
-    // let sa: Vec<i64> = divsufsort64(&u8_encodings).unwrap();
-    // // implement this line: result = out[out % dtype.itemsize == 0] // dtype.itemsize
-    // let sa: Vec<i64> = sa.iter().filter(|x| *x % 4 == 0).map(|x| *x / 4).collect();
 
     let mut idx: Vec<u64> = Vec::with_capacity(encodings.len());
     let mut bwt: Vec<u32> = Vec::with_capacity(encodings.len());
@@ -368,17 +362,6 @@ pub async fn build_lava_substring(
             idx.push(uids[(sa[i] - 1) as usize]);
         }
     }
-
-    println!("{:?}", &idx[0..100]);
-    println!("{:?}", &bwt[0..100]);
-
-    let bytes = bincode::serialize(&bwt)?;
-    let compressed_bwt: Vec<u8> = encode_all(&bytes[..], 0).expect("Compression failed");
-    println!("{:?}", compressed_bwt.len());
-
-    let bytes = bincode::serialize(&idx)?;
-    let compressed_idx: Vec<u8> = encode_all(&bytes[..], 0).expect("Compression failed");
-    println!("{:?}", compressed_idx.len());
 
     let mut file = File::create(output_file_name)?;
     file.write_all(&(compressed_tokenizer.len() as u64).to_le_bytes())?;

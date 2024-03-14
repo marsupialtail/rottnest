@@ -1,4 +1,5 @@
 use bytes::Bytes;
+use core::num;
 use itertools::Itertools;
 use std::env;
 use std::{
@@ -203,10 +204,7 @@ async fn search_bm25_async(
         total_documents += num_documents as usize;
 
         let plist_offsets = readers[i]
-            .read_range_and_decompress(
-                compressed_plist_offsets_offset,
-                file_sizes[i] as u64 - compressed_plist_offsets_offset - 24,
-            )
+            .read_range_and_decompress(compressed_plist_offsets_offset, file_sizes[i] as u64 - 24)
             .await?;
 
         if plist_offsets.len() % 2 != 0 {
@@ -384,6 +382,8 @@ pub async fn search_lava_substring(
         .cloned()
         .collect();
 
+    println!("{:?}", result);
+
     let (file_sizes, readers) = get_file_sizes_and_readers(&files).await?;
     search_substring_async(file_sizes, readers, result, k).await
 }
@@ -401,7 +401,7 @@ mod tests {
 
     #[test]
     pub fn test_search_lava_one() {
-        let file = "condensed.lava";
+        let file = "msmarco_index/1.lava";
 
         let res = search_lava_bm25(
             vec![file.to_string()],

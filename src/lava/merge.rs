@@ -434,15 +434,11 @@ pub async fn merge_lava_substring(
     builder.root(current_path.to_str().expect("no path"));
     let operator = Operator::new(builder)?.finish();
 
-    let mut file_sizes: Vec<u64> = Vec::with_capacity(lava_files.len());
-    let mut plist_chunk_iterators: Vec<PListChunkIterator> = Vec::with_capacity(lava_files.len());
-
-    let mut combined_token_counts: Vec<usize> = Vec::new();
-    let mut total_num_documents: u64 = 0;
     let mut compressed_tokenizer: Option<Vec<u8>> = None;
 
     // currently only support merging two files, but can support more in the future.
     assert_eq!(lava_files.len(), 2);
+    assert_eq!(uid_offsets.len(), 2);
 
     let mut ns: Vec<u64> = vec![];
     let mut combined_cumulative_counts: Vec<u64> = vec![];
@@ -555,7 +551,7 @@ pub async fn merge_lava_substring(
     for i in 0..interleave.len() {
         if interleave[i] {
             bwt_output.push(bwt1[bwt_ind1]);
-            index_output.push(idx1[idx_ind1]);
+            index_output.push(idx1[idx_ind1] + uid_offsets[1]);
 
             bwt_ind1 += 1;
             if bwt_ind1 == bwt1.len() {
@@ -572,7 +568,7 @@ pub async fn merge_lava_substring(
             }
         } else {
             bwt_output.push(bwt0[bwt_ind0]);
-            index_output.push(idx0[idx_ind0]);
+            index_output.push(idx0[idx_ind0] + uid_offsets[0]);
 
             bwt_ind0 += 1;
             if bwt_ind0 == bwt0.len() {

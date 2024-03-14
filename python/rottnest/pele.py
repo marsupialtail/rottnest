@@ -15,6 +15,13 @@ def index_file_bm25(file_path: List[str], column_name: str, name = None, tokeniz
     data_page_num_rows = np.array(layout.data_page_num_rows)
     uid = np.repeat(np.arange(len(data_page_num_rows)), data_page_num_rows) + 1
 
+    # Code tries to compute the starting row offset of each page in its row group.
+    # The following three lines are definitely easier to read than to write.
+
+    x = np.cumsum(np.hstack([[0],layout.data_page_num_rows[:-1]]))
+    y = np.repeat(x[np.cumsum(np.hstack([[0],layout.row_group_data_pages[:-1]]))], layout.row_group_data_pages)
+    page_row_offsets_in_row_group = x - y
+
     file_data = polars.from_dict({
             "uid": np.arange(len(data_page_num_rows) + 1),
             "file_path": [file_path] * (len(data_page_num_rows) + 1),
@@ -23,6 +30,7 @@ def index_file_bm25(file_path: List[str], column_name: str, name = None, tokeniz
             "data_page_sizes": [-1] + layout.data_page_sizes,
             "dictionary_page_sizes": [-1] + layout.dictionary_page_sizes,
             "row_groups": np.hstack([[-1] , np.repeat(np.arange(layout.num_row_groups), layout.row_group_data_pages)]),
+            "page_row_offset_in_row_group": np.hstack([[-1], page_row_offsets_in_row_group])
         }
     )
 
@@ -188,6 +196,8 @@ def search_index_bm25(indices: List[str], query: str, K: int, query_expansion = 
     metadatas = [polars.read_parquet(f"{index_name}.meta").with_columns(polars.lit(i).alias("file_id").cast(polars.Int64)) for i, index_name in enumerate(indices)]
     metadata = polars.concat(metadatas)
     metadata = metadata.join(uids, on = ["file_id", "uid"])
+
+    print(metadata)
     
     assert len(metadata["column_name"].unique()) == 1, "index is not allowed to span multiple column names"
     column_name = metadata["column_name"].unique()[0]
@@ -196,6 +206,8 @@ def search_index_bm25(indices: List[str], query: str, K: int, query_expansion = 
                                      metadata["data_page_offsets"].to_list(), metadata["data_page_sizes"].to_list(), metadata["dictionary_page_sizes"].to_list()))
     result = pyarrow.table([result], names = ["text"])
     result = result.append_column('row_nr', pyarrow.array(np.arange(len(result)), pyarrow.int64()))
+
+    print(polars.from_arrow(result))
 
     import duckdb
     con = duckdb.connect()
