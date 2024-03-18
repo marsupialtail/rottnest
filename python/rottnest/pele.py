@@ -8,6 +8,27 @@ import polars
 import numpy as np
 from tqdm import tqdm
 import hashlib
+import boto3
+from botocore.config import Config
+import os
+
+def read_metadata_file(file_path: str):
+
+    # currently only support aws and s3 compatible things, this wrapper is temporary, eventually move 
+    # entirely to Rust
+
+    if file_path.startswith("s3://"):
+        style = os.getenv("AWS_VIRTUAL_HOST_STYLE")
+        endpoint_url = os.getenv("AWS_ENDPOINT_URL")
+        if style:
+            s3 = boto3.client('s3', config = Config(s3 = {'addressing_style': 'virtual'}), endpoint_url = endpoint_url if endpoint_url else None)
+        else:
+            s3 = boto3.client('s3', endpoint_url = endpoint_url if endpoint_url else None)
+
+        obj = s3.get_object(Bucket=file_path.split("/")[2], Key="/".join(file_path.split("/")[3:]))
+        return polars.read_parquet(obj['Body'].read())
+    else:
+        return polars.read_parquet(file_path)
 
 def index_file_bm25(file_path: str, column_name: str, name = None, tokenizer_file = None):
 
@@ -69,7 +90,7 @@ def merge_index_bm25(new_index_name: str, index_names: List[str]):
     assert len(index_names) > 1
 
     # first read the metadata files and merge those
-    metadatas = [polars.read_parquet(f"{name}.meta")for name in index_names]
+    metadatas = [read_metadata_file(f"{name}.meta")for name in index_names]
     metadata_lens = [len(metadata) for metadata in metadatas]
     offsets = np.cumsum([0] + metadata_lens)[:-1]
     metadatas = [metadata.with_columns(polars.col("uid") + offsets[i]) for i, metadata in enumerate(metadatas)]
@@ -80,7 +101,7 @@ def merge_index_substring(new_index_name: str, index_names: List[str]):
     assert len(index_names) > 1
 
     # first read the metadata files and merge those
-    metadatas = [polars.read_parquet(f"{name}.meta")for name in index_names]
+    metadatas = [read_metadata_file(f"{name}.meta")for name in index_names]
     metadata_lens = [len(metadata) for metadata in metadatas]
     offsets = np.cumsum([0] + metadata_lens)[:-1]
     print(offsets)
@@ -160,7 +181,7 @@ def search_index_substring(indices: List[str], query: str, K: int):
 
     uids = polars.from_dict({"file_id": [i[0] for i in index_search_results], "uid": [i[1] for i in index_search_results]})
 
-    metadatas = [polars.read_parquet(f"{index_name}.meta").with_columns(polars.lit(i).alias("file_id").cast(polars.Int64)) for i, index_name in enumerate(indices)]
+    metadatas = [read_metadata_file(f"{index_name}.meta").with_columns(polars.lit(i).alias("file_id").cast(polars.Int64)) for i, index_name in enumerate(indices)]
     metadata = polars.concat(metadatas)
     metadata = metadata.join(uids, on = ["file_id", "uid"])
     
@@ -199,7 +220,7 @@ def search_index_bm25(indices: List[str], query: str, K: int, query_expansion = 
     
     uids = polars.from_dict({"file_id": [i[0] for i in index_search_results], "uid": [i[1] for i in index_search_results]})
 
-    metadatas = [polars.read_parquet(f"{index_name}.meta").with_columns(polars.lit(i).alias("file_id").cast(polars.Int64)) for i, index_name in enumerate(indices)]
+    metadatas = [read_metadata_file(f"{index_name}.meta").with_columns(polars.lit(i).alias("file_id").cast(polars.Int64)) for i, index_name in enumerate(indices)]
     metadata = polars.concat(metadatas)
     metadata = metadata.join(uids, on = ["file_id", "uid"])
 

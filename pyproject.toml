@@ -11,10 +11,12 @@ classifiers = [
     "Programming Language :: Python :: Implementation :: PyPy",
 ]
 dynamic = ["version"]
+dependencies = ["pyarrow", "polars", "tqdm", "boto3"]
 
 [tool.maturin]
 python-source = "python"
 features = ["pyo3/extension-module"]
 
+# Defining optional dependencies for feature flags
 [project.optional-dependencies]
-test = ["pyarrow", "polars", "tqdm"]
+bm25 = ["duckdb"]

@@ -56,7 +56,7 @@ jobs:
 
       - uses: actions/upload-artifact@v2
         with:
-          name: wheels-macos
+          name: wheels-macos-arm
           path: dist/*
 
   build-macos-x86:
@@ -89,5 +89,5 @@ jobs:
 
       - uses: actions/upload-artifact@v2
         with:
-          name: wheels-macos
+          name: wheels-macos-x86
           path: dist/*

@@ -308,13 +308,13 @@ async fn get_file_sizes_and_readers(
         };
 
         let filename = if file.starts_with("s3://") {
-            file[5..].split("/").collect::<Vec<&str>>().join("/")
+            file[5..].split("/").collect_vec()[1..].join("/")
         } else {
             file.to_string()
         };
         let reader: AsyncReader = operator
             .clone()
-            .reader_with(&file)
+            .reader_with(&filename)
             .buffer(READER_BUFFER_SIZE)
             .await?
             .into();
