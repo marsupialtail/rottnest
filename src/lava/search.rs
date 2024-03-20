@@ -16,8 +16,12 @@ use crate::{
     formats::io::{AsyncReader, FsBuilder, Operators, S3Builder},
     lava::error::LavaError,
 };
+use futures::future::{AbortHandle, Abortable, Aborted};
+use std::sync::Arc;
+use std::time::Duration;
 use tokenizers::tokenizer::Tokenizer;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
+use tokio::sync::{mpsc, Mutex};
 
 async fn get_tokenizer_async(
     mut readers: Vec<AsyncReader>,
@@ -53,116 +57,157 @@ async fn get_tokenizer_async(
     Ok((tokenizer, result))
 }
 
+async fn search_substring_one_file(
+    file_id: u64,
+    mut reader: AsyncReader,
+    file_size: usize,
+    query: Vec<u32>,
+    all_uids: Arc<Mutex<Vec<(u64, u64)>>>,
+) -> Result<(), LavaError> {
+    let results = reader.read_usize_from_end(4).await?;
+    let fm_chunk_offsets_offset = results[0];
+    let posting_list_offsets_offset = results[1];
+    let total_counts_offset = results[2];
+    let n = results[3];
+
+    let fm_chunk_offsets: Vec<u64> = reader
+        .read_range_and_decompress(fm_chunk_offsets_offset, posting_list_offsets_offset)
+        .await?;
+    let posting_list_offsets: Vec<u64> = reader
+        .read_range_and_decompress(posting_list_offsets_offset, total_counts_offset)
+        .await?;
+    let cumulative_counts: Vec<u64> = reader
+        .read_range_and_decompress(total_counts_offset, (file_size - 32) as u64)
+        .await?;
+
+    let mut start: usize = 0;
+    let mut end: usize = n as usize;
+    let previous_range = u64::MAX;
+
+    for i in (0..query.len()).rev() {
+        let current_token = query[i];
+
+        let start_byte = fm_chunk_offsets[start / FM_CHUNK_TOKS];
+        let end_byte = fm_chunk_offsets[start / FM_CHUNK_TOKS + 1];
+        let start_chunk = reader.read_range(start_byte, end_byte).await?;
+
+        let start_byte = fm_chunk_offsets[end / FM_CHUNK_TOKS];
+        let end_byte = fm_chunk_offsets[end / FM_CHUNK_TOKS + 1];
+        let end_chunk = reader.read_range(start_byte, end_byte).await?;
+
+        // read the first four bytes
+        start = cumulative_counts[current_token as usize] as usize
+            + FMChunk::new(start_chunk)?
+                .search(current_token, start % FM_CHUNK_TOKS)
+                .unwrap() as usize;
+        end = cumulative_counts[current_token as usize] as usize
+            + FMChunk::new(end_chunk)?
+                .search(current_token, end % FM_CHUNK_TOKS)
+                .unwrap() as usize;
+
+        if start >= end {
+            break;
+        }
+    }
+
+    if start >= end {
+        return Ok(());
+    }
+
+    let start_offset = posting_list_offsets[start / FM_CHUNK_TOKS];
+    let end_offset = posting_list_offsets[end / FM_CHUNK_TOKS + 1];
+    let total_chunks = end / FM_CHUNK_TOKS - start / FM_CHUNK_TOKS + 1;
+
+    let plist_chunks = reader.read_range(start_offset, end_offset).await?;
+    for i in 0..total_chunks {
+        let this_start = posting_list_offsets[start / FM_CHUNK_TOKS + i];
+        let this_end = posting_list_offsets[start / FM_CHUNK_TOKS + i + 1];
+        let this_chunk =
+            &plist_chunks[(this_start - start_offset) as usize..(this_end - start_offset) as usize];
+
+        // decompress this chunk
+        let mut decompressor = Decoder::new(&this_chunk[..])?;
+        let mut serialized_plist_chunk: Vec<u8> = Vec::with_capacity(this_chunk.len() as usize);
+        decompressor.read_to_end(&mut serialized_plist_chunk)?;
+        let plist_chunk: Vec<u64> = bincode::deserialize(&serialized_plist_chunk)?;
+
+        if i == 0 {
+            if total_chunks == 1 {
+                for uid in &plist_chunk[start % FM_CHUNK_TOKS..end % FM_CHUNK_TOKS] {
+                    all_uids.lock().await.push((file_id as u64, *uid));
+                }
+            } else {
+                for uid in &plist_chunk[start % FM_CHUNK_TOKS..] {
+                    all_uids.lock().await.push((file_id as u64, *uid));
+                }
+            }
+        } else if i == total_chunks - 1 {
+            println!("Warning");
+            for uid in &plist_chunk[..end % FM_CHUNK_TOKS] {
+                all_uids.lock().await.push((file_id as u64, *uid));
+            }
+        } else {
+            println!("Warning");
+            for uid in &plist_chunk[..] {
+                all_uids.lock().await.push((file_id as u64, *uid));
+            }
+        }
+    }
+    Ok(())
+}
+
 async fn search_substring_async(
-    file_sizes: Vec<usize>,
+    mut file_sizes: Vec<usize>,
     mut readers: Vec<AsyncReader>,
     query: Vec<u32>,
     k: usize,
 ) -> Result<Vec<(u64, u64)>, LavaError> {
-    let mut all_uids: HashSet<(u64, u64)> = HashSet::new();
+    let shared_list: Arc<Mutex<Vec<(u64, u64)>>> = Arc::new(Mutex::new(Vec::new()));
+    let mut abort_handles = Vec::new();
 
-    // @Rain can you please parallelize this.
     for file_id in 0..readers.len() {
-        let results = readers[file_id].read_usize_from_end(4).await?;
-        let fm_chunk_offsets_offset = results[0];
-        let posting_list_offsets_offset = results[1];
-        let total_counts_offset = results[2];
-        let n = results[3];
+        let list_clone = shared_list.clone();
 
-        let fm_chunk_offsets: Vec<u64> = readers[file_id]
-            .read_range_and_decompress(fm_chunk_offsets_offset, posting_list_offsets_offset)
-            .await?;
-        let posting_list_offsets: Vec<u64> = readers[file_id]
-            .read_range_and_decompress(posting_list_offsets_offset, total_counts_offset)
-            .await?;
-        let cumulative_counts: Vec<u64> = readers[file_id]
-            .read_range_and_decompress(total_counts_offset, (file_sizes[file_id] - 32) as u64)
-            .await?;
+        let (abort_handle, abort_registration) = AbortHandle::new_pair();
 
-        let mut start: usize = 0;
-        let mut end: usize = n as usize;
-        let previous_range = u64::MAX;
+        let reader = readers.remove(0);
+        let file_size = file_sizes.remove(0);
+        let query_clone = query.clone();
 
-        for i in (0..query.len()).rev() {
-            let current_token = query[i];
+        let future = Abortable::new(
+            async move {
+                search_substring_one_file(
+                    file_id as u64,
+                    reader,
+                    file_size,
+                    query_clone,
+                    list_clone,
+                )
+            },
+            abort_registration,
+        );
 
-            let start_byte = fm_chunk_offsets[start / FM_CHUNK_TOKS];
-            let end_byte = fm_chunk_offsets[start / FM_CHUNK_TOKS + 1];
-            let start_chunk = readers[file_id].read_range(start_byte, end_byte).await?;
+        tokio::spawn(future);
+        abort_handles.push(abort_handle);
+    }
 
-            let start_byte = fm_chunk_offsets[end / FM_CHUNK_TOKS];
-            let end_byte = fm_chunk_offsets[end / FM_CHUNK_TOKS + 1];
-            let end_chunk = readers[file_id].read_range(start_byte, end_byte).await?;
-
-            // read the first four bytes
-            start = cumulative_counts[current_token as usize] as usize
-                + FMChunk::new(start_chunk)?
-                    .search(current_token, start % FM_CHUNK_TOKS)
-                    .unwrap() as usize;
-            end = cumulative_counts[current_token as usize] as usize
-                + FMChunk::new(end_chunk)?
-                    .search(current_token, end % FM_CHUNK_TOKS)
-                    .unwrap() as usize;
-
-            if start >= end {
-                break;
+    // Monitor the shared list and abort tasks when target_length is reached
+    loop {
+        let list = shared_list.lock().await;
+        if list.len() >= k {
+            println!("Target length reached, aborting tasks...");
+            // Abort all tasks
+            for abort_handle in abort_handles {
+                abort_handle.abort();
             }
-        }
-
-        if start >= end {
-            continue;
-        }
-
-        let start_offset = posting_list_offsets[start / FM_CHUNK_TOKS];
-        let end_offset = posting_list_offsets[end / FM_CHUNK_TOKS + 1];
-        let total_chunks = end / FM_CHUNK_TOKS - start / FM_CHUNK_TOKS + 1;
-
-        let plist_chunks = readers[file_id]
-            .read_range(start_offset, end_offset)
-            .await?;
-        for i in 0..total_chunks {
-            let this_start = posting_list_offsets[start / FM_CHUNK_TOKS + i];
-            let this_end = posting_list_offsets[start / FM_CHUNK_TOKS + i + 1];
-            let this_chunk = &plist_chunks
-                [(this_start - start_offset) as usize..(this_end - start_offset) as usize];
-
-            // decompress this chunk
-            let mut decompressor = Decoder::new(&this_chunk[..])?;
-            let mut serialized_plist_chunk: Vec<u8> = Vec::with_capacity(this_chunk.len() as usize);
-            decompressor.read_to_end(&mut serialized_plist_chunk)?;
-            let plist_chunk: Vec<u64> = bincode::deserialize(&serialized_plist_chunk)?;
-
-            if i == 0 {
-                if total_chunks == 1 {
-                    for uid in &plist_chunk[start % FM_CHUNK_TOKS..end % FM_CHUNK_TOKS] {
-                        all_uids.insert((file_id as u64, *uid));
-                    }
-                } else {
-                    for uid in &plist_chunk[start % FM_CHUNK_TOKS..] {
-                        all_uids.insert((file_id as u64, *uid));
-                    }
-                }
-            } else if i == total_chunks - 1 {
-                println!("Warning");
-                for uid in &plist_chunk[..end % FM_CHUNK_TOKS] {
-                    all_uids.insert((file_id as u64, *uid));
-                }
-            } else {
-                println!("Warning");
-                for uid in &plist_chunk[..] {
-                    all_uids.insert((file_id as u64, *uid));
-                }
-            }
-
-            if all_uids.len() > k {
-                break;
-            }
-        }
-        if all_uids.len() > k {
             break;
         }
+        drop(list);
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    Ok(all_uids.into_iter().collect())
+
+    let result = shared_list.lock().await.clone();
+    Ok(result)
 }
 
 async fn search_bm25_async(
