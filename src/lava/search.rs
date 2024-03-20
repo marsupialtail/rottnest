@@ -340,33 +340,61 @@ async fn search_bm25_async(
 }
 
 async fn get_file_sizes_and_readers(
-    files: &Vec<String>,
+    files: &[String],
 ) -> Result<(Vec<usize>, Vec<AsyncReader>), LavaError> {
-    let mut readers: Vec<AsyncReader> = Vec::new();
-    let mut file_sizes: Vec<usize> = Vec::new();
-    for file in files {
-        let operator = if file.starts_with("s3://") {
-            Operators::from(S3Builder::from(file.as_str())).into_inner()
-        } else {
-            let current_path = env::current_dir()?;
-            Operators::from(FsBuilder::from(current_path.to_str().expect("no path"))).into_inner()
-        };
+    let tasks: Vec<_> = files
+        .iter()
+        .map(|file| {
+            let file = file.clone(); // Clone file name to move into the async block
+            tokio::spawn(async move {
+                // Determine the operator based on the file scheme
+                let operator = if file.starts_with("s3://") {
+                    Operators::from(S3Builder::from(file.as_str())).into_inner()
+                } else {
+                    let current_path = env::current_dir()?;
+                    Operators::from(FsBuilder::from(current_path.to_str().expect("no path")))
+                        .into_inner()
+                };
 
-        let filename = if file.starts_with("s3://") {
-            file[5..].split("/").collect_vec()[1..].join("/")
-        } else {
-            file.to_string()
-        };
-        let reader: AsyncReader = operator
-            .clone()
-            .reader_with(&filename)
-            .buffer(READER_BUFFER_SIZE)
-            .await?
-            .into();
-        readers.push(reader);
+                // Extract filename
+                let filename = if file.starts_with("s3://") {
+                    file[5..].split('/').collect::<Vec<_>>()[1..].join("/")
+                } else {
+                    file.clone()
+                };
 
-        let file_size: u64 = operator.stat(&filename).await?.content_length();
-        file_sizes.push(file_size as usize);
+                // Create the reader
+                let reader: AsyncReader = operator
+                    .clone()
+                    .reader_with(&filename)
+                    .buffer(READER_BUFFER_SIZE)
+                    .await?
+                    .into();
+
+                // Get the file size
+                let file_size: u64 = operator.stat(&filename).await?.content_length();
+
+                Ok::<_, LavaError>((file_size as usize, reader))
+            })
+        })
+        .collect();
+
+    // Wait for all tasks to complete
+    let results = futures::future::join_all(tasks).await;
+
+    // Process results, separating out file sizes and readers
+    let mut file_sizes = Vec::new();
+    let mut readers = Vec::new();
+
+    for result in results {
+        match result {
+            Ok(Ok((size, reader))) => {
+                file_sizes.push(size);
+                readers.push(reader);
+            }
+            Ok(Err(e)) => return Err(e), // Handle error from inner task
+            Err(e) => return Err(LavaError::Parse("Task join error: {}".to_string())), // Handle join error
+        }
     }
 
     Ok((file_sizes, readers))
