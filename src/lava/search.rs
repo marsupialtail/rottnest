@@ -64,6 +64,8 @@ async fn search_substring_one_file(
     query: Vec<u32>,
     all_uids: Arc<Mutex<Vec<(u64, u64)>>>,
 ) -> Result<(), LavaError> {
+    println!("executing");
+
     let results = reader.read_usize_from_end(4).await?;
     let fm_chunk_offsets_offset = results[0];
     let posting_list_offsets_offset = results[1];
@@ -118,6 +120,8 @@ async fn search_substring_one_file(
     let end_offset = posting_list_offsets[end / FM_CHUNK_TOKS + 1];
     let total_chunks = end / FM_CHUNK_TOKS - start / FM_CHUNK_TOKS + 1;
 
+    println!("{}", total_chunks);
+
     let plist_chunks = reader.read_range(start_offset, end_offset).await?;
     for i in 0..total_chunks {
         let this_start = posting_list_offsets[start / FM_CHUNK_TOKS + i];
@@ -164,6 +168,7 @@ async fn search_substring_async(
 ) -> Result<Vec<(u64, u64)>, LavaError> {
     let shared_list: Arc<Mutex<Vec<(u64, u64)>>> = Arc::new(Mutex::new(Vec::new()));
     let mut abort_handles = Vec::new();
+    let mut futures = Vec::new();
 
     for file_id in 0..readers.len() {
         let list_clone = shared_list.clone();
@@ -187,13 +192,16 @@ async fn search_substring_async(
             abort_registration,
         );
 
-        tokio::spawn(future);
+        let handle = tokio::spawn(future);
+
+        futures.push(handle);
         abort_handles.push(abort_handle);
     }
 
     // Monitor the shared list and abort tasks when target_length is reached
     loop {
         let list = shared_list.lock().await;
+        println!("{:?}", list);
         if list.len() >= k {
             println!("Target length reached, aborting tasks...");
             // Abort all tasks
