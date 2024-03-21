@@ -1,13 +1,13 @@
 use bytes::Bytes;
-use futures::{FutureExt, SinkExt};
-use tokio::task::JoinSet;
 use core::num;
+use futures::{FutureExt, SinkExt};
 use itertools::Itertools;
 use std::env;
 use std::{
     collections::{HashMap, HashSet},
     io::{BufRead, BufReader, Cursor, Read, SeekFrom},
 };
+use tokio::task::JoinSet;
 use zstd::stream::read::Decoder;
 
 use crate::formats::parquet::read_indexed_pages;
@@ -173,18 +173,16 @@ async fn search_substring_async(
     let mut join_set = JoinSet::new();
 
     for file_id in 0..readers.len() {
-
         let reader = readers.remove(0);
         let file_size = file_sizes.remove(0);
         let query_clone = query.clone();
 
-        join_set.spawn(
-            search_substring_one_file(
-                file_id as u64,
-                reader,
-                file_size,
-                query_clone,
-            ));
+        join_set.spawn(search_substring_one_file(
+            file_id as u64,
+            reader,
+            file_size,
+            query_clone,
+        ));
     }
 
     let mut result = vec![];
@@ -198,6 +196,9 @@ async fn search_substring_async(
 
     join_set.shutdown().await;
 
+    // keep only k elements in the result
+
+    result.truncate(k);
     Ok(result)
 }
 
