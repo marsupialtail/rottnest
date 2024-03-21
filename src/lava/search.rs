@@ -65,7 +65,7 @@ async fn search_substring_one_file(
     file_size: usize,
     query: Vec<u32>,
 ) -> Result<Vec<(u64, u64)>, LavaError> {
-    println!("executing on thread {:?}", std::thread::current().id());
+    // println!("executing on thread {:?}", std::thread::current().id());
 
     let results = reader.read_usize_from_end(4).await?;
     let fm_chunk_offsets_offset = results[0];
@@ -121,7 +121,7 @@ async fn search_substring_one_file(
     let end_offset = posting_list_offsets[end / FM_CHUNK_TOKS + 1];
     let total_chunks = end / FM_CHUNK_TOKS - start / FM_CHUNK_TOKS + 1;
 
-    println!("total chunks: {}", total_chunks);
+    // println!("total chunks: {}", total_chunks);
 
     let plist_chunks = reader.read_range(start_offset, end_offset).await?;
     let mut res = vec![];
@@ -447,7 +447,7 @@ pub async fn search_lava_substring(
         .cloned()
         .collect();
 
-    println!("{:?}", result);
+    // println!("{:?}", result);
 
     let (file_sizes, readers) = get_file_sizes_and_readers(&files).await?;
     search_substring_async(file_sizes, readers, result, k).await
