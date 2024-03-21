@@ -1,5 +1,6 @@
 use bytes::Bytes;
 use futures::{FutureExt, SinkExt};
+use tokio::task::JoinSet;
 use core::num;
 use itertools::Itertools;
 use std::env;
@@ -17,7 +18,7 @@ use crate::{
     formats::io::{AsyncReader, FsBuilder, Operators, S3Builder},
     lava::error::LavaError,
 };
-use futures::future::{AbortHandle, Abortable, Aborted};
+use futures::future::{AbortHandle, Abortable, Aborted, Join};
 use std::sync::Arc;
 use std::time::Duration;
 use tokenizers::tokenizer::Tokenizer;
@@ -63,10 +64,8 @@ async fn search_substring_one_file(
     mut reader: AsyncReader,
     file_size: usize,
     query: Vec<u32>,
-    //all_uids: Arc<Mutex<Vec<(u64, u64)>>>,
-    mut tx: mpsc::UnboundedSender<Flow>,
-) -> Result<(), LavaError> {
-    println!("executing");
+) -> Result<Vec<(u64, u64)>, LavaError> {
+    println!("executing on thread {:?}", std::thread::current().id());
 
     let results = reader.read_usize_from_end(4).await?;
     let fm_chunk_offsets_offset = results[0];
@@ -115,16 +114,17 @@ async fn search_substring_one_file(
     }
 
     if start >= end {
-        return Ok(());
+        return Ok(Vec::new());
     }
 
     let start_offset = posting_list_offsets[start / FM_CHUNK_TOKS];
     let end_offset = posting_list_offsets[end / FM_CHUNK_TOKS + 1];
     let total_chunks = end / FM_CHUNK_TOKS - start / FM_CHUNK_TOKS + 1;
 
-    println!("{}", total_chunks);
+    println!("total chunks: {}", total_chunks);
 
     let plist_chunks = reader.read_range(start_offset, end_offset).await?;
+    let mut res = vec![];
     for i in 0..total_chunks {
         let this_start = posting_list_offsets[start / FM_CHUNK_TOKS + i];
         let this_end = posting_list_offsets[start / FM_CHUNK_TOKS + i + 1];
@@ -140,35 +140,28 @@ async fn search_substring_one_file(
         if i == 0 {
             if total_chunks == 1 {
                 for uid in &plist_chunk[start % FM_CHUNK_TOKS..end % FM_CHUNK_TOKS] {
-                    // all_uids.lock().await.push((file_id as u64, *uid));
-                    let _ = tx.send(Flow::Data((file_id as u64, *uid)));
+                    // println!("push file_id {}", file_id);
+                    res.push((file_id as u64, *uid));
                 }
             } else {
                 for uid in &plist_chunk[start % FM_CHUNK_TOKS..] {
-                    // all_uids.lock().await.push((file_id as u64, *uid));
-                    let _ = tx.send(Flow::Data((file_id as u64, *uid)));
+                    // println!("push file_id {}", file_id);
+                    res.push((file_id as u64, *uid));
                 }
             }
         } else if i == total_chunks - 1 {
-            println!("Warning");
             for uid in &plist_chunk[..end % FM_CHUNK_TOKS] {
-                // all_uids.lock().await.push((file_id as u64, *uid));
-                let _ = tx.send(Flow::Data((file_id as u64, *uid)));
+                // println!("push file_id {}", file_id);
+                res.push((file_id as u64, *uid));
             }
         } else {
-            println!("Warning");
             for uid in &plist_chunk[..] {
-                // all_uids.lock().await.push((file_id as u64, *uid));
-                let _ = tx.send(Flow::Data((file_id as u64, *uid)));
+                // println!("push file_id {}", file_id);
+                res.push((file_id as u64, *uid));
             }
         }
     }
-    Ok(())
-}
-
-enum Flow {
-    End,
-    Data((u64, u64)),
+    Ok(res)
 }
 
 async fn search_substring_async(
@@ -177,76 +170,34 @@ async fn search_substring_async(
     query: Vec<u32>,
     k: usize,
 ) -> Result<Vec<(u64, u64)>, LavaError> {
-    let shared_list: Arc<Mutex<Vec<(u64, u64)>>> = Arc::new(Mutex::new(Vec::new()));
-    // let mut abort_handles = Vec::new();
-    let mut handles = Vec::new();
-    let (tx, mut rx) = mpsc::unbounded_channel::<Flow>();
-    let (mut abort_tx, mut abort_rx) = sync::oneshot::channel::<()>();
+    let mut join_set = JoinSet::new();
 
     for file_id in 0..readers.len() {
-        // let list_clone = shared_list.clone();
-
-        // let (abort_handle, abort_registration) = AbortHandle::new_pair();
 
         let reader = readers.remove(0);
         let file_size = file_sizes.remove(0);
         let query_clone = query.clone();
 
-        let tx = tx.clone();
-        let handle = tokio::spawn(async move {
+        join_set.spawn(
             search_substring_one_file(
                 file_id as u64,
                 reader,
                 file_size,
                 query_clone,
-                tx,
-            )
-        });
-
-        handles.push(handle);
+            ));
     }
 
-    let search_substring_async = async move {
-        for handle in handles {
-            if let Ok(()) = abort_rx.try_recv() {
-                break;
-            }
-            let _ = handle.await.unwrap();
+    let mut result = vec![];
+    while let Some(res) = join_set.join_next().await {
+        let res = res.unwrap().unwrap();
+        result.extend(res);
+        if result.len() >= k {
+            break;
         }
-        tx.send(Flow::End).unwrap();
-    };
+    }
 
-    let collect_result_async = async move {
-        let mut res = Vec::new();
-        while let Some(Flow::Data(uid)) = rx.recv().await {
-            res.push(uid);
-            if res.len() >= k {
-                abort_tx.send(()).unwrap();
-                break;
-            }
-        }
-        res
-    };
+    join_set.shutdown().await;
 
-    let (_, result) = tokio::join!(search_substring_async, collect_result_async);
-
-    // Monitor the shared list and abort tasks when target_length is reached
-    // loop {
-    //     let list = shared_list.lock().await;
-    //     println!("{:?}", list);
-    //     if list.len() >= k {
-    //         println!("Target length reached, aborting tasks...");
-    //         // Abort all tasks
-    //         for abort_handle in abort_handles {
-    //             abort_handle.abort();
-    //         }
-    //         break;
-    //     }
-    //     drop(list);
-    //     tokio::time::sleep(Duration::from_millis(100)).await;
-    // }
-
-    // let result = shared_list.lock().await.clone();
     Ok(result)
 }
 
