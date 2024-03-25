@@ -1,9 +1,12 @@
 use arrow::array::{make_array, Array, ArrayData, StringArray, UInt64Array};
+use arrow_array::BinaryArray;
 use serde_json;
 use tokenizers::parallelism::MaybeParallelIterator;
 use tokenizers::tokenizer::Tokenizer;
 
 use bincode;
+use serde::{Deserialize, Serialize};
+
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
@@ -17,6 +20,10 @@ use std::io::Cursor;
 use crate::lava::constants::*;
 use crate::lava::error::LavaError;
 use crate::lava::plist::PListChunk;
+
+use crate::vamana::{build_index_par, IndexParams, VamanaIndex};
+use crate::vamana::{EuclideanF32, InMemoryAccessMethodF32};
+use ndarray::{s, Array2};
 
 use rayon::prelude::*;
 
@@ -323,16 +330,6 @@ pub async fn build_lava_substring(
         (encodings, uids)
     };
 
-    // for i in 10..encodings.len() {
-    //     suffices.push(encodings[i - 10..i].to_vec());
-    // }
-
-    // for i in 0..10 {
-    //     let mut suffix: Vec<u32> = vec![tokenizer.get_vocab_size(false) as u32 - 1; 10 - i];
-    //     suffix.append(&mut encodings[0..i].to_vec());
-    //     suffices.push(suffix);
-    // }
-
     for i in 10..encodings.len() {
         suffices.push(encodings[i - 10..i].to_vec());
     }
@@ -435,6 +432,56 @@ pub async fn build_lava_substring(
     file.write_all(&(posting_list_offsets_offset as u64).to_le_bytes())?;
     file.write_all(&(total_counts_offset as u64).to_le_bytes())?;
     file.write_all(&(bwt.len() as u64).to_le_bytes())?;
+
+    Ok(())
+}
+
+#[tokio::main]
+pub async fn build_lava_vector(
+    output_file_name: String,
+    array: Array2<f32>,
+    uid: ArrayData,
+) -> Result<(), LavaError> {
+    let uid = make_array(uid);
+
+    let uid = uid
+        .as_any()
+        .downcast_ref::<UInt64Array>()
+        .ok_or(LavaError::Parse(
+            "Expects uint64 array as second argument".to_string(),
+        ))?;
+
+    println!("{} {}", array.len(), uid.len());
+    let dim = array.shape()[1];
+
+    if array.shape()[0] != uid.len() {
+        return Err(LavaError::Parse(
+            "The length of the array and the uid array must be the same".to_string(),
+        ));
+    }
+
+    let index: VamanaIndex<f32, EuclideanF32, _> = build_index_par::<f32, EuclideanF32, _>(
+        InMemoryAccessMethodF32 { data: array },
+        IndexParams {
+            num_neighbors: 32,
+            search_frontier_size: 32,
+            pruning_threshold: 2.0,
+        },
+    );
+
+    let num_points = index.num_points();
+    let start = index.start;
+    let nlist = index.neighbors;
+    let bytes = bincode::serialize(&nlist)?;
+    let compressed_nlist: Vec<u8> = encode_all(&bytes[..], 0).expect("Compression failed");
+
+    println!("{}", nlist);
+
+    let mut file = File::create(output_file_name)?;
+    file.write_all(&(num_points as u64).to_le_bytes())?;
+    file.write_all(&(dim as u64).to_le_bytes())?;
+    file.write_all(&(start as u64).to_le_bytes())?;
+    file.write_all(&compressed_nlist)?;
 
     Ok(())
 }

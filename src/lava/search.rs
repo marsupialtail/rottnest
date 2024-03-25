@@ -2,6 +2,7 @@ use bytes::Bytes;
 use core::num;
 use futures::{FutureExt, SinkExt};
 use itertools::Itertools;
+use ndarray::Array2;
 use std::env;
 use std::{
     collections::{HashMap, HashSet},
@@ -13,11 +14,13 @@ use zstd::stream::read::Decoder;
 use crate::formats::parquet::read_indexed_pages;
 use crate::lava::constants::*;
 use crate::lava::fm_chunk::FMChunk;
+use crate::vamana::{access::ReaderAccessMethodF32, EuclideanF32, IndexParams, VamanaIndex};
 use crate::{formats::io::READER_BUFFER_SIZE, lava::plist::PListChunk};
 use crate::{
     formats::io::{AsyncReader, FsBuilder, Operators, S3Builder},
     lava::error::LavaError,
 };
+
 use futures::future::{AbortHandle, Abortable, Aborted, Join};
 use std::sync::Arc;
 use std::time::Duration;
@@ -331,6 +334,61 @@ async fn search_bm25_async(
     Ok(plist_result)
 }
 
+async fn search_vector_async(
+    column_name: &str,
+    file_sizes: Vec<usize>,
+    mut readers: Vec<AsyncReader>,
+    uid_nrows: &Vec<Vec<usize>>,
+    uid_to_metadatas: &Vec<Vec<(String, usize, usize, usize, usize)>>,
+    query: &Vec<f32>,
+    k: usize,
+) -> Result<Vec<usize>, LavaError> {
+    let mut results: Vec<usize> = vec![];
+
+    for i in 0..readers.len() {
+        let num_points = readers[i].read_u64_le().await?;
+        let dim = readers[i].read_u64_le().await?;
+        let start = readers[i].read_u64_le().await?;
+
+        let compressed_nlist = readers[i].read_range(24, file_sizes[i] as u64).await?;
+        let mut decompressor = Decoder::new(&compressed_nlist[..])?;
+        let mut serialized_nlist: Vec<u8> = Vec::with_capacity(compressed_nlist.len() as usize);
+        decompressor.read_to_end(&mut serialized_nlist)?;
+        let nlist: Array2<usize> = bincode::deserialize(&serialized_nlist)?;
+
+        let reader_access_method = ReaderAccessMethodF32 {
+            dim: dim as usize,
+            num_points: num_points as usize,
+            column_name: column_name.to_string(),
+            uid_nrows: &uid_nrows[i],
+            // uid to (file_path, row_group, page_offset, page_size, dict_page_size)
+            uid_to_metadata: &uid_to_metadatas[i],
+        };
+
+        // we probably want to serialize and deserialize the indexparams too
+        // upon merging if they are not the same throw an error
+
+        let index: VamanaIndex<f32, EuclideanF32, _> = VamanaIndex::hydrate(
+            reader_access_method,
+            IndexParams {
+                num_neighbors: 32,
+                search_frontier_size: 32,
+                pruning_threshold: 2.0,
+            },
+            nlist,
+            start as usize,
+        );
+
+        let mut ctx = index.get_search_context();
+        index.search(&mut ctx, query.as_slice());
+        let mut local_results: Vec<usize> = ctx.frontier.iter().map(|(v, _d)| *v).collect();
+
+        results.append(&mut local_results);
+    }
+
+    Ok(results)
+}
+
 async fn get_file_sizes_and_readers(
     files: &[String],
 ) -> Result<(Vec<usize>, Vec<AsyncReader>), LavaError> {
@@ -451,6 +509,28 @@ pub async fn search_lava_substring(
 
     let (file_sizes, readers) = get_file_sizes_and_readers(&files).await?;
     search_substring_async(file_sizes, readers, result, k).await
+}
+
+#[tokio::main]
+pub async fn search_lava_vector(
+    files: Vec<String>,
+    column_name: &str,
+    uid_nrows: &Vec<Vec<usize>>,
+    uid_to_metadatas: &Vec<Vec<(String, usize, usize, usize, usize)>>,
+    query: &Vec<f32>,
+    k: usize,
+) -> Result<Vec<usize>, LavaError> {
+    let (file_sizes, readers) = get_file_sizes_and_readers(&files).await?;
+    search_vector_async(
+        column_name,
+        file_sizes,
+        readers,
+        uid_nrows,
+        uid_to_metadatas,
+        query,
+        k,
+    )
+    .await
 }
 
 #[tokio::main]

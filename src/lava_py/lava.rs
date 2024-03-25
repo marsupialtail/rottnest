@@ -5,6 +5,10 @@ use pyo3::{pyfunction, types::PyString, PyAny};
 
 use crate::lava;
 use crate::lava::error::LavaError;
+use ndarray::{Array2, ArrayD, Ix2};
+use numpy::{IntoPyArray, PyArray1, PyArray2, PyArrayDyn, PyReadonlyArrayDyn};
+use pyo3::types::PyBytes;
+use pyo3::IntoPy;
 
 #[pyfunction]
 pub fn search_lava_bm25(
@@ -25,6 +29,21 @@ pub fn search_lava_substring(
     k: usize,
 ) -> Result<Vec<(u64, u64)>, LavaError> {
     py.allow_threads(|| lava::search_lava_substring(files, query, k))
+}
+
+#[pyfunction]
+pub fn search_lava_vector(
+    py: Python,
+    files: Vec<String>,
+    column_name: &str,
+    uid_nrows: Vec<Vec<usize>>,
+    uid_to_metadatas: Vec<Vec<(String, usize, usize, usize, usize)>>,
+    query: Vec<f32>,
+    k: usize,
+) -> Result<Vec<usize>, LavaError> {
+    py.allow_threads(|| {
+        lava::search_lava_vector(files, column_name, &uid_nrows, &uid_to_metadatas, &query, k)
+    })
 }
 
 #[pyfunction]
@@ -104,4 +123,21 @@ pub fn build_lava_substring(
             token_skip_factor,
         )
     })
+}
+
+#[pyfunction]
+pub fn build_lava_vector(
+    py: Python,
+    output_file_name: &PyString,
+    array: PyReadonlyArrayDyn<f32>,
+    uid: &PyAny,
+) -> Result<(), LavaError> {
+    let output_file_name = output_file_name.to_string();
+    let array = array.as_array();
+
+    let uid = ArrayData::from_pyarrow(uid)?;
+
+    let owned_array: Array2<f32> = array.into_dimensionality::<Ix2>().unwrap().to_owned();
+
+    py.allow_threads(|| lava::build_lava_vector(output_file_name, owned_array, uid))
 }

@@ -1,7 +1,7 @@
 use arrow::array::ArrayData;
 use arrow::datatypes::ToByteSlice;
 use arrow::error::ArrowError;
-use arrow_array::{Array, StringArray};
+use arrow_array::{Array, BinaryArray, StringArray};
 use log::debug;
 use parquet::{
     arrow::array_reader::make_byte_array_reader,
@@ -397,16 +397,26 @@ pub async fn get_parquet_layout(
     .unwrap();
     let array = array_reader.next_batch(total_values as usize).unwrap();
 
-    let new_array: &arrow_array::GenericByteArray<arrow_array::types::GenericStringType<i32>> =
-        array
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .ok_or_else(|| {
-                ArrowError::ParseError("Expects string array as first argument".to_string())
-            })
-            .unwrap();
+    let new_array: Result<
+        &arrow_array::GenericByteArray<arrow::datatypes::GenericStringType<i32>>,
+        ArrowError,
+    > = array.as_any().downcast_ref::<StringArray>().ok_or_else(|| {
+        ArrowError::ParseError("Expects string array as first argument".to_string())
+    });
 
-    let data: arrow::array::ArrayData = new_array.to_data();
+    let data = match new_array {
+        Ok(_) => new_array.unwrap().to_data(),
+        Err(_) => array
+            .as_any()
+            .downcast_ref::<BinaryArray>()
+            .ok_or_else(|| {
+                ArrowError::ParseError(
+                    "Expects string or binary array as first argument".to_string(),
+                )
+            })
+            .unwrap()
+            .to_data(),
+    };
 
     Ok((data, parquet_layout))
 }
