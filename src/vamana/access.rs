@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::formats::parquet::read_indexed_pages;
+use crate::formats::parquet::read_indexed_pages_async;
 use crate::vamana::vamana::{
     build_index_par, Distance, IndexParams, Indexable, VectorAccessMethod,
 };
@@ -65,7 +65,7 @@ impl VectorAccessMethod<f32> for ReaderAccessMethodF32<'_> {
         let (file_path, row_group, page_offset, page_size, dict_page_size) =
             self.uid_to_metadata[uid].clone();
 
-        let array_data = read_indexed_pages(
+        let array_data = read_indexed_pages_async(
             self.column_name.clone(),
             vec![file_path],
             vec![row_group],
@@ -73,6 +73,7 @@ impl VectorAccessMethod<f32> for ReaderAccessMethodF32<'_> {
             vec![page_size],
             vec![dict_page_size], // 0 means no dict page
         )
+        .await
         .unwrap()
         .remove(0);
 

@@ -430,8 +430,7 @@ pub struct MatchResult {
     pub matched: String,
 }
 
-#[tokio::main]
-pub async fn read_indexed_pages(
+pub async fn read_indexed_pages_async(
     column_name: String,
     file_paths: Vec<String>,
     row_groups: Vec<usize>,
@@ -566,4 +565,24 @@ pub async fn read_indexed_pages(
         // Here, you can convert `e` (a JoinError) into your custom error type.
         LavaError::from(ParquetError::General(e.to_string()))
     })
+}
+
+#[tokio::main]
+pub async fn read_indexed_pages(
+    column_name: String,
+    file_paths: Vec<String>,
+    row_groups: Vec<usize>,
+    page_offsets: Vec<u64>,
+    page_sizes: Vec<usize>,
+    dict_page_sizes: Vec<usize>, // 0 means no dict page
+) -> Result<Vec<ArrayData>, LavaError> {
+    read_indexed_pages_async(
+        column_name,
+        file_paths,
+        row_groups,
+        page_offsets,
+        page_sizes,
+        dict_page_sizes,
+    )
+    .await
 }

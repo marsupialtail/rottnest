@@ -203,12 +203,13 @@ def query_expansion_keyword(tokenizer_vocab: List[str], query: str):
 def search_index_vector(indices: List[str], query: np.array, K: int):
     
     metadatas = [read_metadata_file(f"{index_name}.meta").with_columns(polars.lit(i).alias("file_id").cast(polars.Int64)) for i, index_name in enumerate(indices)]
+    data_page_rows = [metadata["data_page_rows"] for metadata in metadatas]
+    uid_to_metadata = [[(a,b,c,d,e) for a,b,c,d,e in zip(metadata["file_path"], metadata["row_groups"], metadata["data_page_offsets"], 
+                                                        metadata["data_page_sizes"], metadata["dictionary_page_sizes"])] for metadata in metadatas]
+    
     metadata = polars.concat(metadatas)
     assert len(metadata["column_name"].unique()) == 1, "index is not allowed to span multiple column names"
     column_name = metadata["column_name"].unique()[0]
-    data_page_rows = metadata["data_page_rows"]
-    uid_to_metadata = [(a,b,c,d,e) for a,b,c,d,e in zip(metadata["file_path"], metadata["row_groups"], metadata["data_page_offsets"], 
-                                                        metadata["data_page_sizes"], metadata["dictionary_page_sizes"])]
 
     index_search_results = rottnest.search_lava_vector([f"{index_name}.lava" for index_name in indices], column_name, data_page_rows, uid_to_metadata, query, K)
     print(index_search_results)
