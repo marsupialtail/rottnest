@@ -3,6 +3,7 @@ use core::num;
 use futures::{FutureExt, SinkExt};
 use itertools::Itertools;
 use ndarray::Array2;
+use std::collections::BTreeSet;
 use std::env;
 use std::{
     collections::{HashMap, HashSet},
@@ -188,7 +189,7 @@ async fn search_substring_async(
         ));
     }
 
-    let mut result = vec![];
+    let mut result: BTreeSet<(u64, u64)> = BTreeSet::new();
     while let Some(res) = join_set.join_next().await {
         let res = res.unwrap().unwrap();
         result.extend(res);
@@ -200,7 +201,7 @@ async fn search_substring_async(
     join_set.shutdown().await;
 
     // keep only k elements in the result
-
+    let mut result: Vec<(u64, u64)> = result.into_iter().collect_vec();
     result.truncate(k);
     Ok(result)
 }
