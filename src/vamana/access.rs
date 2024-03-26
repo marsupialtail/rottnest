@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use crate::formats::parquet::read_indexed_pages_async;
+use crate::lava::error::LavaError;
 use crate::vamana::vamana::{
     build_index_par, Distance, IndexParams, Indexable, VectorAccessMethod,
 };
@@ -48,7 +49,12 @@ pub struct ReaderAccessMethodF32<'a> {
 }
 
 impl VectorAccessMethod<f32> for ReaderAccessMethodF32<'_> {
+
     fn get_vec<'a>(&'a self, idx: usize) -> &'a [f32] {
+        unimplemented!("get_vec not implemented for ReaderAccessMethodF32")
+    }
+
+    async fn get_vec_async(&self, idx: usize) -> Result<Vec<f32>, LavaError> {
         // self.data.slice(s![idx, ..]).reborrow().to_slice().unwrap()
 
         // the uid_nrows will look something like 0, 300, 600, 900 etc.
@@ -81,7 +87,7 @@ impl VectorAccessMethod<f32> for ReaderAccessMethodF32<'_> {
         let fetched_slice = binary_array.value(offset);
         // now we need to interpret the u8 binary slice as f32
 
-        let mut result = Box::new(Vec::with_capacity(self.dim));
+        let mut result = Vec::with_capacity(self.dim);
         for i in 0..self.dim {
             result.push(f32::from_le_bytes(
                 fetched_slice[i * 4..(i + 1) * 4]
@@ -91,7 +97,8 @@ impl VectorAccessMethod<f32> for ReaderAccessMethodF32<'_> {
                     .unwrap(),
             ));
         }
-        Box::leak(result)
+
+        Ok(result)
     }
 
     fn dim(&self) -> usize {

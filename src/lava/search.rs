@@ -380,7 +380,7 @@ async fn search_vector_async(
         );
 
         let mut ctx = index.get_search_context();
-        index.search(&mut ctx, query.as_slice());
+        let _ = index.search(&mut ctx, query.as_slice()).await;
         let mut local_results: Vec<usize> = ctx.frontier.iter().map(|(v, _d)| *v).collect();
 
         results.append(&mut local_results);
