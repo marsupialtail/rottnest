@@ -5,6 +5,7 @@ use rand::seq::SliceRandom;
 use rayon::prelude::*;
 
 use crate::vamana::kmeans::{kmeans, KMeansAssignment};
+use crate::lava::error::LavaError;
 
 use super::{access, InMemoryAccessMethodF32};
 
@@ -18,6 +19,12 @@ pub trait VectorAccessMethod<T: Indexable>: std::marker::Sync {
     fn num_points(&self) -> usize;
     fn iter<'a>(&'a self) -> impl Iterator<Item = &'a [T]>;
     fn par_iter<'a>(&'a self) -> impl rayon::prelude::IndexedParallelIterator<Item = &'a [T]>;
+
+    fn get_vec_async(&self, idx: usize) -> impl std::future::Future<Output = Result<Vec<T>, LavaError>> {
+        async move {
+            Ok(self.get_vec(idx).to_vec())
+        }
+    }
 }
 
 pub trait Indexable:
@@ -129,18 +136,18 @@ impl<T: Indexable, D: Distance<T>, V: VectorAccessMethod<T>> VamanaIndex<T, D, V
         }
     }
 
-    pub fn search(&self, ctx: &mut SearchContext, query: &[T]) {
+    pub async fn search(&self, ctx: &mut SearchContext, query: &[T]) -> Result<(), LavaError> {
         ctx.reset();
-        let start_vector = self.get_vector(self.start);
-        let start_distance = D::calculate(query, start_vector);
+        let start_vector = self.get_vector_async(self.start).await?;
+        let start_distance = D::calculate(query, &start_vector);
         let mut closest_unvisited_vertex = 0;
         ctx.frontier.push((self.start, start_distance));
         while closest_unvisited_vertex < ctx.frontier.len() {
             let closest = ctx.frontier[closest_unvisited_vertex];
             ctx.visited.visit(closest.0);
             for n in self.neighbors(closest.0) {
-                let neighbor_vector = self.get_vector(*n);
-                let distance = D::calculate(query, neighbor_vector);
+                let neighbor_vector = self.get_vector_async(*n).await?;
+                let distance = D::calculate(query, &neighbor_vector);
                 ctx.frontier.push((*n, distance));
             }
             ctx.frontier
@@ -157,6 +164,7 @@ impl<T: Indexable, D: Distance<T>, V: VectorAccessMethod<T>> VamanaIndex<T, D, V
                 }
             }
         }
+        Ok(())
     }
 
     pub fn max_num_neighbors(&self) -> usize {
@@ -190,6 +198,10 @@ impl<T: Indexable, D: Distance<T>, V: VectorAccessMethod<T>> VamanaIndex<T, D, V
 
     pub fn get_vector<'a>(&'a self, idx: usize) -> &'a [T] {
         self.access_method.get_vec(idx)
+    }
+
+    pub async fn get_vector_async(&self, idx: usize) -> Result<Vec<T>, LavaError> {
+        self.access_method.get_vec_async(idx).await
     }
 
     fn push_neighbor(&mut self, idx: usize, new_neighbor: usize) {
