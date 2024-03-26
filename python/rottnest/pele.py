@@ -203,7 +203,7 @@ def query_expansion_keyword(tokenizer_vocab: List[str], query: str):
 def search_index_vector(indices: List[str], query: np.array, K: int):
     
     metadatas = [read_metadata_file(f"{index_name}.meta").with_columns(polars.lit(i).alias("file_id").cast(polars.Int64)) for i, index_name in enumerate(indices)]
-    data_page_rows = [metadata["data_page_rows"] for metadata in metadatas]
+    data_page_rows = [np.cumsum(np.hstack([[0] , np.array(metadata["data_page_rows"])])) for metadata in metadatas]
     uid_to_metadata = [[(a,b,c,d,e) for a,b,c,d,e in zip(metadata["file_path"], metadata["row_groups"], metadata["data_page_offsets"], 
                                                         metadata["data_page_sizes"], metadata["dictionary_page_sizes"])] for metadata in metadatas]
     

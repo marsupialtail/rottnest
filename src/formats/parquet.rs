@@ -314,6 +314,8 @@ pub async fn get_parquet_layout(
         let column_chunk_offset = start;
         start = 0;
 
+        let mut dictionary_page_size: usize = 0;
+
         while start != end {
             // this takes a slice of the entire thing for each page, granted it won't read the entire thing,
             // the thrift will terminate after reading the necessary things. @Rain the alternative is to feed it
@@ -323,8 +325,6 @@ pub async fn get_parquet_layout(
             // println!("{} {} {:?}", start, header_len, header);
 
             let page_header = header.clone();
-
-            let mut dictionary_page_size: usize = 0;
 
             let page: Page = match page_header.type_ {
                 PageType::DICTIONARY_PAGE => {
@@ -532,17 +532,28 @@ pub async fn read_indexed_pages_async(
                     .unwrap();
                     let array = array_reader.next_batch(num_values as usize).unwrap();
 
-                    let new_array = array
-                        .as_any()
-                        .downcast_ref::<StringArray>()
-                        .ok_or_else(|| {
-                            ArrowError::ParseError(
-                                "Expects string array as first argument".to_string(),
-                            )
-                        })
-                        .unwrap();
+                    let new_array: Result<
+                        &arrow_array::GenericByteArray<arrow::datatypes::GenericStringType<i32>>,
+                        ArrowError,
+                    > = array.as_any().downcast_ref::<StringArray>().ok_or_else(|| {
+                        ArrowError::ParseError("Expects string array as first argument".to_string())
+                    });
 
-                    new_array.into_data()
+                    let data = match new_array {
+                        Ok(_) => new_array.unwrap().to_data(),
+                        Err(_) => array
+                            .as_any()
+                            .downcast_ref::<BinaryArray>()
+                            .ok_or_else(|| {
+                                ArrowError::ParseError(
+                                    "Expects string or binary array as first argument".to_string(),
+                                )
+                            })
+                            .unwrap()
+                            .to_data(),
+                    };
+
+                    data
                 });
 
                 handle
