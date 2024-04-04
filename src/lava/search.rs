@@ -1,10 +1,6 @@
-use bytes::Bytes;
-use core::num;
-use futures::{FutureExt, SinkExt};
 use itertools::Itertools;
 use ndarray::Array2;
 use std::collections::BTreeSet;
-use std::env;
 use std::{
     collections::{HashMap, HashSet},
     io::{BufRead, BufReader, Cursor, Read, SeekFrom},
@@ -12,22 +8,20 @@ use std::{
 use tokio::task::JoinSet;
 use zstd::stream::read::Decoder;
 
-use crate::formats::parquet::read_indexed_pages;
 use crate::lava::constants::*;
 use crate::lava::fm_chunk::FMChunk;
+use crate::vamana::vamana::{Distance, VectorAccessMethod};
 use crate::vamana::{access::ReaderAccessMethodF32, EuclideanF32, IndexParams, VamanaIndex};
 use crate::{formats::io::READER_BUFFER_SIZE, lava::plist::PListChunk};
 use crate::{
-    formats::io::{AsyncReader, FsBuilder, Operators, S3Builder},
+    formats::io::{get_file_sizes_and_readers, AsyncReader, FsBuilder, Operators, S3Builder},
     lava::error::LavaError,
 };
 
-use futures::future::{AbortHandle, Abortable, Aborted, Join};
-use std::sync::Arc;
-use std::time::Duration;
 use tokenizers::tokenizer::Tokenizer;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
-use tokio::sync::{self, mpsc, Mutex};
+
+use ordered_float::OrderedFloat;
 
 async fn get_tokenizer_async(
     mut readers: Vec<AsyncReader>,
@@ -343,8 +337,9 @@ async fn search_vector_async(
     uid_to_metadatas: &Vec<Vec<(String, usize, usize, usize, usize)>>,
     query: &Vec<f32>,
     k: usize,
-) -> Result<Vec<usize>, LavaError> {
-    let mut results: Vec<usize> = vec![];
+) -> Result<(Vec<(usize, usize)>, Array2<f32>), LavaError> {
+    let mut results: BTreeSet<(OrderedFloat<f32>, usize, usize)> = BTreeSet::new();
+    let mut reader_access_methods: Vec<ReaderAccessMethodF32> = vec![];
 
     for i in 0..readers.len() {
         let num_points = readers[i].read_u64_le().await?;
@@ -365,6 +360,7 @@ async fn search_vector_async(
             // uid to (file_path, row_group, page_offset, page_size, dict_page_size)
             uid_to_metadata: &uid_to_metadatas[i],
         };
+        reader_access_methods.push(reader_access_method.clone());
 
         // we probably want to serialize and deserialize the indexparams too
         // upon merging if they are not the same throw an error
@@ -382,73 +378,36 @@ async fn search_vector_async(
 
         let mut ctx = index.get_search_context();
         let _ = index.search(&mut ctx, query.as_slice()).await;
-        let mut local_results: Vec<usize> = ctx.frontier.iter().map(|(v, _d)| *v).collect();
+        let local_results: Vec<(OrderedFloat<f32>, usize, usize)> = ctx
+            .frontier
+            .iter()
+            .map(|(v, d)| (OrderedFloat(*d as f32), i, *v))
+            .collect();
 
-        results.append(&mut local_results);
+        results.extend(local_results);
     }
 
-    Ok(results)
-}
-
-async fn get_file_sizes_and_readers(
-    files: &[String],
-) -> Result<(Vec<usize>, Vec<AsyncReader>), LavaError> {
-    let tasks: Vec<_> = files
+    let results: Vec<(usize, usize)> = results
         .iter()
-        .map(|file| {
-            let file = file.clone(); // Clone file name to move into the async block
-            tokio::spawn(async move {
-                // Determine the operator based on the file scheme
-                let operator = if file.starts_with("s3://") {
-                    Operators::from(S3Builder::from(file.as_str())).into_inner()
-                } else {
-                    let current_path = env::current_dir()?;
-                    Operators::from(FsBuilder::from(current_path.to_str().expect("no path")))
-                        .into_inner()
-                };
-
-                // Extract filename
-                let filename = if file.starts_with("s3://") {
-                    file[5..].split('/').collect::<Vec<_>>()[1..].join("/")
-                } else {
-                    file.clone()
-                };
-
-                // Create the reader
-                let reader: AsyncReader = operator
-                    .clone()
-                    .reader_with(&filename)
-                    .buffer(READER_BUFFER_SIZE)
-                    .await?
-                    .into();
-
-                // Get the file size
-                let file_size: u64 = operator.stat(&filename).await?.content_length();
-
-                Ok::<_, LavaError>((file_size as usize, reader))
-            })
-        })
+        .take(k)
+        .cloned()
+        .map(|(_v, i, d)| (i, d))
         .collect();
 
-    // Wait for all tasks to complete
-    let results = futures::future::join_all(tasks).await;
+    let futures: Vec<_> = results
+        .iter()
+        .map(|(file_id, n)| reader_access_methods[*file_id].get_vec_async(*n))
+        .collect();
 
-    // Process results, separating out file sizes and readers
-    let mut file_sizes = Vec::new();
-    let mut readers = Vec::new();
+    let vectors: Vec<Result<Vec<f32>, LavaError>> = futures::future::join_all(futures).await;
+    let vectors: Result<Vec<Vec<f32>>, LavaError> = vectors.into_iter().collect();
+    let vectors: Vec<Vec<f32>> = vectors?;
+    let rows = vectors.len();
+    let cols = vectors[0].len();
+    let vectors: Vec<f32> = vectors.into_iter().flatten().collect();
+    let vectors = Array2::from_shape_vec((rows, cols), vectors).unwrap();
 
-    for result in results {
-        match result {
-            Ok(Ok((size, reader))) => {
-                file_sizes.push(size);
-                readers.push(reader);
-            }
-            Ok(Err(e)) => return Err(e), // Handle error from inner task
-            Err(e) => return Err(LavaError::Parse("Task join error: {}".to_string())), // Handle join error
-        }
-    }
-
-    Ok((file_sizes, readers))
+    Ok((results, vectors))
 }
 
 #[tokio::main]
@@ -520,7 +479,7 @@ pub async fn search_lava_vector(
     uid_to_metadatas: &Vec<Vec<(String, usize, usize, usize, usize)>>,
     query: &Vec<f32>,
     k: usize,
-) -> Result<Vec<usize>, LavaError> {
+) -> Result<(Vec<(usize, usize)>, Array2<f32>), LavaError> {
     let (file_sizes, readers) = get_file_sizes_and_readers(&files).await?;
     search_vector_async(
         column_name,

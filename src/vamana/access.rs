@@ -39,6 +39,7 @@ pub struct InMemoryAccessMethodF32 {
     pub data: Array2<f32>,
 }
 
+#[derive(Clone)]
 pub struct ReaderAccessMethodF32<'a> {
     pub dim: usize,
     pub num_points: usize,
@@ -49,7 +50,6 @@ pub struct ReaderAccessMethodF32<'a> {
 }
 
 impl VectorAccessMethod<f32> for ReaderAccessMethodF32<'_> {
-
     fn get_vec<'a>(&'a self, idx: usize) -> &'a [f32] {
         unimplemented!("get_vec not implemented for ReaderAccessMethodF32")
     }

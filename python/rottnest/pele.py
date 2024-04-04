@@ -211,16 +211,16 @@ def search_index_vector(indices: List[str], query: np.array, K: int):
     assert len(metadata["column_name"].unique()) == 1, "index is not allowed to span multiple column names"
     column_name = metadata["column_name"].unique()[0]
 
-    index_search_results = rottnest.search_lava_vector([f"{index_name}.lava" for index_name in indices], column_name, data_page_rows, uid_to_metadata, query, K)
-    print(index_search_results)
+    index_search_results, vectors = rottnest.search_lava_vector([f"{index_name}.lava" for index_name in indices], column_name, data_page_rows, uid_to_metadata, query, K)
+    
     import pdb; pdb.set_trace()
+    print(index_search_results)
+    print(vectors)
     
     if len(index_search_results) == 0:
         return None
 
     uids = polars.from_dict({"file_id": [i[0] for i in index_search_results], "uid": [i[1] for i in index_search_results]})
-
-    
 
     metadata = metadata.join(uids, on = ["file_id", "uid"])
 

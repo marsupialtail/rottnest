@@ -9,6 +9,7 @@ use ndarray::{Array2, ArrayD, Ix2};
 use numpy::{IntoPyArray, PyArray1, PyArray2, PyArrayDyn, PyReadonlyArrayDyn};
 use pyo3::types::PyBytes;
 use pyo3::IntoPy;
+use pyo3::Py;
 
 #[pyfunction]
 pub fn search_lava_bm25(
@@ -40,10 +41,12 @@ pub fn search_lava_vector(
     uid_to_metadatas: Vec<Vec<(String, usize, usize, usize, usize)>>,
     query: Vec<f32>,
     k: usize,
-) -> Result<Vec<usize>, LavaError> {
-    py.allow_threads(|| {
+) -> Result<(Vec<(usize, usize)>, Py<PyArray2<f32>>), LavaError> {
+    let (metadata, array) = py.allow_threads(|| {
         lava::search_lava_vector(files, column_name, &uid_nrows, &uid_to_metadatas, &query, k)
-    })
+    })?;
+
+    Ok((metadata, array.into_pyarray(py).to_owned()))
 }
 
 #[pyfunction]

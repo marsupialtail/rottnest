@@ -3,10 +3,10 @@ use opendal::services::{Fs, S3};
 use opendal::Operator;
 use opendal::Reader;
 use std::env;
-use std::io::{Read,SeekFrom};
+use std::io::{Read, SeekFrom};
 use std::ops::{Deref, DerefMut};
-use zstd::stream::read::Decoder;
 use tokio::pin;
+use zstd::stream::read::Decoder;
 
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
@@ -72,10 +72,15 @@ impl AsyncReader {
     }
 
     // theoretically we should try to return different types here, but Vec<u64> is def. the most common
-    pub async fn read_range_and_decompress(&mut self, from: u64, to: u64) -> Result<Vec<u64>, LavaError> {
+    pub async fn read_range_and_decompress(
+        &mut self,
+        from: u64,
+        to: u64,
+    ) -> Result<Vec<u64>, LavaError> {
         let compressed_posting_list_offsets = self.read_range(from, to).await?;
         let mut decompressor = Decoder::new(&compressed_posting_list_offsets[..])?;
-        let mut serialized_posting_list_offsets: Vec<u8> = Vec::with_capacity(compressed_posting_list_offsets.len() as usize);
+        let mut serialized_posting_list_offsets: Vec<u8> =
+            Vec::with_capacity(compressed_posting_list_offsets.len() as usize);
         decompressor.read_to_end(&mut serialized_posting_list_offsets)?;
         let result: Vec<u64> = bincode::deserialize(&serialized_posting_list_offsets)?;
         Ok(result)
@@ -112,7 +117,7 @@ impl From<&str> for S3Builder {
         if let Ok(_value) = env::var("AWS_VIRTUAL_HOST_STYLE") {
             builder.enable_virtual_host_style();
         }
-        
+
         S3Builder(builder)
     }
 }
@@ -156,18 +161,63 @@ impl From<FsBuilder> for Operators {
     }
 }
 
-pub fn get_operator_and_filename_from_file(file: String) -> (Operator, String) {
-    let mut operator = if file.starts_with("s3://") {
-        Operators::from(S3Builder::from(file.as_str())).into_inner()
-    } else {
-        let current_path = env::current_dir().unwrap();
-        Operators::from(FsBuilder::from(current_path.to_str().expect("no path"))).into_inner()
-    };
+pub(crate) async fn get_file_sizes_and_readers(
+    files: &[String],
+) -> Result<(Vec<usize>, Vec<AsyncReader>), LavaError> {
+    let tasks: Vec<_> = files
+        .iter()
+        .map(|file| {
+            let file = file.clone(); // Clone file name to move into the async block
+            tokio::spawn(async move {
+                // Determine the operator based on the file scheme
+                let operator = if file.starts_with("s3://") {
+                    Operators::from(S3Builder::from(file.as_str())).into_inner()
+                } else {
+                    let current_path = env::current_dir()?;
+                    Operators::from(FsBuilder::from(current_path.to_str().expect("no path")))
+                        .into_inner()
+                };
 
-    let filename = if file.starts_with("s3://") {
-        file[5..].split("/").collect::<Vec<&str>>().join("/")
-    } else {
-        file.to_string()
-    };
-    (operator, filename)
+                // Extract filename
+                let filename = if file.starts_with("s3://") {
+                    file[5..].split('/').collect::<Vec<_>>()[1..].join("/")
+                } else {
+                    file.clone()
+                };
+
+                // Create the reader
+                let reader: AsyncReader = operator
+                    .clone()
+                    .reader_with(&filename)
+                    .buffer(READER_BUFFER_SIZE)
+                    .await?
+                    .into();
+
+                // Get the file size
+                let file_size: u64 = operator.stat(&filename).await?.content_length();
+
+                Ok::<_, LavaError>((file_size as usize, reader))
+            })
+        })
+        .collect();
+
+    // Wait for all tasks to complete
+    let results = futures::future::join_all(tasks).await;
+
+    // Process results, separating out file sizes and readers
+    let mut file_sizes = Vec::new();
+    let mut readers = Vec::new();
+
+    for result in results {
+        match result {
+            Ok(Ok((size, reader))) => {
+                file_sizes.push(size);
+                readers.push(reader);
+            }
+            Ok(Err(e)) => return Err(e), // Handle error from inner task
+            Err(e) => return Err(LavaError::Parse("Task join error: {}".to_string())), // Handle join error
+        }
+    }
+
+    Ok((file_sizes, readers))
 }

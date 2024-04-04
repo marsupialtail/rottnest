@@ -70,7 +70,7 @@ bitvector = "0.1.5"
 ndarray = { version = "0.15.6", features = ["rayon", "serde"] }
 numpy = "0.20.0"
 num-traits = "0.2.18"
-
+ordered-float = "4.2.0"
 
 [profile.release]
 lto = false
