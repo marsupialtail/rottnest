@@ -659,6 +659,7 @@ async fn merge_lava_substring(
 async fn async_parallel_merge_files(
     condensed_lava_file: String,
     files: Vec<String>,
+    do_not_delete: BTreeSet<String>,
     uid_offsets: Vec<u64>,
     K: usize,
     mode: usize, // 0 for bm25 1 for substring
@@ -714,6 +715,7 @@ async fn async_parallel_merge_files(
 
                 let merged_files_clone = Arc::clone(&merged_files_shared);
                 let new_uid_offsets_clone = Arc::clone(&new_uid_offsets_shared);
+                let do_not_delete_clone = do_not_delete.clone();
 
                 let task = tokio::spawn(async move {
                     let my_uuid = uuid::Uuid::new_v4();
@@ -735,8 +737,12 @@ async fn async_parallel_merge_files(
                     .unwrap();
 
                     // now go delete the input files
+
                     for file in file_chunk {
-                        std::fs::remove_file(file).unwrap();
+                        if !do_not_delete_clone.contains(&file) {
+                            println!("deleting {}", file);
+                            std::fs::remove_file(file).unwrap();
+                        }
                     }
 
                     merged_files_clone.lock().unwrap().push(merged_filename);
@@ -766,8 +772,15 @@ async fn async_parallel_merge_files(
                 .unwrap();
 
             // Recurse with the newly merged files
-            async_parallel_merge_files(condensed_lava_file, merged_files, new_uid_offsets, K, mode)
-                .await
+            async_parallel_merge_files(
+                condensed_lava_file,
+                merged_files,
+                do_not_delete,
+                new_uid_offsets,
+                K,
+                mode,
+            )
+            .await
         }
     }
 }
@@ -780,8 +793,16 @@ pub async fn parallel_merge_files(
     K: usize,
     mode: usize, // 0 for bm25 1 for substring
 ) -> Result<(), LavaError> {
-    let result =
-        async_parallel_merge_files(condensed_lava_file, files, uid_offsets, K, mode).await?;
+    let do_not_delete = BTreeSet::from_iter(files.clone().into_iter());
+    let result = async_parallel_merge_files(
+        condensed_lava_file,
+        files,
+        do_not_delete,
+        uid_offsets,
+        K,
+        mode,
+    )
+    .await?;
     Ok(result)
 }
 

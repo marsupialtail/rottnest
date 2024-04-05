@@ -83,7 +83,7 @@ async fn search_substring_one_file(
 
     let mut start: usize = 0;
     let mut end: usize = n as usize;
-    let previous_range = u64::MAX;
+    let previous_range: u64 = u64::MAX;
 
     for i in (0..query.len()).rev() {
         let current_token = query[i];
