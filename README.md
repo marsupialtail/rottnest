@@ -2,6 +2,8 @@
 
 **It is currently a work in progress, expected release date Q2/Q3 2024** Slowly migrating from https://github.com/marsupialtail/rottnest-cpp and https://github.com/marsupialtail/quokka, a lot of the motivations can be found [here](https://github.com/marsupialtail/quokka/blob/master/blog/time.md).
 
+![Architecture](assets/arch.png)
+
 ## BM25
 
 ## Regex
