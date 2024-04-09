@@ -50,11 +50,11 @@ pub struct ReaderAccessMethodF32<'a> {
 }
 
 impl VectorAccessMethod<f32> for ReaderAccessMethodF32<'_> {
-    fn get_vec<'a>(&'a self, idx: usize) -> &'a [f32] {
+    fn get_vec_sync<'a>(&'a self, idx: usize) -> &'a [f32] {
         unimplemented!("get_vec not implemented for ReaderAccessMethodF32")
     }
 
-    async fn get_vec_async(&self, idx: usize) -> Result<Vec<f32>, LavaError> {
+    async fn get_vec<'a>(&'a self, idx: usize) -> Vec<f32> {
         // self.data.slice(s![idx, ..]).reborrow().to_slice().unwrap()
 
         // the uid_nrows will look something like 0, 300, 600, 900 etc.
@@ -98,7 +98,7 @@ impl VectorAccessMethod<f32> for ReaderAccessMethodF32<'_> {
             ));
         }
 
-        Ok(result)
+        result
     }
 
     fn dim(&self) -> usize {
@@ -132,8 +132,17 @@ impl Distance<f32> for EuclideanF32 {
 }
 
 impl VectorAccessMethod<f32> for InMemoryAccessMethodF32 {
-    fn get_vec<'a>(&'a self, idx: usize) -> &'a [f32] {
+    fn get_vec_sync<'a>(&'a self, idx: usize) -> &'a [f32] {
         self.data.slice(s![idx, ..]).reborrow().to_slice().unwrap()
+    }
+
+    async fn get_vec<'a>(&'a self, idx: usize) -> Vec<f32> {
+        self.data
+            .slice(s![idx, ..])
+            .clone()
+            .to_owned()
+            .into_iter()
+            .collect()
     }
 
     fn dim(&self) -> usize {

@@ -200,6 +200,22 @@ def query_expansion_keyword(tokenizer_vocab: List[str], query: str):
     print("Expanded tokens: ", tokens)
     return tokens, token_ids, weights
 
+def merge_index_vector(new_index_name: str, index_names: List[str]):
+
+    assert len(index_names) > 1
+
+    # first read the metadata files and merge those
+    metadatas = [read_metadata_file(f"{index_name}.meta").with_columns(polars.lit(i).alias("file_id").cast(polars.Int64)) for i, index_name in enumerate(index_names)]
+    data_page_rows = [np.cumsum(np.hstack([[0] , np.array(metadata["data_page_rows"])])) for metadata in metadatas]
+    uid_to_metadata = [[(a,b,c,d,e) for a,b,c,d,e in zip(metadata["file_path"], metadata["row_groups"], metadata["data_page_offsets"], 
+                                                        metadata["data_page_sizes"], metadata["dictionary_page_sizes"])] for metadata in metadatas]
+    
+    metadata = polars.concat(metadatas)
+    assert len(metadata["column_name"].unique()) == 1, "index is not allowed to span multiple column names"
+    column_name = metadata["column_name"].unique()[0]
+
+    rottnest.merge_lava_vector(new_index_name, [f"{name}.lava" for name in index_names], column_name, data_page_rows, uid_to_metadata)
+
 def search_index_vector(indices: List[str], query: np.array, K: int):
     
     metadatas = [read_metadata_file(f"{index_name}.meta").with_columns(polars.lit(i).alias("file_id").cast(polars.Int64)) for i, index_name in enumerate(indices)]

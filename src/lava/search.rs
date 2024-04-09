@@ -396,12 +396,10 @@ async fn search_vector_async(
 
     let futures: Vec<_> = results
         .iter()
-        .map(|(file_id, n)| reader_access_methods[*file_id].get_vec_async(*n))
+        .map(|(file_id, n)| reader_access_methods[*file_id].get_vec(*n))
         .collect();
 
-    let vectors: Vec<Result<Vec<f32>, LavaError>> = futures::future::join_all(futures).await;
-    let vectors: Result<Vec<Vec<f32>>, LavaError> = vectors.into_iter().collect();
-    let vectors: Vec<Vec<f32>> = vectors?;
+    let vectors: Vec<Vec<f32>> = futures::future::join_all(futures).await;
     let rows = vectors.len();
     let cols = vectors[0].len();
     let vectors: Vec<f32> = vectors.into_iter().flatten().collect();

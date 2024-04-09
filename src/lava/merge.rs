@@ -1,27 +1,33 @@
+use async_recursion::async_recursion;
 use bincode;
 use bit_vec::BitVec;
+use itertools::Itertools;
+use ndarray::Array2;
 use opendal::raw::oio::ReadExt;
 use opendal::services::Fs;
+use opendal::{Operator, Writer};
 use std::collections::BTreeSet;
+use std::env;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Cursor, Read, Seek, SeekFrom, Write};
+use std::sync::{Arc, Mutex};
 use tokio::io::AsyncReadExt;
 use zstd::bulk::compress;
 use zstd::stream::encode_all;
 use zstd::stream::read::Decoder;
 
-use async_recursion::async_recursion;
-use itertools::Itertools;
-use opendal::{Operator, Writer};
-use std::env;
-use std::sync::{Arc, Mutex};
-
-use crate::formats::io::{AsyncReader, READER_BUFFER_SIZE, WRITER_BUFFER_SIZE};
+use crate::formats::io::{
+    get_file_sizes_and_readers, AsyncReader, READER_BUFFER_SIZE, WRITER_BUFFER_SIZE,
+};
 use crate::lava::constants::*;
 use crate::lava::error::LavaError;
 use crate::lava::fm_chunk::FMChunk;
 use crate::lava::plist::PListChunk;
 use std::collections::HashMap;
+
+use crate::vamana::{
+    access::ReaderAccessMethodF32, merge_indexes_par, EuclideanF32, IndexParams, VamanaIndex,
+};
 
 // @Rain chore: we need to simplify all the iterator impls
 
@@ -655,6 +661,81 @@ async fn merge_lava_substring(
     Ok(())
 }
 
+async fn merge_lava_vector(
+    condensed_lava_file: &str,
+    lava_files: Vec<String>,
+    column_name: &str,
+    uid_nrows: &Vec<Vec<usize>>,
+    uid_to_metadatas: &Vec<Vec<(String, usize, usize, usize, usize)>>,
+) -> Result<(), LavaError> {
+    assert_eq!(lava_files.len(), 2);
+    assert_eq!(uid_nrows.len(), 2);
+    assert_eq!(uid_to_metadatas.len(), 2);
+
+    let (file_sizes, mut readers) = get_file_sizes_and_readers(&lava_files).await?;
+
+    let mut indices: Vec<VamanaIndex<f32, EuclideanF32, ReaderAccessMethodF32>> = vec![];
+
+    let mut all_dim: Option<u64> = None;
+
+    for i in 0..2 {
+        let mut reader = readers.remove(0);
+        let num_points = reader.read_u64_le().await?;
+        let dim = reader.read_u64_le().await?;
+        match all_dim {
+            Some(d) => assert_eq!(dim, d),
+            None => {
+                all_dim.replace(dim);
+            }
+        }
+        let start = reader.read_u64_le().await?;
+
+        let compressed_nlist = reader.read_range(24, file_sizes[i] as u64).await?;
+        let mut decompressor = Decoder::new(&compressed_nlist[..])?;
+        let mut serialized_nlist: Vec<u8> = Vec::with_capacity(compressed_nlist.len() as usize);
+        decompressor.read_to_end(&mut serialized_nlist)?;
+        let nlist: Array2<usize> = bincode::deserialize(&serialized_nlist)?;
+
+        let reader_access_method = ReaderAccessMethodF32 {
+            dim: dim as usize,
+            num_points: num_points as usize,
+            column_name: column_name.to_string(),
+            uid_nrows: &uid_nrows[i],
+            // uid to (file_path, row_group, page_offset, page_size, dict_page_size)
+            uid_to_metadata: &uid_to_metadatas[i],
+        };
+        let index: VamanaIndex<f32, EuclideanF32, _> = VamanaIndex::hydrate(
+            reader_access_method,
+            IndexParams {
+                num_neighbors: 32,
+                search_frontier_size: 32,
+                pruning_threshold: 2.0,
+            },
+            nlist,
+            start as usize,
+        );
+        indices.push(index);
+    }
+
+    let index0 = indices.remove(0);
+    let index1 = indices.remove(0);
+    let index = merge_indexes_par(index0, index1);
+
+    let num_points = index.num_points();
+    let start = index.start;
+    let nlist = index.neighbors;
+    let bytes = bincode::serialize(&nlist)?;
+    let compressed_nlist: Vec<u8> = encode_all(&bytes[..], 0).expect("Compression failed");
+
+    let mut file = File::create(condensed_lava_file)?;
+    file.write_all(&(num_points as u64).to_le_bytes())?;
+    file.write_all(&(all_dim.unwrap() as u64).to_le_bytes())?;
+    file.write_all(&(start as u64).to_le_bytes())?;
+    file.write_all(&compressed_nlist)?;
+
+    Ok(())
+}
+
 #[async_recursion]
 async fn async_parallel_merge_files(
     condensed_lava_file: String,
@@ -745,6 +826,7 @@ async fn async_parallel_merge_files(
                         }
                     }
 
+                    // no race condition since everybody pushes the same value to new_uid_offsets_clone
                     merged_files_clone.lock().unwrap().push(merged_filename);
                     new_uid_offsets_clone.lock().unwrap().push(0);
                     Result::<(), LavaError>::Ok(())
@@ -785,6 +867,157 @@ async fn async_parallel_merge_files(
     }
 }
 
+#[async_recursion]
+async fn async_parallel_merge_vector_files(
+    condensed_lava_file: String,
+    files: Vec<String>,
+    do_not_delete: BTreeSet<String>,
+    column_name: &str,
+    uid_nrows: Vec<Vec<usize>>,
+    uid_to_metadatas: Vec<Vec<(String, usize, usize, usize, usize)>>,
+    K: usize,
+) -> Result<(), LavaError> {
+    assert_eq!(K, 2);
+
+    match files.len() {
+        0 => Err(LavaError::Parse("out of chunks".to_string())), // Assuming LavaError can be constructed like this
+        1 => {
+            // the recursion will end here in this case. rename the files[0] to the supposed output name
+            std::fs::rename(files[0].clone(), condensed_lava_file).unwrap();
+            Ok(())
+        }
+        _ => {
+            // More than one file, need to merge
+            let mut tasks = vec![];
+            let merged_files = Arc::new(Mutex::new(vec![]));
+            let merged_uid_nrows = Arc::new(Mutex::new(vec![]));
+            let merged_uid_to_metadata = Arc::new(Mutex::new(vec![]));
+
+            let chunked_files: Vec<Vec<String>> = files
+                .into_iter()
+                .chunks(K)
+                .into_iter()
+                .map(|chunk| chunk.collect())
+                .collect();
+
+            let chunked_uid_nrows: Vec<Vec<Vec<usize>>> = uid_nrows
+                .into_iter() // Use iter() to get an iterator over references
+                .chunks(K) // This comes from itertools
+                .into_iter()
+                .map(|chunk| chunk.collect::<Vec<_>>()) // Collect each chunk into a Vec
+                .collect();
+
+            let chunked_uid_metadata: Vec<Vec<Vec<(String, usize, usize, usize, usize)>>> =
+                uid_to_metadatas
+                    .into_iter()
+                    .chunks(K)
+                    .into_iter()
+                    .map(|chunk| chunk.collect::<Vec<_>>())
+                    .collect();
+
+            for ((file_chunk, uid_nrows_chunk), uid_metadata_chunk) in chunked_files
+                .into_iter()
+                .zip(chunked_uid_nrows.into_iter())
+                .zip(chunked_uid_metadata.into_iter())
+            {
+                if file_chunk.len() == 1 {
+                    // If there's an odd file out, directly move it to the next level
+                    merged_files.lock().unwrap().push(file_chunk[0].clone());
+                    merged_uid_nrows
+                        .lock()
+                        .unwrap()
+                        .push(uid_nrows_chunk[0].clone());
+                    merged_uid_to_metadata
+                        .lock()
+                        .unwrap()
+                        .push(uid_metadata_chunk[0].clone());
+                    continue;
+                }
+
+                let merged_files_clone = Arc::clone(&merged_files);
+                let new_uid_nrows_clone = Arc::clone(&merged_uid_nrows);
+                let new_uid_metadata_clone = Arc::clone(&merged_uid_to_metadata);
+                let do_not_delete_clone = do_not_delete.clone();
+                let column_name = column_name.to_string(); // Convert &str to String
+
+                let task = tokio::spawn(async move {
+                    let my_uuid = uuid::Uuid::new_v4();
+                    let merged_filename = my_uuid.to_string(); // Define this function based on your requirements
+
+                    println!("mergin {:?}", file_chunk);
+
+                    merge_lava_vector(
+                        &merged_filename,
+                        file_chunk.clone(),
+                        &column_name,
+                        &uid_nrows_chunk,
+                        &uid_metadata_chunk,
+                    )
+                    .await
+                    .unwrap();
+
+                    // now go delete the input filesx
+
+                    for file in file_chunk {
+                        if !do_not_delete_clone.contains(&file) {
+                            println!("deleting {}", file);
+                            std::fs::remove_file(file).unwrap();
+                        }
+                    }
+
+                    merged_files_clone.lock().unwrap().push(merged_filename);
+                    new_uid_nrows_clone
+                        .lock()
+                        .unwrap()
+                        .push(uid_nrows_chunk.concat());
+                    new_uid_metadata_clone
+                        .lock()
+                        .unwrap()
+                        .push(uid_metadata_chunk.concat());
+                    Result::<(), LavaError>::Ok(())
+                });
+
+                tasks.push(task);
+            }
+
+            // Wait for all tasks to complete
+            let _: Vec<_> = futures::future::join_all(tasks)
+                .await
+                .into_iter()
+                .collect::<Result<_, _>>()
+                .unwrap();
+
+            // Extract the merged files for the next level of merging
+            let merged_files: Vec<String> = Arc::try_unwrap(merged_files)
+                .expect("Lock still has multiple owners")
+                .into_inner()
+                .unwrap();
+
+            let new_uid_nrows = Arc::try_unwrap(merged_uid_nrows)
+                .expect("Lock still has multiple owners")
+                .into_inner()
+                .unwrap();
+
+            let new_uid_metadatas = Arc::try_unwrap(merged_uid_to_metadata)
+                .expect("Lock still has multiple owners")
+                .into_inner()
+                .unwrap();
+
+            // Recurse with the newly merged files
+            async_parallel_merge_vector_files(
+                condensed_lava_file,
+                merged_files,
+                do_not_delete,
+                column_name,
+                new_uid_nrows,
+                new_uid_metadatas,
+                K,
+            )
+            .await
+        }
+    }
+}
+
 #[tokio::main]
 pub async fn parallel_merge_files(
     condensed_lava_file: String,
@@ -801,6 +1034,28 @@ pub async fn parallel_merge_files(
         uid_offsets,
         K,
         mode,
+    )
+    .await?;
+    Ok(result)
+}
+
+#[tokio::main]
+pub async fn parallel_merge_vector_files(
+    condensed_lava_file: String,
+    files: Vec<String>,
+    column_name: &str,
+    uid_nrows: Vec<Vec<usize>>,
+    uid_to_metadatas: Vec<Vec<(String, usize, usize, usize, usize)>>,
+) -> Result<(), LavaError> {
+    let do_not_delete = BTreeSet::from_iter(files.clone().into_iter());
+    let result = async_parallel_merge_vector_files(
+        condensed_lava_file,
+        files,
+        do_not_delete,
+        column_name,
+        uid_nrows,
+        uid_to_metadatas,
+        2,
     )
     .await?;
     Ok(result)

@@ -4,6 +4,7 @@ use rand::distributions::{Distribution, Uniform};
 use rayon::prelude::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+#[derive(Debug)]
 pub struct KMeansAssignment {
     assignments: Vec<(usize, usize)>,
     partition_counts_prefix_sum: Vec<usize>,
@@ -63,7 +64,7 @@ fn init_centroids<T: Indexable, D: Distance<T>, V: VectorAccessMethod<T>>(
     for mut c in centroids.outer_iter_mut() {
         c.as_slice_mut()
             .unwrap()
-            .clone_from_slice(access_method.get_vec(row_id_for_cur_cent));
+            .clone_from_slice(access_method.get_vec_sync(row_id_for_cur_cent));
         let total_distance: f64 = access_method
             .par_iter()
             .zip_eq(distances.par_iter_mut())
@@ -153,7 +154,7 @@ fn update_assignments<T: Indexable, D: Distance<T>, V: VectorAccessMethod<T>>(
         .par_iter_mut()
         .enumerate()
         .for_each(|(i, x)| {
-            *x = compute_closest_two_centroids::<T, D>(access_method.get_vec(i), centroids)
+            *x = compute_closest_two_centroids::<T, D>(access_method.get_vec_sync(i), centroids)
         })
 }
 

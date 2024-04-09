@@ -79,6 +79,26 @@ pub fn merge_lava_substring(
 }
 
 #[pyfunction]
+pub fn merge_lava_vector(
+    py: Python,
+    condensed_lava_file: String,
+    lava_files: Vec<String>,
+    column_name: &str,
+    uid_nrows: Vec<Vec<usize>>,
+    uid_to_metadatas: Vec<Vec<(String, usize, usize, usize, usize)>>,
+) -> Result<(), LavaError> {
+    py.allow_threads(|| {
+        lava::parallel_merge_vector_files(
+            condensed_lava_file,
+            lava_files,
+            column_name,
+            uid_nrows,
+            uid_to_metadatas,
+        )
+    })
+}
+
+#[pyfunction]
 pub fn build_lava_bm25(
     py: Python,
     output_file_name: &PyString,
