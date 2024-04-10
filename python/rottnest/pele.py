@@ -138,6 +138,28 @@ def merge_index_substring(new_index_name: str, index_names: List[str]):
     rottnest.merge_lava_substring(f"{new_index_name}.lava", [f"{name}.lava" for name in index_names], offsets)
     polars.concat(metadatas).write_parquet(f"{new_index_name}.meta")
 
+def merge_index_vector(new_index_name: str, index_names: List[str]):
+
+    assert len(index_names) > 1
+
+    # first read the metadata files and merge those
+    metadatas = [read_metadata_file(f"{index_name}.meta").with_columns(polars.lit(i).alias("file_id").cast(polars.Int64)) for i, index_name in enumerate(index_names)]
+    column_names = set(metadata["column_name"].unique()[0] for metadata in metadatas)
+    assert len(column_names) == 1, "index is not allowed to span multiple column names"
+    column_name = column_names.pop()
+
+    vectors = [pyarrow.chunked_array(rottnest.read_indexed_pages(column_name, metadata["file_path"].to_list(), metadata["row_groups"].to_list(),
+                                     metadata["data_page_offsets"].to_list(), metadata["data_page_sizes"].to_list(), metadata["dictionary_page_sizes"].to_list()))
+                for metadata in metadatas]
+    
+
+    vectors = [np.vstack([np.frombuffer(i, dtype = np.float32) for i in arr.to_pylist()]) for arr in vectors]
+
+    import pdb;pdb.set_trace()
+
+    rottnest.merge_lava_vector(f"{new_index_name}.lava", [f"{name}.lava" for name in index_names], vectors)
+    polars.concat(metadatas).write_parquet(f"{new_index_name}.meta")
+
 def query_expansion_llm(tokenizer_vocab: List[str], query: str, model = "text-embedding-3-large", expansion_tokens = 20):
     import os, pickle
     try:
@@ -199,22 +221,6 @@ def query_expansion_keyword(tokenizer_vocab: List[str], query: str):
 
     print("Expanded tokens: ", tokens)
     return tokens, token_ids, weights
-
-def merge_index_vector(new_index_name: str, index_names: List[str]):
-
-    assert len(index_names) > 1
-
-    # first read the metadata files and merge those
-    metadatas = [read_metadata_file(f"{index_name}.meta").with_columns(polars.lit(i).alias("file_id").cast(polars.Int64)) for i, index_name in enumerate(index_names)]
-    data_page_rows = [np.cumsum(np.hstack([[0] , np.array(metadata["data_page_rows"])])) for metadata in metadatas]
-    uid_to_metadata = [[(a,b,c,d,e) for a,b,c,d,e in zip(metadata["file_path"], metadata["row_groups"], metadata["data_page_offsets"], 
-                                                        metadata["data_page_sizes"], metadata["dictionary_page_sizes"])] for metadata in metadatas]
-    
-    metadata = polars.concat(metadatas)
-    assert len(metadata["column_name"].unique()) == 1, "index is not allowed to span multiple column names"
-    column_name = metadata["column_name"].unique()[0]
-
-    rottnest.merge_lava_vector(new_index_name, [f"{name}.lava" for name in index_names], column_name, data_page_rows, uid_to_metadata)
 
 def search_index_vector(indices: List[str], query: np.array, K: int):
     

@@ -562,6 +562,7 @@ pub async fn read_indexed_pages_async(
         .collect::<Vec<_>>()
         .await;
 
+    // it is absolutely crucial to collect results in the same order.
     let res: Vec<std::prelude::v1::Result<ArrayData, tokio::task::JoinError>> =
         futures::future::join_all(iter).await;
     let result: Result<Vec<ArrayData>, tokio::task::JoinError> =

@@ -207,10 +207,6 @@ impl<T: Indexable, D: Distance<T>, V: VectorAccessMethod<T>> VamanaIndex<T, D, V
         self.access_method.get_vec(idx).await
     }
 
-    pub fn get_vector_sync(&self, idx: usize) -> &[T] {
-        self.access_method.get_vec_sync(idx)
-    }
-
     fn push_neighbor(&mut self, idx: usize, new_neighbor: usize) {
         let cur_num_neighbors = self.num_neighbors(idx);
         self.neighbors[[idx, cur_num_neighbors + 1]] = new_neighbor;
@@ -256,14 +252,14 @@ impl BuildContext {
         }
     }
 
-    pub fn search<T: Indexable, D: Distance<T>, V: VectorAccessMethod<T>>(
+    pub async fn search<T: Indexable, D: Distance<T>, V: VectorAccessMethod<T>>(
         &mut self,
         index: &VamanaIndex<T, D, V>,
         query: usize,
     ) {
         self.reset();
-        let query_vector = index.get_vector_sync(query);
-        let start_vector = index.get_vector_sync(index.start);
+        let query_vector = index.get_vector(query).await;
+        let start_vector = index.get_vector(index.start).await;
         let start_distance = D::calculate(&query_vector, &start_vector);
         let mut closest_unvisited_vertex = 0;
         self.search_ctx.frontier.push((index.start, start_distance));
@@ -276,7 +272,7 @@ impl BuildContext {
             self.cached_distances.push(closest);
             self.search_ctx.visited.visit(closest.0);
             for n in index.neighbors(closest.0) {
-                let neighbor_vector = index.get_vector_sync(*n);
+                let neighbor_vector = index.get_vector(*n).await;
                 let distance = D::calculate(&query_vector, &neighbor_vector);
                 self.search_ctx.frontier.push((*n, distance));
                 assert!(
@@ -301,16 +297,16 @@ impl BuildContext {
         }
     }
 
-    pub fn prune_index<T: Indexable, D: Distance<T>, V: VectorAccessMethod<T>>(
+    pub async fn prune_index<T: Indexable, D: Distance<T>, V: VectorAccessMethod<T>>(
         &mut self,
         index: &mut VamanaIndex<T, D, V>,
         query: usize,
         pruning_threshold: f64,
     ) {
-        let query_vector: &[T] = index.get_vector_sync(query);
+        let query_vector = index.get_vector(query).await;
         for n in index.neighbors(query) {
             self.search_ctx.visited.visit(*n);
-            let neighbor_vector: &[T] = index.get_vector_sync(*n);
+            let neighbor_vector = index.get_vector(*n).await;
             let distance = D::calculate(&neighbor_vector, &query_vector);
             self.cached_distances.push((*n, distance));
         }
@@ -328,13 +324,13 @@ impl BuildContext {
             if index.num_neighbors(query) == index.params.num_neighbors {
                 return;
             }
-            let curr_vec = index.get_vector_sync(v);
+            let curr_vec = index.get_vector(v).await;
             for ielim in (ivisited + 1)..self.cached_distances.len() {
                 let elim_id = self.cached_distances[ielim].0;
                 if !self.search_ctx.visited.is_visited(elim_id) {
                     continue;
                 }
-                let elim_vec = index.get_vector_sync(elim_id);
+                let elim_vec = index.get_vector(elim_id).await;
                 let distance = D::calculate(&curr_vec, &elim_vec);
                 if pruning_threshold * distance < d {
                     self.search_ctx.visited.mark_unvisited(elim_id);
@@ -343,7 +339,7 @@ impl BuildContext {
         }
     }
 
-    pub fn insert_backwards_edges<T: Indexable, D: Distance<T>, V: VectorAccessMethod<T>>(
+    pub async fn insert_backwards_edges<T: Indexable, D: Distance<T>, V: VectorAccessMethod<T>>(
         &mut self,
         index: &mut VamanaIndex<T, D, V>,
         query: usize,
@@ -355,13 +351,13 @@ impl BuildContext {
             if index.num_neighbors(neighbor) < index.params.num_neighbors {
                 index.push_neighbor(neighbor, query);
             } else {
-                let query_vector = index.get_vector_sync(query);
-                let neighbor_vector = index.get_vector_sync(neighbor);
+                let query_vector = index.get_vector(query).await;
+                let neighbor_vector = index.get_vector(neighbor).await;
                 let distance = D::calculate(&query_vector, &neighbor_vector);
                 self.reset();
                 self.search_ctx.visited.visit(query);
                 self.cached_distances.push((query, distance));
-                self.prune_index(index, neighbor, pruning_threshold);
+                self.prune_index(index, neighbor, pruning_threshold).await;
             }
         }
     }
@@ -448,14 +444,15 @@ fn compute_index_of_vector_closest_to_mean<
     closest.0
 }
 
-struct PartitionedAccessMethod<'a, T: Indexable, V: VectorAccessMethod<T>> {
+struct PartitionedAccessMethod<T: Indexable, V: VectorAccessMethod<T>> {
     partition_id: usize,
-    underlying_access_method: &'a V,
-    partition_assignment: &'a KMeansAssignment,
+    underlying_access_method: Arc<V>,
+    partition_assignment: Arc<KMeansAssignment>,
     t: std::marker::PhantomData<T>,
 }
-impl<'a, T: Indexable, V: VectorAccessMethod<T>> VectorAccessMethod<T>
-    for PartitionedAccessMethod<'a, T, V>
+
+impl<T: Indexable, V: VectorAccessMethod<T>> VectorAccessMethod<T>
+    for PartitionedAccessMethod<T, V>
 {
     fn get_vec_sync<'b>(&'b self, local_idx: usize) -> &'b [T] {
         let global_idx = self
@@ -493,7 +490,7 @@ impl<'a, T: Indexable, V: VectorAccessMethod<T>> VectorAccessMethod<T>
     }
 }
 
-pub fn build_index<T: Indexable, D: Distance<T>, V: VectorAccessMethod<T>>(
+pub async fn build_index<T: Indexable, D: Distance<T>, V: VectorAccessMethod<T>>(
     access_method: V,
     params: IndexParams,
 ) -> VamanaIndex<T, D, V> {
@@ -515,38 +512,58 @@ pub fn build_index<T: Indexable, D: Distance<T>, V: VectorAccessMethod<T>>(
         let mut rng = rand::thread_rng();
         p.shuffle(&mut rng);
         for v in p.iter() {
-            build_ctx.search(&index, *v);
-            build_ctx.prune_index(&mut index, *v, prune);
-            build_ctx.insert_backwards_edges(&mut index, *v, prune);
+            build_ctx.search(&index, *v).await;
+            build_ctx.prune_index(&mut index, *v, prune).await;
+            build_ctx
+                .insert_backwards_edges(&mut index, *v, prune)
+                .await;
         }
     }
     index
 }
 
-pub fn build_index_par<T: Indexable, D: Distance<T>, V: VectorAccessMethod<T>>(
+#[tokio::main]
+pub async fn build_index_par<
+    T: Indexable,
+    D: Distance<T> + 'static,
+    V: VectorAccessMethod<T> + 'static,
+>(
     access_method: V,
     params: IndexParams,
 ) -> VamanaIndex<T, D, V> {
     let num_partitions = 2 * rayon::current_num_threads();
     println!("Building with {} partitions", num_partitions);
-    let partition_assignment = kmeans::<T, D, V>(&access_method, num_partitions);
-    let partition_indexes = (0..num_partitions)
-        .into_par_iter()
+    let partition_assignment = Arc::new(kmeans::<T, D, V>(&access_method, num_partitions));
+    let access_method = Arc::new(access_method);
+    let partition_handles = (0..num_partitions)
+        .into_iter()
         .map(|partition_idx| {
-            let partitioned_access_method = PartitionedAccessMethod {
-                partition_id: partition_idx,
-                underlying_access_method: &access_method,
-                partition_assignment: &partition_assignment,
-                t: std::marker::PhantomData,
-            };
-            let partition_params = IndexParams {
-                num_neighbors: params.num_neighbors / 2, // Halve number of neighbors so we can seamlessly merge indexes
+            let partition_assignment = partition_assignment.clone();
+            let params_clone = IndexParams {
+                num_neighbors: params.num_neighbors / 2,
                 search_frontier_size: params.search_frontier_size,
                 pruning_threshold: params.pruning_threshold,
             };
-            build_index::<T, D, _>(partitioned_access_method, partition_params)
+            let access_method = access_method.clone();
+
+            tokio::spawn(async move {
+                let partitioned_access_method = PartitionedAccessMethod {
+                    partition_id: partition_idx,
+                    underlying_access_method: access_method,
+                    partition_assignment: partition_assignment,
+                    t: std::marker::PhantomData,
+                };
+
+                build_index::<T, D, _>(partitioned_access_method, params_clone).await
+            })
         })
         .collect::<Vec<_>>();
+
+    let results: Vec<VamanaIndex<T, D, _>> = futures::future::join_all(partition_handles)
+        .await
+        .into_iter()
+        .map(|result| result.unwrap())
+        .collect();
 
     let mut big_graph = Array2::zeros((access_method.num_points(), params.num_neighbors + 1));
     big_graph
@@ -556,8 +573,8 @@ pub fn build_index_par<T: Indexable, D: Distance<T>, V: VectorAccessMethod<T>>(
         .for_each(|(iglobal, mut edgelist_including_length)| {
             let (a1, a2) = partition_assignment.get_partitions_for_element(iglobal);
             let (ilocal_a1, ilocal_a2) = partition_assignment.get_local_idx(iglobal);
-            let edges_a1 = partition_indexes[a1].neighbors(ilocal_a1);
-            let edges_a2 = partition_indexes[a2].neighbors(ilocal_a2);
+            let edges_a1 = results[a1].neighbors(ilocal_a1);
+            let edges_a2 = results[a2].neighbors(ilocal_a2);
 
             let a1_end = edges_a1.len();
             let a2_end = a1_end + edges_a2.len();
@@ -577,8 +594,12 @@ pub fn build_index_par<T: Indexable, D: Distance<T>, V: VectorAccessMethod<T>>(
             edgelist.sort_unstable();
             edgelist_including_length[0] = dedup_slice(&mut edgelist);
         });
-    drop(partition_indexes);
+    drop(results);
     let big_graph_start = compute_index_of_vector_closest_to_mean::<T, D, V>(&access_method);
+    let access_method = match Arc::try_unwrap(access_method) {
+        Ok(access_method) => access_method,
+        Err(_) => panic!("access_method should be closed"),
+    };
     VamanaIndex {
         params: params,
         neighbors: big_graph,
@@ -589,6 +610,7 @@ pub fn build_index_par<T: Indexable, D: Distance<T>, V: VectorAccessMethod<T>>(
     }
 }
 
+#[derive(Clone)]
 pub struct MergedAccessMethod<T: Indexable, V: VectorAccessMethod<T>> {
     underlying_access_method: (V, V),
     t: std::marker::PhantomData<T>,
@@ -596,14 +618,7 @@ pub struct MergedAccessMethod<T: Indexable, V: VectorAccessMethod<T>> {
 
 impl<T: Indexable, V: VectorAccessMethod<T>> VectorAccessMethod<T> for MergedAccessMethod<T, V> {
     fn get_vec_sync<'b>(&'b self, ivec: usize) -> &'b [T] {
-        let num_points_0 = self.underlying_access_method.0.num_points();
-        if ivec < num_points_0 {
-            self.underlying_access_method.0.get_vec_sync(ivec)
-        } else {
-            self.underlying_access_method
-                .1
-                .get_vec_sync(ivec - num_points_0)
-        }
+        unimplemented!("get_vec not implemented for ReaderAccessMethodF32")
     }
 
     async fn get_vec<'b>(&'b self, ivec: usize) -> Vec<T> {
@@ -642,7 +657,7 @@ impl<T: Indexable, V: VectorAccessMethod<T>> VectorAccessMethod<T> for MergedAcc
     }
 }
 
-unsafe fn search_merge<T: Indexable, D: Distance<T>, V: VectorAccessMethod<T>>(
+async unsafe fn search_merge<T: Indexable, D: Distance<T>, V: VectorAccessMethod<T>>(
     ctx: &mut BuildContext,
     start: usize,
     query: usize,
@@ -654,8 +669,8 @@ unsafe fn search_merge<T: Indexable, D: Distance<T>, V: VectorAccessMethod<T>>(
 ) {
     ctx.reset();
     let dim = max_num_neighbors + 1;
-    let query_vector = access_method.get_vec_sync(query);
-    let start_vector = access_method.get_vec_sync(start);
+    let query_vector = access_method.get_vec(query).await;
+    let start_vector = access_method.get_vec(start).await;
     let start_distance = D::calculate(&query_vector, &start_vector);
     let mut closest_unvisited_vertex = 0;
     ctx.search_ctx.frontier.push((start, start_distance));
@@ -667,7 +682,7 @@ unsafe fn search_merge<T: Indexable, D: Distance<T>, V: VectorAccessMethod<T>>(
         let num_neighbors = *edgelist.add(closest.0 * dim);
         for ineighbor in 0..num_neighbors {
             let n = *edgelist.add(closest.0 * dim + ineighbor + 1);
-            let neighbor_vector = access_method.get_vec_sync(n);
+            let neighbor_vector = access_method.get_vec(n).await;
             let distance = D::calculate(&query_vector, &neighbor_vector);
             ctx.search_ctx.frontier.push((n, distance));
         }
@@ -688,7 +703,7 @@ unsafe fn search_merge<T: Indexable, D: Distance<T>, V: VectorAccessMethod<T>>(
     }
 }
 
-unsafe fn prune_merge<T: Indexable, D: Distance<T>, V: VectorAccessMethod<T>>(
+async unsafe fn prune_merge<T: Indexable, D: Distance<T>, V: VectorAccessMethod<T>>(
     ctx: &mut BuildContext,
     query: usize,
     access_method: &V,
@@ -699,7 +714,7 @@ unsafe fn prune_merge<T: Indexable, D: Distance<T>, V: VectorAccessMethod<T>>(
     should_lock: bool,
 ) {
     let dim = max_num_neighbors + 1;
-    let query_vector = access_method.get_vec_sync(query);
+    let query_vector = access_method.get_vec(query).await;
     let _guard = if should_lock {
         Some(locks[query].lock().unwrap())
     } else {
@@ -709,7 +724,7 @@ unsafe fn prune_merge<T: Indexable, D: Distance<T>, V: VectorAccessMethod<T>>(
     for ineighbor in 0..num_neighbors {
         let n = *edgelist.add(query * dim + ineighbor + 1);
         ctx.search_ctx.visited.visit(n);
-        let neighbor_vector = access_method.get_vec_sync(n);
+        let neighbor_vector = access_method.get_vec(n).await;
         let distance = D::calculate(&neighbor_vector, &query_vector);
         ctx.cached_distances.push((n, distance));
     }
@@ -729,13 +744,13 @@ unsafe fn prune_merge<T: Indexable, D: Distance<T>, V: VectorAccessMethod<T>>(
         if new_num_neighbors == max_num_neighbors {
             return;
         }
-        let curr_vec = access_method.get_vec_sync(v);
+        let curr_vec = access_method.get_vec(v).await;
         for ielim in (ivisited + 1)..ctx.cached_distances.len() {
             let elim_id = ctx.cached_distances[ielim].0;
             if !ctx.search_ctx.visited.is_visited(elim_id) {
                 continue;
             }
-            let elim_vec = access_method.get_vec_sync(elim_id);
+            let elim_vec = access_method.get_vec(elim_id).await;
             let distance = D::calculate(&curr_vec, &elim_vec);
             if pruning_threshold * distance < d {
                 ctx.search_ctx.visited.mark_unvisited(elim_id);
@@ -744,7 +759,11 @@ unsafe fn prune_merge<T: Indexable, D: Distance<T>, V: VectorAccessMethod<T>>(
     }
 }
 
-unsafe fn insert_backwards_edges_merge<T: Indexable, D: Distance<T>, V: VectorAccessMethod<T>>(
+async unsafe fn insert_backwards_edges_merge<
+    T: Indexable,
+    D: Distance<T>,
+    V: VectorAccessMethod<T>,
+>(
     ctx: &mut BuildContext,
     query: usize,
     access_method: &V,
@@ -772,15 +791,15 @@ unsafe fn insert_backwards_edges_merge<T: Indexable, D: Distance<T>, V: VectorAc
             *edgelist.add(neighbor * dim) = new_num_neighbor_neighbors;
             *edgelist.add(neighbor * dim + new_num_neighbor_neighbors) = query;
         } else {
-            let query_vector = access_method.get_vec_sync(query);
-            let neighbor_vector = access_method.get_vec_sync(neighbor);
+            let query_vector = access_method.get_vec(query).await;
+            let neighbor_vector = access_method.get_vec(neighbor).await;
             let distance = D::calculate(&query_vector, &neighbor_vector);
             ctx.reset();
             ctx.search_ctx.visited.visit(query);
             ctx.cached_distances.push((query, distance));
             for inn in 0..num_neighbor_neighbors {
                 let nn = *edgelist.add(neighbor * dim + inn + 1);
-                let nn_vec = access_method.get_vec_sync(nn);
+                let nn_vec = access_method.get_vec(nn).await;
                 let d = D::calculate(&nn_vec, &neighbor_vector);
                 ctx.search_ctx.visited.visit(nn);
                 ctx.cached_distances.push((nn, d));
@@ -794,18 +813,19 @@ unsafe fn insert_backwards_edges_merge<T: Indexable, D: Distance<T>, V: VectorAc
                 pruning_threshold,
                 max_num_neighbors,
                 false, /* should_lock */
-            );
+            )
+            .await;
         }
     }
 }
 
-unsafe fn insert_single<T: Indexable, D: Distance<T>, V: VectorAccessMethod<T>>(
+async unsafe fn insert_single<T: Indexable, D: Distance<T>, V: VectorAccessMethod<T>>(
     build_ctx: &mut BuildContext,
     start: usize,
     to_insert: usize,
     access_method: &V,
     edgelist: *mut usize,
-    locks: &Vec<Mutex<()>>,
+    locks: Arc<Vec<Mutex<()>>>,
     pruning_threshold: f64,
     max_num_neighbors: usize,
     search_frontier_size: usize,
@@ -816,32 +836,36 @@ unsafe fn insert_single<T: Indexable, D: Distance<T>, V: VectorAccessMethod<T>>(
         to_insert,
         access_method,
         edgelist,
-        locks,
+        &locks,
         search_frontier_size,
         max_num_neighbors,
-    );
+    )
+    .await;
     prune_merge::<T, D, V>(
         build_ctx,
         to_insert,
         access_method,
         edgelist,
-        locks,
+        &locks,
         pruning_threshold,
         max_num_neighbors,
         true, /* should_lock */
-    );
+    )
+    .await;
     insert_backwards_edges_merge::<T, D, V>(
         build_ctx,
         to_insert,
         access_method,
         edgelist,
-        locks,
+        &locks,
         pruning_threshold,
         max_num_neighbors,
-    );
+    )
+    .await;
 }
 
-pub fn merge_indexes<T: Indexable, D: Distance<T>, V: VectorAccessMethod<T>>(
+#[tokio::main]
+pub async fn merge_indexes<T: Indexable, D: Distance<T>, V: VectorAccessMethod<T>>(
     a: VamanaIndex<T, D, V>,
     b: VamanaIndex<T, D, V>,
 ) -> VamanaIndex<T, D, MergedAccessMethod<T, V>> {
@@ -874,74 +898,98 @@ pub fn merge_indexes<T: Indexable, D: Distance<T>, V: VectorAccessMethod<T>>(
     let prune = merged_index.params.pruning_threshold;
     let num_total_points = merged_index.num_points();
     for b_vertex in (b_offset..num_total_points) {
-        build_ctx.search(&merged_index, b_vertex);
-        build_ctx.prune_index(&mut merged_index, b_vertex, prune);
-        build_ctx.insert_backwards_edges(&mut merged_index, b_vertex, prune);
+        build_ctx.search(&merged_index, b_vertex).await;
+        build_ctx
+            .prune_index(&mut merged_index, b_vertex, prune)
+            .await;
+        build_ctx
+            .insert_backwards_edges(&mut merged_index, b_vertex, prune)
+            .await;
     }
     merged_index
 }
-struct PtrWrapper(*mut usize);
-unsafe impl Sync for PtrWrapper {}
 
-pub fn merge_indexes_par<T: Indexable, D: Distance<T>, V: VectorAccessMethod<T>>(
-    a: VamanaIndex<T, D, V>,
-    b: VamanaIndex<T, D, V>,
-) -> VamanaIndex<T, D, MergedAccessMethod<T, V>> {
-    let num_points = a.access_method.num_points() + b.access_method.num_points();
-    let b_offset = a.access_method.num_points();
-    let params = a.params;
-    let access_method = MergedAccessMethod {
-        underlying_access_method: (a.access_method, b.access_method),
-        t: std::marker::PhantomData,
-    };
-    let big_graph = concatenate!(Axis(0), a.neighbors, b.neighbors);
-    let start = a.start;
-    let mut merged_index = VamanaIndex {
-        params: params,
-        neighbors: big_graph,
-        access_method: access_method,
-        start: start,
-        metric: std::marker::PhantomData,
-        t: std::marker::PhantomData,
-    };
+// struct PtrWrapper(*mut usize);
+// unsafe impl Sync for PtrWrapper {}
 
-    for i in b_offset..num_points {
-        merged_index
-            .neighbors_mut(i)
-            .iter_mut()
-            .for_each(|x| *x += b_offset)
-    }
+// #[tokio::main]
+// pub async fn merge_indexes_par<
+//     T: Indexable,
+//     D: Distance<T> + 'static,
+//     V: VectorAccessMethod<T> + 'static,
+// >(
+//     a: VamanaIndex<T, D, V>,
+//     b: VamanaIndex<T, D, V>,
+// ) -> VamanaIndex<T, D, MergedAccessMethod<T, V>> {
+//     let num_points = a.access_method.num_points() + b.access_method.num_points();
+//     let b_offset = a.access_method.num_points();
+//     let params = a.params;
+//     let access_method = MergedAccessMethod {
+//         underlying_access_method: (a.access_method, b.access_method),
+//         t: std::marker::PhantomData,
+//     };
+//     let big_graph = concatenate!(Axis(0), a.neighbors, b.neighbors);
+//     let start = a.start;
+//     let mut merged_index = VamanaIndex {
+//         params: params,
+//         neighbors: big_graph,
+//         access_method: access_method,
+//         start: start,
+//         metric: std::marker::PhantomData,
+//         t: std::marker::PhantomData,
+//     };
 
-    let mut build_ctx = BuildContext::new(&merged_index);
-    let num_total_points = merged_index.num_points();
-    let mut locks = Vec::with_capacity(num_total_points);
-    for _ in 0..num_total_points {
-        locks.push(Mutex::new(()));
-    }
-    let edgelist_ptr = PtrWrapper(merged_index.neighbors.as_mut_ptr());
-    (b_offset..num_total_points)
-        .into_par_iter()
-        .for_each_with(build_ctx, |tl_ctx, b_vertex| {
-            let _ = &edgelist_ptr;
-            unsafe {
-                insert_single::<T, D, MergedAccessMethod<T, V>>(
-                    tl_ctx,
-                    start,
-                    b_vertex,
-                    &merged_index.access_method,
-                    edgelist_ptr.0,
-                    &locks,
-                    merged_index.params.pruning_threshold,
-                    merged_index.params.num_neighbors,
-                    merged_index.params.search_frontier_size,
-                );
-            }
-        });
+//     for i in b_offset..num_points {
+//         merged_index
+//             .neighbors_mut(i)
+//             .iter_mut()
+//             .for_each(|x| *x += b_offset)
+//     }
 
-    // sort each edgelist in the neighbors array
-    for i in b_offset..num_points {
-        merged_index.neighbors_mut(i).sort_unstable();
-    }
+//     let mut build_ctx = BuildContext::new(&merged_index);
+//     let num_total_points = merged_index.num_points();
+//     let mut locks = Vec::with_capacity(num_total_points);
+//     for _ in 0..num_total_points {
+//         locks.push(Mutex::new(()));
+//     }
+//     let mut locks = Arc::new(locks);
+//     // let edgelist_ptr: PtrWrapper = PtrWrapper(merged_index.neighbors.as_mut_ptr());
+//     let edgelist_safe = Arc::new(Mutex::new(merged_index.neighbors));
+//     let merged_index_access_method = Arc::new(merged_index.access_method);
 
-    merged_index
-}
+//     let tasks: Vec<_> = (b_offset..num_total_points)
+//         .into_iter()
+//         .map(|b_vertex| {
+//             let mut tl_ctx = build_ctx.clone();
+
+//             // let locks = locks.clone();
+//             let prune = merged_index.params.pruning_threshold;
+//             let num_neighbors = merged_index.params.num_neighbors;
+//             let search_frontier_size = merged_index.params.search_frontier_size;
+//             // let _ = &edgelist_ptr;
+//             let edgelist_safe_clone = Arc::clone(&edgelist_safe);
+//             let locks_clone = locks.clone();
+//             let merged_index_access_method_clone = Arc::clone(&merged_index_access_method);
+//             tokio::spawn(async move {
+//                 let mut edgelist_guard = edgelist_safe_clone.lock().unwrap();
+//                 unsafe {
+//                     insert_single::<T, D, MergedAccessMethod<T, V>>(
+//                         &mut tl_ctx,
+//                         start,
+//                         b_vertex,
+//                         &merged_index_access_method_clone,
+//                         edgelist_guard.as_mut_ptr(),
+//                         locks_clone,
+//                         prune,
+//                         num_neighbors,
+//                         search_frontier_size,
+//                     );
+//                 }
+//             })
+//         })
+//         .collect();
+
+//     let results = futures::future::join_all(tasks).await;
+
+//     merged_index
+// }
