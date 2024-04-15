@@ -17,7 +17,7 @@ pub const WRITER_BUFFER_SIZE: usize = 4 * 1024 * 1024;
 
 pub struct AsyncReader {
     reader: Reader,
-    filename: String,
+    pub filename: String,
 }
 
 impl Deref for AsyncReader {
