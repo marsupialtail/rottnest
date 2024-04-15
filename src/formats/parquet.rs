@@ -57,12 +57,14 @@ async fn get_reader_and_size_from_file(file: &str) -> Result<(usize, AsyncReader
     };
 
     let file_size: usize = operator.stat(&file_name).await?.content_length() as usize;
-    let reader: AsyncReader = operator
-        .clone()
-        .reader_with(&file_name)
-        .buffer(READER_BUFFER_SIZE)
-        .await?
-        .into();
+    let reader: AsyncReader = AsyncReader::new(
+        operator
+            .clone()
+            .reader_with(&file_name)
+            .buffer(READER_BUFFER_SIZE)
+            .await?,
+        file_name.clone(),
+    );
 
     Ok((file_size, reader))
 }

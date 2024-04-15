@@ -342,15 +342,16 @@ async fn search_vector_async(
     let mut reader_access_methods: Vec<ReaderAccessMethodF32> = vec![];
 
     for i in 0..readers.len() {
-        let num_points = readers[i].read_u64_le().await?;
-        let dim = readers[i].read_u64_le().await?;
-        let start = readers[i].read_u64_le().await?;
+        let bytes = readers[i].read_range(0, file_sizes[i] as u64).await?;
+        let num_points = u64::from_le_bytes(bytes[0..8].try_into().unwrap());
+        let dim = u64::from_le_bytes(bytes[8..16].try_into().unwrap());
+        let start = u64::from_le_bytes(bytes[16..24].try_into().unwrap());
+        let compressed_nlist = &bytes[24..];
 
-        let compressed_nlist = readers[i].read_range(24, file_sizes[i] as u64).await?;
         let mut decompressor = Decoder::new(&compressed_nlist[..])?;
         let mut serialized_nlist: Vec<u8> = Vec::with_capacity(compressed_nlist.len() as usize);
         decompressor.read_to_end(&mut serialized_nlist)?;
-        let nlist: Array2<usize> = bincode::deserialize(&serialized_nlist)?;
+        let nlist: Array2<usize> = bincode::deserialize(&serialized_nlist).unwrap();
 
         let reader_access_method = ReaderAccessMethodF32 {
             dim: dim as usize,

@@ -17,6 +17,7 @@ pub const WRITER_BUFFER_SIZE: usize = 4 * 1024 * 1024;
 
 pub struct AsyncReader {
     reader: Reader,
+    filename: String,
 }
 
 impl Deref for AsyncReader {
@@ -33,15 +34,15 @@ impl DerefMut for AsyncReader {
     }
 }
 
-impl From<Reader> for AsyncReader {
-    fn from(reader: Reader) -> Self {
-        Self::new(reader)
-    }
-}
+// impl From<Reader> for AsyncReader {
+//     fn from(reader: Reader) -> Self {
+//         Self::new(reader)
+//     }
+// }
 
 impl AsyncReader {
-    pub fn new(reader: Reader) -> Self {
-        Self { reader }
+    pub fn new(reader: Reader, filename: String) -> Self {
+        Self { reader, filename }
     }
 
     pub async fn read_range(&mut self, from: u64, to: u64) -> Result<Bytes, LavaError> {
@@ -186,12 +187,14 @@ pub(crate) async fn get_file_sizes_and_readers(
                 };
 
                 // Create the reader
-                let reader: AsyncReader = operator
-                    .clone()
-                    .reader_with(&filename)
-                    .buffer(READER_BUFFER_SIZE)
-                    .await?
-                    .into();
+                let reader: AsyncReader = AsyncReader::new(
+                    operator
+                        .clone()
+                        .reader_with(&filename)
+                        .buffer(READER_BUFFER_SIZE)
+                        .await?,
+                    filename.clone(),
+                );
 
                 // Get the file size
                 let file_size: u64 = operator.stat(&filename).await?.content_length();

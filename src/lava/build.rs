@@ -381,18 +381,20 @@ pub async fn build_lava_substring(
         if ((i + 1) % FM_CHUNK_TOKS == 0) || i == bwt.len() - 1 {
             let serialized_counts = bincode::serialize(&current_chunk_counts)?;
             let compressed_counts =
-                encode_all(&serialized_counts[..], 0).expect("Compression failed");
+                encode_all(&serialized_counts[..], 10).expect("Compression failed");
             file.write_all(&(compressed_counts.len() as u64).to_le_bytes())?;
             file.write_all(&compressed_counts)?;
             let serialized_chunk = bincode::serialize(&current_chunk)?;
             let compressed_chunk =
-                encode_all(&serialized_chunk[..], 0).expect("Compression failed");
+                encode_all(&serialized_chunk[..], 10).expect("Compression failed");
             file.write_all(&compressed_chunk)?;
             fm_chunk_offsets.push(file.seek(SeekFrom::Current(0))? as usize);
             current_chunk_counts = next_chunk_counts.clone();
             current_chunk = vec![];
         }
     }
+    // print out total file size so far
+    println!("total file size: {}", file.seek(SeekFrom::Current(0))?);
 
     let mut cumulative_counts: Vec<u64> = vec![0];
     for i in 0..tokenizer.get_vocab_size(false) {
@@ -471,11 +473,27 @@ pub async fn build_lava_vector(
 
     let num_points = index.num_points();
     let start = index.start;
-    let nlist = index.neighbors;
+    let mut nlist: ndarray::prelude::ArrayBase<
+        ndarray::OwnedRepr<usize>,
+        ndarray::prelude::Dim<[usize; 2]>,
+    > = index.neighbors;
+
+    // nlist.map_inplace(|elem| *elem /= 333);
+
+    // let nlist: Vec<Vec<usize>> = nlist
+    //     .outer_iter()
+    //     .map(|row| {
+    //         let mut unique_elems = row.to_vec();
+    //         unique_elems.sort(); // Sort the elements to prepare for deduplication.
+    //         unique_elems.dedup(); // Deduplicate.
+    //         unique_elems
+    //     })
+    //     .collect();
+
     let bytes = bincode::serialize(&nlist)?;
     let compressed_nlist: Vec<u8> = encode_all(&bytes[..], 0).expect("Compression failed");
 
-    println!("{}", nlist);
+    // println!("{}", nlist);
 
     let mut file = File::create(output_file_name)?;
     file.write_all(&(num_points as u64).to_le_bytes())?;

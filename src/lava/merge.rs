@@ -214,12 +214,14 @@ async fn merge_lava_bm25(
     for file in lava_files {
         let file = file.as_ref();
         let file_size: u64 = operator.stat(file).await?.content_length();
-        let mut reader: AsyncReader = operator
-            .clone()
-            .reader_with(file)
-            .buffer(READER_BUFFER_SIZE)
-            .await?
-            .into();
+        let mut reader: AsyncReader = AsyncReader::new(
+            operator
+                .clone()
+                .reader_with(file)
+                .buffer(READER_BUFFER_SIZE)
+                .await?,
+            file.to_string(),
+        );
 
         let results = reader.read_usize_from_end(3).await?;
         let compressed_term_dict_offset = results[0];
@@ -455,23 +457,27 @@ async fn merge_lava_substring(
     for file in lava_files {
         let file = file.as_ref();
         let file_size: u64 = operator.stat(file).await?.content_length();
-        let mut reader: AsyncReader = operator
-            .clone()
-            .reader_with(file)
-            .buffer(READER_BUFFER_SIZE)
-            .await?
-            .into();
+        let mut reader: AsyncReader = AsyncReader::new(
+            operator
+                .clone()
+                .reader_with(file)
+                .buffer(READER_BUFFER_SIZE)
+                .await?,
+            file.to_string(),
+        );
 
         // @Rain just make two different readers for now because this is hopefully low overhead
         // instead of bothering with wrapping this thing in Arc<Mutex<>>. Lots of tech debt to clean up
         // needed for the FMChunkIterator and PListIterator
 
-        let mut reader1: AsyncReader = operator
-            .clone()
-            .reader_with(file)
-            .buffer(READER_BUFFER_SIZE)
-            .await?
-            .into();
+        let mut reader1: AsyncReader = AsyncReader::new(
+            operator
+                .clone()
+                .reader_with(file)
+                .buffer(READER_BUFFER_SIZE)
+                .await?,
+            file.to_string(),
+        );
 
         let results = reader.read_usize_from_end(4).await?;
         let fm_chunk_offsets_offset = results[0];

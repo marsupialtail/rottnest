@@ -12,6 +12,8 @@ import boto3
 from botocore.config import Config
 import os
 
+from pyarrow.fs import S3FileSystem
+
 def read_metadata_file(file_path: str):
 
     # currently only support aws and s3 compatible things, this wrapper is temporary, eventually move 
@@ -29,6 +31,13 @@ def read_metadata_file(file_path: str):
         return polars.read_parquet(obj['Body'].read())
     else:
         return polars.read_parquet(file_path)
+
+def read_columns():
+
+    try:
+        s3fs = S3FileSystem(endpoint_override = 'https://tos-s3-cn-beijing.volces.com', force_virtual_addressing = True)
+    except:
+        raise ValueError("Requires pyarrow >= 16.0.0.")
 
 def index_file_bm25(file_path: str, column_name: str, name = None, tokenizer_file = None):
 
@@ -235,22 +244,23 @@ def search_index_vector(indices: List[str], query: np.array, K: int):
 
     index_search_results, vectors = rottnest.search_lava_vector([f"{index_name}.lava" for index_name in indices], column_name, data_page_rows, uid_to_metadata, query, K)
     
-    import pdb; pdb.set_trace()
-    print(index_search_results)
-    print(vectors)
+    # import pdb; pdb.set_trace()
+    return index_search_results
+    # print(index_search_results)
+    # print(vectors)
     
-    if len(index_search_results) == 0:
-        return None
+    # if len(index_search_results) == 0:
+    #     return None
 
-    uids = polars.from_dict({"file_id": [i[0] for i in index_search_results], "uid": [i[1] for i in index_search_results]})
+    # uids = polars.from_dict({"file_id": [i[0] for i in index_search_results], "uid": [i[1] for i in index_search_results]})
 
-    metadata = metadata.join(uids, on = ["file_id", "uid"])
+    # metadata = metadata.join(uids, on = ["file_id", "uid"])
 
-    result = pyarrow.chunked_array(rottnest.read_indexed_pages(column_name, metadata["file_path"].to_list(), metadata["row_groups"].to_list(),
-                                     metadata["data_page_offsets"].to_list(), metadata["data_page_sizes"].to_list(), metadata["dictionary_page_sizes"].to_list()))
-    result = pyarrow.table([result], names = ["text"])
+    # result = pyarrow.chunked_array(rottnest.read_indexed_pages(column_name, metadata["file_path"].to_list(), metadata["row_groups"].to_list(),
+    #                                  metadata["data_page_offsets"].to_list(), metadata["data_page_sizes"].to_list(), metadata["dictionary_page_sizes"].to_list()))
+    # result = pyarrow.table([result], names = ["text"])
     
-    return polars.from_arrow(result).filter(polars.col("text").str.to_lowercase().str.contains(query.lower()))
+    # return polars.from_arrow(result).filter(polars.col("text").str.to_lowercase().str.contains(query.lower()))
 
 def search_index_substring(indices: List[str], query: str, K: int):
     

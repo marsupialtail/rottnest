@@ -140,10 +140,13 @@ impl<T: Indexable, D: Distance<T>, V: VectorAccessMethod<T>> VamanaIndex<T, D, V
         let start_distance = D::calculate(query, &start_vector);
         let mut closest_unvisited_vertex = 0;
         ctx.frontier.push((self.start, start_distance));
+        let mut counter = 1;
         while closest_unvisited_vertex < ctx.frontier.len() {
             let closest = ctx.frontier[closest_unvisited_vertex];
             ctx.visited.visit(closest.0);
+            println!("{:?}", closest);
             for n in self.neighbors(closest.0) {
+                counter += 1;
                 let neighbor_vector = self.get_vector(*n).await;
                 let distance = D::calculate(query, &neighbor_vector);
                 ctx.frontier.push((*n, distance));
@@ -162,6 +165,7 @@ impl<T: Indexable, D: Distance<T>, V: VectorAccessMethod<T>> VamanaIndex<T, D, V
                 }
             }
         }
+        println!("counter {}", counter);
         Ok(())
     }
 
