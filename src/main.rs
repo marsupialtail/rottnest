@@ -84,26 +84,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let client_c = client.clone();
         let bucket_c = bucket.to_string();
         join_set.spawn(async move {
-            let mut object = client_c
-                .get_object()
-                .bucket(bucket_c)
-                .key(filename)
-                .set_range(Some("0-1000".to_string()))
-                .send()
-                .await
-                .unwrap();
+            for i in 0..TOTAL_ITERATIONS {
+                let from = thread_rng().gen_range(0..(30_000_000 as u64 - PAGE_SIZE));
+                let to = from + PAGE_SIZE - 1;
+                let mut object = client_c
+                    .get_object()
+                    .bucket(bucket_c.clone())
+                    .key(filename.clone())
+                    .set_range(Some(format!("bytes={}-{}", from, to).to_string()))
+                    .send()
+                    .await
+                    .unwrap();
 
-            let mut byte_count = 0_usize;
-            while let Some(bytes) = object.body.try_next().await.unwrap() {
-                let bytes_len = bytes.len();
-                // file.write_all(&bytes)?;
-                // trace!("Intermediate write of {bytes_len}");
-                byte_count += bytes_len;
+                let mut byte_count = 0_usize;
+                while let Some(bytes) = object.body.try_next().await.unwrap() {
+                    let bytes_len = bytes.len();
+                    // file.write_all(&bytes)?;
+                    // trace!("Intermediate write of {bytes_len}");
+                    byte_count += bytes_len;
+                }
             }
-            byte_count
         });
     }
-
     while let Some(x) = join_set.join_next().await {
         println!("{:?}", x.unwrap());
         // println!("Task completed");

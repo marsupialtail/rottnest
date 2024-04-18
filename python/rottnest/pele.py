@@ -6,13 +6,11 @@ from typing import List, Optional
 import uuid
 import polars
 import numpy as np
-from tqdm import tqdm
-import hashlib
 import boto3
 from botocore.config import Config
 import os
-
 from pyarrow.fs import S3FileSystem
+from .nlp import query_expansion_keyword, query_expansion_llm
 
 def read_metadata_file(file_path: str):
 
@@ -169,67 +167,6 @@ def merge_index_vector(new_index_name: str, index_names: List[str]):
     rottnest.merge_lava_vector(f"{new_index_name}.lava", [f"{name}.lava" for name in index_names], vectors)
     polars.concat(metadatas).write_parquet(f"{new_index_name}.meta")
 
-def query_expansion_llm(tokenizer_vocab: List[str], query: str, model = "text-embedding-3-large", expansion_tokens = 20):
-    import os, pickle
-    try:
-        import faiss
-        from openai import OpenAI
-    except:
-        raise Exception("LLM based query expansion requires installation of FAISS and OpenAI python packages. pip install faiss-cpu openai")
-
-    assert type(query) == str, "query must be string. If you have a list of keywords, concatenate them with spaces."
-
-    cache_dir = os.path.expanduser('~/.cache')
-    # make a subdirectory rottnest under cache_dir if it's not there already
-    cache_dir = os.path.join(cache_dir, 'rottnest')
-    if not os.path.exists(cache_dir):
-        os.makedirs(cache_dir)
-    
-    tokenizer_hash = hashlib.sha256(("".join(tokenizer_vocab[::1000])).encode('utf-8')).hexdigest()[:8]
-
-    # check if the tokenizer_embeddings.pkl file exists in the cache directory
-    tokenizer_embeddings_path = os.path.join(cache_dir, f"tokenizer_embeddings_{tokenizer_hash}_{model}.pkl")
-    client = OpenAI()
-
-    if not os.path.exists(tokenizer_embeddings_path):
-        print("First time doing LLM query expansion with this tokenizer, need to compute tokenizer embeddings.")
-        all_vecs = []
-        tokenizer_vocab = [tok  if tok else "[]" for tok in tokenizer_vocab]
-        for i in tqdm(range(0, len(tokenizer_vocab), 1000)):
-            results = client.embeddings.create(input = tokenizer_vocab[i:i+1000], model = model)
-            vecs = np.vstack([results.data[i].embedding for i in range(len(results.data))])
-            all_vecs.append(vecs)
-
-        pickle.dump({"words": tokenizer_vocab, "vecs": np.vstack(all_vecs)}, 
-                    open(os.path.join(cache_dir, f"tokenizer_embeddings_{tokenizer_hash}_{model}.pkl"), "wb"))
-    
-    embeddings = pickle.load(open(tokenizer_embeddings_path, "rb"))
-
-    tokens = embeddings['words']
-    db_vectors = embeddings['vecs']
-
-    index = faiss.IndexFlatL2(db_vectors.shape[1])  # Use the L2 distance for similarity
-    index.add(db_vectors) 
-    query_vectors = np.expand_dims(np.array(client.embeddings.create(input = query, model = model).data[0].embedding), 0)
-    distances, indices = index.search(query_vectors, expansion_tokens)  # Perform the search
-    print("Expanded tokens: ", [tokens[i] for i in indices[0]])
-
-    return [tokens[i] for i in indices[0]], list(indices[0]), list(1 / (distances[0] + 1))
-
-def query_expansion_keyword(tokenizer_vocab: List[str], query: str):
-
-    # simply check what words in tokenizer_vocab appears in query, and the weight is how many times it appears
-    token_ids = []
-    tokens = []
-    weights = []
-    for i, token in tokenizer_vocab:
-        if token in query:
-            token_ids.append(i)
-            tokens.append(token)
-            weights.append(query.count(token))
-
-    print("Expanded tokens: ", tokens)
-    return tokens, token_ids, weights
 
 def search_index_vector(indices: List[str], query: np.array, K: int):
     
@@ -285,14 +222,14 @@ def search_index_substring(indices: List[str], query: str, K: int):
     
     return polars.from_arrow(result).filter(polars.col("text").str.to_lowercase().str.contains(query.lower()))
 
-def search_index_bm25(indices: List[str], query: str, K: int, query_expansion = "openai", quality_factor = 0.2, expansion_tokens = 20):
+def search_index_bm25(indices: List[str], query: str, K: int, query_expansion = "bge", quality_factor = 0.2, expansion_tokens = 20):
 
-    assert query_expansion in {"openai", "keyword", "none"}
+    assert query_expansion in {"bge", "openai", "keyword", "none"}
     
     tokenizer_vocab = rottnest.get_tokenizer_vocab([f"{index_name}.lava" for index_name in indices])
 
-    if query_expansion == "openai":
-        tokens, token_ids, weights = query_expansion_llm(tokenizer_vocab, query, expansion_tokens=expansion_tokens)
+    if query_expansion in {"bge","openai"}:
+        tokens, token_ids, weights = query_expansion_llm(tokenizer_vocab, query, method = query_expansion, expansion_tokens=expansion_tokens)
     elif query_expansion == "keyword":
         tokens, token_ids, weights = query_expansion_keyword(tokenizer_vocab, query)
     else:
@@ -314,8 +251,6 @@ def search_index_bm25(indices: List[str], query: str, K: int, query_expansion = 
     metadatas = [read_metadata_file(f"{index_name}.meta").with_columns(polars.lit(i).alias("file_id").cast(polars.Int64)) for i, index_name in enumerate(indices)]
     metadata = polars.concat(metadatas)
     metadata = metadata.join(uids, on = ["file_id", "uid"])
-
-    print(metadata)
     
     assert len(metadata["column_name"].unique()) == 1, "index is not allowed to span multiple column names"
     column_name = metadata["column_name"].unique()[0]
@@ -324,8 +259,6 @@ def search_index_bm25(indices: List[str], query: str, K: int, query_expansion = 
                                      metadata["data_page_offsets"].to_list(), metadata["data_page_sizes"].to_list(), metadata["dictionary_page_sizes"].to_list()))
     result = pyarrow.table([result], names = ["text"])
     result = result.append_column('row_nr', pyarrow.array(np.arange(len(result)), pyarrow.int64()))
-
-    print(polars.from_arrow(result))
 
     import duckdb
     con = duckdb.connect()
