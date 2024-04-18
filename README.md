@@ -1,6 +1,6 @@
 # Rottnest : Data Lake Indices
 
-You have your data already in Parquet format in Iceberg or Delta (or json.gz, CSV ,etc). Unfortunately you need to do some stuff like full text search or vector search, so you have to ETL into Clickhouse, ElasticSearch or some vector database. It is complicated and expensive. Now you have an alternative.
+You don't need ElasticSearch or some vector database to do full text search or vector search. Parquet + Rottnest is all you need. Rottnest is like Postgres indices for Parquet. 
 
 ## Installation
 
@@ -10,19 +10,35 @@ Kubernetes Operator (upcoming)
 
 ## How to use
 
-Build indices on your Parquet files, merge them, and query them. Very simple. Let's walk through a very simple example.
+Build indices on your Parquet files, merge them, and query them. Very simple. Let's walk through a very simple example, in `demo.py`. It builds a BM25 index on two Parquet files, merges the indices, and searches the merged index for records related to cell phones. The code is here:
 
-### BM25
+```
+import rottnest
+rottnest.index_file_bm25("example_data/0.parquet", "body", "index0")
+rottnest.index_file_bm25("example_data/1.parquet", "body", "index1")
+rottnest.merge_index_bm25("merged_index", ["index0", "index1"])
+result = rottnest.search_index_bm25(["merged_index"], "cell phones", K = 10)
+```
 
-`rottnest.index_file_bm25(f"msmarco/chunk_{i}.parquet","body", name = f"msmarco_index/{i}")`
+This code will still work if the Parquet files are in fact **on object storage**. You can copy the data files to an S3 bucket, say `s3://example_data/`. Then the following code will work:
 
-`rottnest.merge_index_bm25("msmarco_index/merged", [f"msmarco_index/{i}" for i in range(1,3)])`
+```
+import rottnest
+rottnest.index_file_bm25("s3://example_data/0.parquet", "body", "index0")
+rottnest.index_file_bm25("s3://example_data/1.parquet", "body", "index1")
+rottnest.merge_index_bm25("merged_index", ["index0", "index1"])
+result = rottnest.search_index_bm25(["merged_index"], "cell phones", K = 10)
+```
 
-`result = rottnest.search_index_bm25(["msmarco_index/merged"], "politics", K = 10,query_expansion = "openai")`
+It will use the index to search against the Parquet files on S3 directly. Rottnest has its own Parquet reader that makes this very very efficient.
+
+Rottnest not only supports BM25 indices but also other indices, like regex and vector searches. More documentation will be forthcoming.
 
 ### Regex
 
 ### Vector
+
+## Architecture
 
 ![Architecture](assets/arch.png)
 
