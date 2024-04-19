@@ -6,5 +6,4 @@ Cargo.lock
 __pycache__
 output_file.bin
 .vscode
-*.parquet
 *.meta
