@@ -3,18 +3,18 @@ use ndarray::Array2;
 use std::collections::BTreeSet;
 use std::{
     collections::{HashMap, HashSet},
-    io::{BufRead, BufReader, Cursor, Read, SeekFrom},
+    io::{Read, SeekFrom},
 };
 use tokio::task::JoinSet;
 use zstd::stream::read::Decoder;
 
 use crate::lava::constants::*;
 use crate::lava::fm_chunk::FMChunk;
-use crate::vamana::vamana::{Distance, VectorAccessMethod};
+use crate::vamana::vamana::VectorAccessMethod;
 use crate::vamana::{access::ReaderAccessMethodF32, EuclideanF32, IndexParams, VamanaIndex};
-use crate::{formats::io::READER_BUFFER_SIZE, lava::plist::PListChunk};
+use crate::lava::plist::PListChunk;
 use crate::{
-    formats::io::{get_file_sizes_and_readers, AsyncReader, FsBuilder, Operators, S3Builder},
+    formats::io::{get_file_sizes_and_readers, AsyncReader},
     lava::error::LavaError,
 };
 
@@ -83,7 +83,7 @@ async fn search_substring_one_file(
 
     let mut start: usize = 0;
     let mut end: usize = n as usize;
-    let previous_range: u64 = u64::MAX;
+    // let previous_range: u64 = u64::MAX;
 
     for i in (0..query.len()).rev() {
         let current_token = query[i];
@@ -321,7 +321,7 @@ async fn search_bm25_async(
     page_scores_vec.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
 
     // get the top k results
-    for (uid, score) in page_scores_vec.iter().take(k) {
+    for (uid, _score) in page_scores_vec.iter().take(k) {
         // println!("{}", score);
         plist_result.push(*uid);
     }
@@ -426,7 +426,7 @@ pub async fn search_lava_substring(
     query: String,
     k: usize,
 ) -> Result<Vec<(u64, u64)>, LavaError> {
-    let (file_sizes, readers) = get_file_sizes_and_readers(&files).await?;
+    let (_file_sizes, readers) = get_file_sizes_and_readers(&files).await?;
     let tokenizer = get_tokenizer_async(readers).await?.0;
 
     let mut skip_tokens: HashSet<u32> = HashSet::new();
@@ -494,7 +494,7 @@ pub async fn search_lava_vector(
 
 #[tokio::main]
 pub async fn get_tokenizer_vocab(files: Vec<String>) -> Result<Vec<String>, LavaError> {
-    let (file_sizes, readers) = get_file_sizes_and_readers(&files).await?;
+    let (_file_sizes, readers) = get_file_sizes_and_readers(&files).await?;
     Ok(get_tokenizer_async(readers).await?.1)
 }
 

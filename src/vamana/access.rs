@@ -1,17 +1,11 @@
-use std::collections::HashMap;
-
 use crate::formats::parquet::read_indexed_pages_async;
-use crate::lava::error::LavaError;
 use crate::vamana::vamana::{
-    build_index_par, Distance, IndexParams, Indexable, VectorAccessMethod,
+    Distance, Indexable, VectorAccessMethod,
 };
 use arrow::array::BinaryArray;
-use arrow::compute::binary;
-use arrow::datatypes::ToByteSlice;
 use ndarray::parallel::prelude::*;
 use ndarray::{s, Array2};
-use opendal::Reader;
-use rayon::iter::empty;
+
 
 pub struct Euclidean<T: Indexable> {
     t: std::marker::PhantomData<T>,
@@ -50,7 +44,7 @@ pub struct ReaderAccessMethodF32<'a> {
 }
 
 impl VectorAccessMethod<f32> for ReaderAccessMethodF32<'_> {
-    fn get_vec_sync<'a>(&'a self, idx: usize) -> &'a [f32] {
+    fn get_vec_sync<'a>(&'a self, _idx: usize) -> &'a [f32] {
         unimplemented!("get_vec not implemented for ReaderAccessMethodF32")
     }
 

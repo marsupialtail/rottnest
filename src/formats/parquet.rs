@@ -21,15 +21,12 @@ use parquet::{
 };
 use thrift::protocol::TCompactInputProtocol;
 
-use opendal::raw::oio::ReadExt;
-
 use bytes::Bytes;
 use std::convert::TryFrom;
-use std::io::{Read, SeekFrom};
+use std::io::Read;
 
 use futures::stream::{self, StreamExt};
 use itertools::{izip, Itertools};
-use regex::Regex;
 use std::collections::HashMap;
 
 use std::{env, usize};

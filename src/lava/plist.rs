@@ -1,8 +1,5 @@
 use parquet::data_type::AsBytes;
-use std::{
-    collections::BTreeSet,
-    io::{Cursor, Result},
-};
+use std::io::{Cursor, Result};
 use zstd::stream::read::Decoder;
 use zstd::stream::write::Encoder;
 

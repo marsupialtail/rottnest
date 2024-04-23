@@ -3,13 +3,10 @@ use ndarray::{s, Array2};
 use rand::distributions::{Distribution, Uniform};
 use rand::seq::SliceRandom;
 use rayon::prelude::*;
-
-use super::{access, InMemoryAccessMethodF32};
 use crate::lava::error::LavaError;
 use crate::vamana::kmeans::{kmeans, KMeansAssignment};
-use futures::StreamExt;
 use ndarray::{concatenate, Axis};
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 pub trait Distance<T: Indexable>: std::marker::Send + std::marker::Sync {
     fn calculate(a: &[T], b: &[T]) -> f64;
@@ -17,7 +14,7 @@ pub trait Distance<T: Indexable>: std::marker::Send + std::marker::Sync {
 
 pub trait VectorAccessMethod<T: Indexable>: std::marker::Sync + Send {
     fn get_vec_sync<'a>(&'a self, idx: usize) -> &'a [T];
-    async fn get_vec<'a>(&'a self, idx: usize) -> Vec<T>;
+    fn get_vec<'a>(&'a self, idx: usize) -> impl std::future::Future<Output = Vec<T>> + Send;
     fn dim(&self) -> usize;
     fn num_points(&self) -> usize;
     fn iter<'a>(&'a self) -> impl Iterator<Item = &'a [T]>;
@@ -877,7 +874,7 @@ pub fn merge_indexes<T: Indexable, D: Distance<T>, V: VectorAccessMethod<T>>(
     let mut build_ctx = BuildContext::new(&merged_index);
     let prune = merged_index.params.pruning_threshold;
     let num_total_points = merged_index.num_points();
-    for b_vertex in (b_offset..num_total_points) {
+    for b_vertex in b_offset..num_total_points {
         build_ctx.search(&merged_index, b_vertex);
         build_ctx.prune_index(&mut merged_index, b_vertex, prune);
         build_ctx.insert_backwards_edges(&mut merged_index, b_vertex, prune);
@@ -916,7 +913,7 @@ pub fn merge_indexes_par<T: Indexable, D: Distance<T>, V: VectorAccessMethod<T>>
             .for_each(|x| *x += b_offset)
     }
 
-    let mut build_ctx = BuildContext::new(&merged_index);
+    let build_ctx = BuildContext::new(&merged_index);
     let num_total_points = merged_index.num_points();
     let mut locks = Vec::with_capacity(num_total_points);
     for _ in 0..num_total_points {

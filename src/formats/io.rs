@@ -34,12 +34,6 @@ impl DerefMut for AsyncReader {
     }
 }
 
-// impl From<Reader> for AsyncReader {
-//     fn from(reader: Reader) -> Self {
-//         Self::new(reader)
-//     }
-// }
-
 impl AsyncReader {
     pub fn new(reader: Reader, filename: String) -> Self {
         Self { reader, filename }
@@ -92,7 +86,7 @@ impl AsyncReader {
         pin!(reader);
         reader.seek(SeekFrom::End(-(n as i64 * 8))).await?;
         let mut result: Vec<u64> = vec![];
-        for i in 0..n {
+        for _i in 0..n {
             result.push(reader.read_u64_le().await?);
         }
         Ok(result)
@@ -218,7 +212,7 @@ pub(crate) async fn get_file_sizes_and_readers(
                 readers.push(reader);
             }
             Ok(Err(e)) => return Err(e), // Handle error from inner task
-            Err(e) => return Err(LavaError::Parse("Task join error: {}".to_string())), // Handle join error
+            Err(_e) => return Err(LavaError::Parse("Task join error: {}".to_string())), // Handle join error
         }
     }
 

@@ -5,19 +5,18 @@ use itertools::Itertools;
 use ndarray::{concatenate, Array2, Axis};
 use opendal::raw::oio::ReadExt;
 use opendal::services::Fs;
-use opendal::{Operator, Writer};
+use opendal::Operator;
 use std::collections::BTreeSet;
 use std::env;
 use std::fs::File;
-use std::io::{BufRead, BufReader, Cursor, Read, Seek, SeekFrom, Write};
+use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::sync::{Arc, Mutex};
 use tokio::io::AsyncReadExt;
-use zstd::bulk::compress;
 use zstd::stream::encode_all;
 use zstd::stream::read::Decoder;
 
 use crate::formats::io::{
-    get_file_sizes_and_readers, AsyncReader, READER_BUFFER_SIZE, WRITER_BUFFER_SIZE,
+    get_file_sizes_and_readers, AsyncReader, READER_BUFFER_SIZE,
 };
 use crate::lava::constants::*;
 use crate::lava::error::LavaError;
@@ -292,7 +291,7 @@ async fn merge_lava_bm25(
     let mut output_file = File::create(condensed_lava_file)?;
 
     let compressed_tokenizer = compressed_tokenizer.unwrap();
-    let compressed_tokenizer_len = compressed_tokenizer.len();
+    // let compressed_tokenizer_len = compressed_tokenizer.len();
     output_file.write_all(&(compressed_tokenizer.len() as u64).to_le_bytes())?;
     output_file.write_all(&compressed_tokenizer)?;
 
@@ -376,7 +375,7 @@ async fn compute_interleave(
 
     let mut interleave_iterations = 0;
 
-    for it in 0..10 {
+    for _ in 0..10 {
         let mut ind: [usize; 2] = [0, 0];
 
         let mut bwt0 = &bwt0_reader.current_chunk.bwt_chunk;
@@ -470,7 +469,7 @@ async fn merge_lava_substring(
         // instead of bothering with wrapping this thing in Arc<Mutex<>>. Lots of tech debt to clean up
         // needed for the FMChunkIterator and PListIterator
 
-        let mut reader1: AsyncReader = AsyncReader::new(
+        let reader1: AsyncReader = AsyncReader::new(
             operator
                 .clone()
                 .reader_with(file)
@@ -683,7 +682,7 @@ async fn merge_lava_vector(
 
     for i in 0..2 {
         let mut reader = readers.remove(0);
-        let num_points = reader.read_u64_le().await?;
+        // let num_points = reader.read_u64_le().await?;
         let dim = reader.read_u64_le().await?;
         match all_dim {
             Some(d) => assert_eq!(dim, d),
@@ -739,12 +738,12 @@ async fn async_parallel_merge_files(
     files: Vec<String>,
     do_not_delete: BTreeSet<String>,
     uid_offsets: Vec<u64>,
-    K: usize,
+    k: usize,
     mode: usize, // 0 for bm25 1 for substring
 ) -> Result<(), LavaError> {
     assert!(mode == 1 || mode == 0);
     if mode == 1 {
-        assert_eq!(K, 2);
+        assert_eq!(k, 2);
     }
 
     match files.len() {
@@ -762,14 +761,14 @@ async fn async_parallel_merge_files(
 
             let chunked_files: Vec<Vec<String>> = files
                 .into_iter()
-                .chunks(K)
+                .chunks(k)
                 .into_iter()
                 .map(|chunk| chunk.collect())
                 .collect();
 
             let chunked_uid_offsets: Vec<Vec<u64>> = uid_offsets
                 .into_iter()
-                .chunks(K)
+                .chunks(k)
                 .into_iter()
                 .map(|chunk| chunk.collect())
                 .collect();
@@ -856,7 +855,7 @@ async fn async_parallel_merge_files(
                 merged_files,
                 do_not_delete,
                 new_uid_offsets,
-                K,
+                k,
                 mode,
             )
             .await
@@ -974,7 +973,7 @@ pub async fn parallel_merge_files(
     condensed_lava_file: String,
     files: Vec<String>,
     uid_offsets: Vec<u64>,
-    K: usize,
+    k: usize,
     mode: usize, // 0 for bm25 1 for substring
 ) -> Result<(), LavaError> {
     let do_not_delete = BTreeSet::from_iter(files.clone().into_iter());
@@ -983,7 +982,7 @@ pub async fn parallel_merge_files(
         files,
         do_not_delete,
         uid_offsets,
-        K,
+        k,
         mode,
     )
     .await?;

@@ -3,7 +3,7 @@ pub mod lava;
 pub mod vamana;
 // use formats::io::{get_file_sizes_and_readers, AsyncReader, READER_BUFFER_SIZE};
 use rand::{thread_rng, Rng};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use tokio::task::JoinSet;
 
 // #[tokio::main]
@@ -61,8 +61,8 @@ use tokio::task::JoinSet;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
-    let PAGE_SIZE: u64 = &args[3].parse::<u64>()? * 1024;
-    let TOTAL_ITERATIONS: u64 = args[4].parse::<u64>()?;
+    let page_size: u64 = &args[3].parse::<u64>()? * 1024;
+    let total_iterations: u64 = args[4].parse::<u64>()?;
     let input = &args[1];
     let filenames: Vec<String> = (0..input.parse::<i32>()?)
         .map(|i| {
@@ -84,9 +84,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let client_c = client.clone();
         let bucket_c = bucket.to_string();
         join_set.spawn(async move {
-            for i in 0..TOTAL_ITERATIONS {
-                let from = thread_rng().gen_range(0..(30_000_000 as u64 - PAGE_SIZE));
-                let to = from + PAGE_SIZE - 1;
+            for _ in 0..total_iterations {
+                let from = thread_rng().gen_range(0..(30_000_000 as u64 - page_size));
+                let to = from + page_size - 1;
                 let mut object = client_c
                     .get_object()
                     .bucket(bucket_c.clone())
@@ -96,12 +96,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .await
                     .unwrap();
 
-                let mut byte_count = 0_usize;
-                while let Some(bytes) = object.body.try_next().await.unwrap() {
-                    let bytes_len = bytes.len();
+                // let mut byte_count = 0_usize;
+                while let Some(_) = object.body.try_next().await.unwrap() {
+                    // let bytes_len = bytes.len();
                     // file.write_all(&bytes)?;
                     // trace!("Intermediate write of {bytes_len}");
-                    byte_count += bytes_len;
+                    // byte_count += bytes_len;
                 }
             }
         });

@@ -214,7 +214,7 @@ fn compute_local_indices(assignments: &mut KMeansAssignment, k: usize, num_point
         .for_each(|(ipart, part)|
                   {
                       let mut ilocal = 0;
-                      for iglobal in (0..num_points)
+                      for iglobal in 0..num_points
                       {
                           let (a1, a2) = assignments.get_partitions_for_element(iglobal);
                           if a1 == ipart
