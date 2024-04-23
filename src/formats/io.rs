@@ -1,11 +1,10 @@
 use bytes::{Bytes, BytesMut};
-use opendal::services::{Fs, S3};
-use opendal::Operator;
-use opendal::Reader;
+#[cfg(feature = "opendal")]
+use opendal::{services::{Fs, S3}, Reader};
 use std::env;
 use std::io::{Read, SeekFrom};
 use std::ops::{Deref, DerefMut};
-use tokio::pin;
+use tokio::{io::AsyncRead, pin};
 use zstd::stream::read::Decoder;
 
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
@@ -20,19 +19,19 @@ pub struct AsyncReader {
     pub filename: String,
 }
 
-impl Deref for AsyncReader {
-    type Target = Reader;
+// impl Deref for AsyncReader {
+//     type Target = Reader;
 
-    fn deref(&self) -> &Self::Target {
-        &self.reader
-    }
-}
+//     fn deref(&self) -> &Self::Target {
+//         &self.reader
+//     }
+// }
 
-impl DerefMut for AsyncReader {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.reader
-    }
-}
+// impl DerefMut for AsyncReader {
+//     fn deref_mut(&mut self) -> &mut Self::Target {
+//         &mut self.reader
+//     }
+// }
 
 // impl From<Reader> for AsyncReader {
 //     fn from(reader: Reader) -> Self {
@@ -61,6 +60,7 @@ impl AsyncReader {
             let mut buffer = res.split_off(current as usize);
             reader.seek(SeekFrom::Start(from + current)).await?;
             let size = reader.read_buf(&mut buffer).await?;
+            // reader.read_exact(buf)
             res.unsplit(buffer);
             current += size as u64;
         }
@@ -99,69 +99,137 @@ impl AsyncReader {
     }
 }
 
-//dupilcate code for now
-pub(crate) struct S3Builder(S3);
 
-impl From<&str> for S3Builder {
+pub(crate) enum Config {
+    #[cfg(feature = "opendal")]
+    OpendalFs(opendal::services::Fs),
+    #[cfg(feature = "opendal")]
+    OpendalS3(opendal::services::S3),
+    #[cfg(feature = "aws_sdk")]
+    Aws(aws_config::SdkConfig),
+}
+
+#[cfg(feature = "opendal")]
+impl From<&str> for Config {
     fn from(file: &str) -> Self {
-        let mut builder = S3::default();
-        let mut iter = file[5..].split("/");
+        if file.starts_with("s3://") {
+            let mut builder = S3::default();
+            let mut iter = file[5..].split("/");
 
-        builder.bucket(iter.next().expect("malformed path"));
-        // Set the region. This is required for some services, if you don't care about it, for example Minio service, just set it to "auto", it will be ignored.
-        if let Ok(value) = env::var("AWS_ENDPOINT_URL") {
-            builder.endpoint(&value);
+            builder.bucket(iter.next().expect("malformed path"));
+            // Set the region. This is required for some services, if you don't care about it, for example Minio service, just set it to "auto", it will be ignored.
+            if let Ok(value) = env::var("AWS_ENDPOINT_URL") {
+                builder.endpoint(&value);
+            }
+            if let Ok(value) = env::var("AWS_REGION") {
+                builder.region(&value);
+            }
+            if let Ok(_value) = env::var("AWS_VIRTUAL_HOST_STYLE") {
+                builder.enable_virtual_host_style();
+            }
+            return Config::OpendalS3(builder);
+        } else {
+            let mut builder = Fs::default();
+            // let current_path = env::current_dir().expect("no path");
+            builder.root(folder);
+            return Config::OpendalFs(builder);
         }
-        if let Ok(value) = env::var("AWS_REGION") {
-            builder.region(&value);
+    }
+}
+
+impl Config {
+    #[cfg(feature = "aws_sdk")]
+    pub async fn from_env() -> Self {
+        let config = aws_config::load_from_env().await;
+        Config::Aws(config)
+    }
+}
+
+#[derive(Clone)]
+pub(crate) enum Operator {
+    #[cfg(feature = "opendal")]
+    Opendal(opendal::Operator),
+    #[cfg(feature = "aws_sdk")]
+    Aws(aws_sdk_s3::Client),
+}
+
+impl From<Config> for Operator {
+    fn from(config: Config) -> Self {
+        match config {
+            #[cfg(feature = "opendal")]
+            Config::OpendalFs(fs) => Operator::Opendal(opendal::Operator::new(fs).expect("Fs Builder construction error").finish()),
+            #[cfg(feature = "opendal")]
+            Config::OpendalS3(s3) => Operator::Opendal(opendal::Operator::new(s3).expect("S3 Builder construction error").finish()),
+            #[cfg(feature = "aws_sdk")]
+            Config::Aws(config) => Operator::Aws(aws_sdk_s3::Client::new(&config)),
         }
-        if let Ok(_value) = env::var("AWS_VIRTUAL_HOST_STYLE") {
-            builder.enable_virtual_host_style();
+    }
+}
+
+impl Operator {
+
+}
+
+#[cfg(feature = "aws_sdk")]
+pub(crate) async fn get_file_sizes_and_readers(
+    files: &[String],
+) -> Result<(Vec<usize>, Vec<AsyncReader>), LavaError> {
+    let config = Config::from_env().await;
+    let operator = Operator::from(config);
+    let tasks: Vec<_> = files
+        .iter()
+        .map(|file| {
+            let file = file.clone(); // Clone file name to move into the async block
+            let operator = operator.clone();
+            tokio::spawn(async move {
+                // Extract filename
+                let filename = if file.starts_with("s3://") {
+                    file[5..].split('/').collect::<Vec<_>>()[1..].join("/")
+                } else {
+                    file.clone()
+                };
+
+                // Create the reader
+                let reader: AsyncReader = AsyncReader::new(
+                    operator
+                        .clone()
+                        .reader_with(&filename)
+                        .buffer(READER_BUFFER_SIZE)
+                        .await?,
+                    filename.clone(),
+                );
+
+                // Get the file size
+                let file_size: u64 = operator.stat(&filename).await?.content_length();
+
+                Ok::<_, LavaError>((file_size as usize, reader))
+            })
+        })
+        .collect();
+
+    // Wait for all tasks to complete
+    let results = futures::future::join_all(tasks).await;
+
+    // Process results, separating out file sizes and readers
+    let mut file_sizes = Vec::new();
+    let mut readers = Vec::new();
+
+    for result in results {
+        match result {
+            Ok(Ok((size, reader))) => {
+                file_sizes.push(size);
+                readers.push(reader);
+            }
+            Ok(Err(e)) => return Err(e), // Handle error from inner task
+            Err(e) => return Err(LavaError::Parse("Task join error: {}".to_string())), // Handle join error
         }
-
-        S3Builder(builder)
     }
+
+    Ok((file_sizes, readers))
 }
 
-pub(crate) struct FsBuilder(Fs);
 
-impl From<&str> for FsBuilder {
-    fn from(folder: &str) -> Self {
-        let mut builder = Fs::default();
-        // let current_path = env::current_dir().expect("no path");
-        builder.root(folder);
-        FsBuilder(builder)
-    }
-}
-
-pub(crate) struct Operators(Operator);
-
-impl From<S3Builder> for Operators {
-    fn from(builder: S3Builder) -> Self {
-        Operators(
-            Operator::new(builder.0)
-                .expect("S3 builder construction error")
-                .finish(),
-        )
-    }
-}
-
-impl Operators {
-    pub(crate) fn into_inner(self) -> Operator {
-        self.0
-    }
-}
-
-impl From<FsBuilder> for Operators {
-    fn from(builder: FsBuilder) -> Self {
-        Operators(
-            Operator::new(builder.0)
-                .expect("Fs Builder construction error")
-                .finish(),
-        )
-    }
-}
-
+#[cfg(feature = "opendal")]
 pub(crate) async fn get_file_sizes_and_readers(
     files: &[String],
 ) -> Result<(Vec<usize>, Vec<AsyncReader>), LavaError> {
@@ -169,6 +237,7 @@ pub(crate) async fn get_file_sizes_and_readers(
         .iter()
         .map(|file| {
             let file = file.clone(); // Clone file name to move into the async block
+
             tokio::spawn(async move {
                 // Determine the operator based on the file scheme
                 let operator = if file.starts_with("s3://") {

@@ -877,7 +877,7 @@ pub fn merge_indexes<T: Indexable, D: Distance<T>, V: VectorAccessMethod<T>>(
     let mut build_ctx = BuildContext::new(&merged_index);
     let prune = merged_index.params.pruning_threshold;
     let num_total_points = merged_index.num_points();
-    for b_vertex in (b_offset..num_total_points) {
+    for b_vertex in b_offset..num_total_points {
         build_ctx.search(&merged_index, b_vertex);
         build_ctx.prune_index(&mut merged_index, b_vertex, prune);
         build_ctx.insert_backwards_edges(&mut merged_index, b_vertex, prune);
