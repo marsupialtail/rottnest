@@ -1,26 +1,25 @@
+use async_trait::async_trait;
 use bytes::{Bytes, BytesMut};
 use opendal::services::{Fs, S3};
 use opendal::Operator;
 use opendal::Reader;
 use std::env;
-use std::io::{Read, SeekFrom};
+use std::io::SeekFrom;
 use std::ops::{Deref, DerefMut};
 use tokio::pin;
-use zstd::stream::read::Decoder;
 
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
 use crate::lava::error::LavaError;
 
 pub const READER_BUFFER_SIZE: usize = 4 * 1024 * 1024;
-pub const WRITER_BUFFER_SIZE: usize = 4 * 1024 * 1024;
 
-pub struct AsyncReader {
+pub struct AsyncOpendalReader {
     reader: Reader,
     pub filename: String,
 }
 
-impl Deref for AsyncReader {
+impl Deref for AsyncOpendalReader {
     type Target = Reader;
 
     fn deref(&self) -> &Self::Target {
@@ -28,24 +27,21 @@ impl Deref for AsyncReader {
     }
 }
 
-impl DerefMut for AsyncReader {
+impl DerefMut for AsyncOpendalReader {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.reader
     }
 }
 
-// impl From<Reader> for AsyncReader {
-//     fn from(reader: Reader) -> Self {
-//         Self::new(reader)
-//     }
-// }
-
-impl AsyncReader {
+impl AsyncOpendalReader {
     pub fn new(reader: Reader, filename: String) -> Self {
         Self { reader, filename }
     }
+}
 
-    pub async fn read_range(&mut self, from: u64, to: u64) -> Result<Bytes, LavaError> {
+#[async_trait]
+impl super::Reader for AsyncOpendalReader {
+    async fn read_range(&mut self, from: u64, to: u64) -> Result<Bytes, LavaError> {
         if from >= to {
             return Err(LavaError::Io(std::io::ErrorKind::InvalidData.into()));
         }
@@ -72,27 +68,23 @@ impl AsyncReader {
         Ok(res.freeze())
     }
 
-    // theoretically we should try to return different types here, but Vec<u64> is def. the most common
-    pub async fn read_range_and_decompress(
-        &mut self,
-        from: u64,
-        to: u64,
-    ) -> Result<Vec<u64>, LavaError> {
-        let compressed_posting_list_offsets = self.read_range(from, to).await?;
-        let mut decompressor = Decoder::new(&compressed_posting_list_offsets[..])?;
-        let mut serialized_posting_list_offsets: Vec<u8> =
-            Vec::with_capacity(compressed_posting_list_offsets.len() as usize);
-        decompressor.read_to_end(&mut serialized_posting_list_offsets)?;
-        let result: Vec<u64> = bincode::deserialize(&serialized_posting_list_offsets)?;
+    async fn read_usize_from_end(&mut self, offset: i64, n: u64) -> Result<Vec<u64>, LavaError> {
+        let reader = self;
+        pin!(reader);
+        reader.seek(SeekFrom::End(offset)).await?;
+        let mut result: Vec<u64> = vec![];
+        for _print in 0..n {
+            result.push(reader.read_u64_le().await?);
+        }
         Ok(result)
     }
 
-    pub async fn read_usize_from_end(&mut self, n: u64) -> Result<Vec<u64>, LavaError> {
+    async fn read_usize_from_start(&mut self, offset: u64, n: u64) -> Result<Vec<u64>, LavaError> {
         let reader = self;
         pin!(reader);
-        reader.seek(SeekFrom::End(-(n as i64 * 8))).await?;
+        reader.seek(SeekFrom::Start(offset as u64)).await?;
         let mut result: Vec<u64> = vec![];
-        for i in 0..n {
+        for _ in 0..n {
             result.push(reader.read_u64_le().await?);
         }
         Ok(result)
@@ -162,44 +154,49 @@ impl From<FsBuilder> for Operators {
     }
 }
 
-pub(crate) async fn get_file_sizes_and_readers(
+pub async fn get_file_size_and_reader(
+    file: String,
+) -> Result<(usize, AsyncOpendalReader), LavaError> {
+    // Determine the operator based on the file scheme
+    let operator = if file.starts_with("s3://") {
+        Operators::from(S3Builder::from(file.as_str())).into_inner()
+    } else {
+        let current_path = env::current_dir()?;
+        Operators::from(FsBuilder::from(current_path.to_str().expect("no path"))).into_inner()
+    };
+
+    // Extract filename
+    let filename = if file.starts_with("s3://") {
+        file[5..].split('/').collect::<Vec<_>>()[1..].join("/")
+    } else {
+        file.clone()
+    };
+
+    // Create the reader
+    let reader: AsyncOpendalReader = AsyncOpendalReader::new(
+        operator
+            .clone()
+            .reader_with(&filename)
+            .buffer(READER_BUFFER_SIZE)
+            .await?,
+        filename.clone(),
+    );
+
+    // Get the file size
+    let file_size: u64 = operator.stat(&filename).await?.content_length();
+
+    Ok((file_size as usize, reader))
+}
+
+pub async fn get_file_sizes_and_readers(
     files: &[String],
-) -> Result<(Vec<usize>, Vec<AsyncReader>), LavaError> {
+) -> Result<(Vec<usize>, Vec<AsyncOpendalReader>), LavaError> {
     let tasks: Vec<_> = files
         .iter()
         .map(|file| {
             let file = file.clone(); // Clone file name to move into the async block
             tokio::spawn(async move {
-                // Determine the operator based on the file scheme
-                let operator = if file.starts_with("s3://") {
-                    Operators::from(S3Builder::from(file.as_str())).into_inner()
-                } else {
-                    let current_path = env::current_dir()?;
-                    Operators::from(FsBuilder::from(current_path.to_str().expect("no path")))
-                        .into_inner()
-                };
-
-                // Extract filename
-                let filename = if file.starts_with("s3://") {
-                    file[5..].split('/').collect::<Vec<_>>()[1..].join("/")
-                } else {
-                    file.clone()
-                };
-
-                // Create the reader
-                let reader: AsyncReader = AsyncReader::new(
-                    operator
-                        .clone()
-                        .reader_with(&filename)
-                        .buffer(READER_BUFFER_SIZE)
-                        .await?,
-                    filename.clone(),
-                );
-
-                // Get the file size
-                let file_size: u64 = operator.stat(&filename).await?.content_length();
-
-                Ok::<_, LavaError>((file_size as usize, reader))
+                get_file_size_and_reader(file).await
             })
         })
         .collect();
@@ -218,7 +215,7 @@ pub(crate) async fn get_file_sizes_and_readers(
                 readers.push(reader);
             }
             Ok(Err(e)) => return Err(e), // Handle error from inner task
-            Err(e) => return Err(LavaError::Parse("Task join error: {}".to_string())), // Handle join error
+            Err(e) => return Err(LavaError::Parse(format!("Task join error: {}", e.to_string()))), // Handle join error
         }
     }
 

@@ -31,6 +31,7 @@ impl FMChunk {
         })
     }
 
+    #[allow(dead_code)]
     pub fn serialize(&mut self) -> Result<Vec<u8>, LavaError> {
         let serialized_counts = bincode::serialize(&self.counts_so_far)?;
         let mut compressed_counts = encode_all(&serialized_counts[..], 0).expect("Compression failed");

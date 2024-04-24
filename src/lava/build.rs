@@ -1,21 +1,17 @@
 use arrow::array::{make_array, Array, ArrayData, StringArray, UInt64Array};
-use arrow_array::BinaryArray;
+
 use serde_json;
 use tokenizers::parallelism::MaybeParallelIterator;
 use tokenizers::tokenizer::Tokenizer;
 
 use bincode;
-use serde::{Deserialize, Serialize};
 
 use std::collections::BTreeMap;
-use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::fs::File;
 use std::io::{Seek, SeekFrom, Write};
 use zstd::stream::encode_all;
-
-use std::io::Cursor;
 
 use crate::lava::constants::*;
 use crate::lava::error::LavaError;
@@ -23,7 +19,7 @@ use crate::lava::plist::PListChunk;
 
 use crate::vamana::{build_index_par, IndexParams, VamanaIndex};
 use crate::vamana::{EuclideanF32, InMemoryAccessMethodF32};
-use ndarray::{s, Array2};
+use ndarray::Array2;
 
 use rayon::prelude::*;
 
@@ -342,11 +338,11 @@ pub async fn build_lava_substring(
 
     let mut sa: Vec<usize> = (0..suffices.len()).collect();
 
-    let start = std::time::Instant::now();
+    // let start = std::time::Instant::now();
 
     sa.par_sort_by(|&a, &b| suffices[a].cmp(&suffices[b]));
 
-    let duration = start.elapsed();
+    // let duration = start.elapsed();
 
     let mut idx: Vec<u64> = Vec::with_capacity(encodings.len());
     let mut bwt: Vec<u32> = Vec::with_capacity(encodings.len());
@@ -473,7 +469,7 @@ pub async fn build_lava_vector(
 
     let num_points = index.num_points();
     let start = index.start;
-    let mut nlist: ndarray::prelude::ArrayBase<
+    let nlist: ndarray::prelude::ArrayBase<
         ndarray::OwnedRepr<usize>,
         ndarray::prelude::Dim<[usize; 2]>,
     > = index.neighbors;

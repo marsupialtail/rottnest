@@ -21,52 +21,23 @@ use parquet::{
 };
 use thrift::protocol::TCompactInputProtocol;
 
-use opendal::raw::oio::ReadExt;
-
 use bytes::Bytes;
 use std::convert::TryFrom;
-use std::io::{Read, SeekFrom};
+use std::io::Read;
 
 use futures::stream::{self, StreamExt};
 use itertools::{izip, Itertools};
-use regex::Regex;
 use std::collections::HashMap;
 
-use std::{env, usize};
 use tokio::{self};
 
 use crate::{
-    formats::io::{AsyncReader, FsBuilder, Operators, S3Builder},
+    formats::readers::{AsyncReader, get_file_size_and_reader},
     lava::error::LavaError,
 };
 
-use super::io::READER_BUFFER_SIZE;
-
 async fn get_reader_and_size_from_file(file: &str) -> Result<(usize, AsyncReader), LavaError> {
-    let mut file_name = file.to_string();
-    let operator = if file.starts_with("s3://") {
-        file_name = file_name.replace("s3://", "");
-        let mut iter = file_name.split("/");
-        let bucket = iter.next().expect("malformed s3 path");
-        file_name = file_name[bucket.len() + 1..].to_string();
-
-        Operators::from(S3Builder::from(file)).into_inner()
-    } else {
-        let current_path = env::current_dir().unwrap();
-        Operators::from(FsBuilder::from(current_path.to_str().expect("no path"))).into_inner()
-    };
-
-    let file_size: usize = operator.stat(&file_name).await?.content_length() as usize;
-    let reader: AsyncReader = AsyncReader::new(
-        operator
-            .clone()
-            .reader_with(&file_name)
-            .buffer(READER_BUFFER_SIZE)
-            .await?,
-        file_name.clone(),
-    );
-
-    Ok((file_size, reader))
+    get_file_size_and_reader(file.to_string()).await
 }
 
 async fn parse_metadata(
