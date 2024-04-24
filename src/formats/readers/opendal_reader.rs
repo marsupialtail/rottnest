@@ -154,7 +154,7 @@ impl From<FsBuilder> for Operators {
     }
 }
 
-pub async fn get_file_size_and_reader(
+pub(crate) async fn get_reader(
     file: String,
 ) -> Result<(usize, AsyncOpendalReader), LavaError> {
     // Determine the operator based on the file scheme
@@ -186,38 +186,4 @@ pub async fn get_file_size_and_reader(
     let file_size: u64 = operator.stat(&filename).await?.content_length();
 
     Ok((file_size as usize, reader))
-}
-
-pub async fn get_file_sizes_and_readers(
-    files: &[String],
-) -> Result<(Vec<usize>, Vec<AsyncOpendalReader>), LavaError> {
-    let tasks: Vec<_> = files
-        .iter()
-        .map(|file| {
-            let file = file.clone(); // Clone file name to move into the async block
-            tokio::spawn(async move {
-                get_file_size_and_reader(file).await
-            })
-        })
-        .collect();
-
-    // Wait for all tasks to complete
-    let results = futures::future::join_all(tasks).await;
-
-    // Process results, separating out file sizes and readers
-    let mut file_sizes = Vec::new();
-    let mut readers = Vec::new();
-
-    for result in results {
-        match result {
-            Ok(Ok((size, reader))) => {
-                file_sizes.push(size);
-                readers.push(reader);
-            }
-            Ok(Err(e)) => return Err(e), // Handle error from inner task
-            Err(e) => return Err(LavaError::Parse(format!("Task join error: {}", e.to_string()))), // Handle join error
-        }
-    }
-
-    Ok((file_sizes, readers))
 }
