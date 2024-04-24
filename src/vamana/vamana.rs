@@ -3,6 +3,7 @@ use ndarray::{s, Array2};
 use rand::distributions::{Distribution, Uniform};
 use rand::seq::SliceRandom;
 use rayon::prelude::*;
+use crate::formats::readers::ReaderType;
 use crate::lava::error::LavaError;
 use crate::vamana::kmeans::{kmeans, KMeansAssignment};
 use ndarray::{concatenate, Axis};
@@ -14,7 +15,7 @@ pub trait Distance<T: Indexable>: std::marker::Send + std::marker::Sync {
 
 pub trait VectorAccessMethod<T: Indexable>: std::marker::Sync + Send {
     fn get_vec_sync<'a>(&'a self, idx: usize) -> &'a [T];
-    fn get_vec<'a>(&'a self, idx: usize) -> impl std::future::Future<Output = Vec<T>> + Send;
+    fn get_vec<'a>(&'a self, idx: usize, reader_type: ReaderType) -> impl std::future::Future<Output = Vec<T>> + Send;
     fn dim(&self) -> usize;
     fn num_points(&self) -> usize;
     fn iter<'a>(&'a self) -> impl Iterator<Item = &'a [T]>;
@@ -131,9 +132,9 @@ impl<T: Indexable, D: Distance<T>, V: VectorAccessMethod<T>> VamanaIndex<T, D, V
         }
     }
 
-    pub async fn search(&self, ctx: &mut SearchContext, query: &[T]) -> Result<(), LavaError> {
+    pub async fn search(&self, ctx: &mut SearchContext, query: &[T], reader_type: ReaderType) -> Result<(), LavaError> {
         ctx.reset();
-        let start_vector = self.get_vector(self.start).await;
+        let start_vector = self.get_vector(self.start, reader_type.clone()).await;
         let start_distance = D::calculate(query, &start_vector);
         let mut closest_unvisited_vertex = 0;
         ctx.frontier.push((self.start, start_distance));
@@ -144,7 +145,7 @@ impl<T: Indexable, D: Distance<T>, V: VectorAccessMethod<T>> VamanaIndex<T, D, V
             println!("{:?}", closest);
             for n in self.neighbors(closest.0) {
                 counter += 1;
-                let neighbor_vector = self.get_vector(*n).await;
+                let neighbor_vector = self.get_vector(*n, reader_type.clone()).await;
                 let distance = D::calculate(query, &neighbor_vector);
                 ctx.frontier.push((*n, distance));
             }
@@ -204,8 +205,8 @@ impl<T: Indexable, D: Distance<T>, V: VectorAccessMethod<T>> VamanaIndex<T, D, V
             .unwrap()
     }
 
-    pub async fn get_vector(&self, idx: usize) -> Vec<T> {
-        self.access_method.get_vec(idx).await
+    pub async fn get_vector(&self, idx: usize, reader_type: ReaderType) -> Vec<T> {
+        self.access_method.get_vec(idx, reader_type).await
     }
 
     pub fn get_vector_sync(&self, idx: usize) -> &[T] {
@@ -464,11 +465,11 @@ impl<'a, T: Indexable, V: VectorAccessMethod<T>> VectorAccessMethod<T>
             .get_global_idx(self.partition_id, local_idx);
         self.underlying_access_method.get_vec_sync(global_idx)
     }
-    async fn get_vec<'b>(&'b self, local_idx: usize) -> Vec<T> {
+    async fn get_vec<'b>(&'b self, local_idx: usize, reader_type: ReaderType) -> Vec<T> {
         let global_idx = self
             .partition_assignment
             .get_global_idx(self.partition_id, local_idx);
-        self.underlying_access_method.get_vec(global_idx).await
+        self.underlying_access_method.get_vec(global_idx, reader_type).await
     }
 
     fn dim(&self) -> usize {
@@ -607,14 +608,14 @@ impl<T: Indexable, V: VectorAccessMethod<T>> VectorAccessMethod<T> for MergedAcc
         }
     }
 
-    async fn get_vec<'b>(&'b self, ivec: usize) -> Vec<T> {
+    async fn get_vec<'b>(&'b self, ivec: usize, reader_type: ReaderType) -> Vec<T> {
         let num_points_0 = self.underlying_access_method.0.num_points();
         if ivec < num_points_0 {
-            self.underlying_access_method.0.get_vec(ivec).await
+            self.underlying_access_method.0.get_vec(ivec, reader_type).await
         } else {
             self.underlying_access_method
                 .1
-                .get_vec(ivec - num_points_0)
+                .get_vec(ivec - num_points_0, reader_type)
                 .await
         }
     }

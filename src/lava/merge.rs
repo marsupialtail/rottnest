@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use zstd::stream::encode_all;
 use zstd::stream::read::Decoder;
 
-use crate::formats::readers::{get_file_size_and_reader, get_file_sizes_and_readers, AsyncReader};
+use crate::formats::readers::{get_file_size_and_reader, get_file_sizes_and_readers, AsyncReader, ReaderType};
 use crate::lava::constants::*;
 use crate::lava::error::LavaError;
 use crate::lava::fm_chunk::FMChunk;
@@ -189,6 +189,7 @@ async fn merge_lava_bm25(
     condensed_lava_file: &str,
     lava_files: Vec<String>,
     uid_offsets: Vec<u64>,
+    reader_type: ReaderType,
 ) -> Result<(), LavaError> // hawaiian for lava condensation
 {
     // let mut builder = Fs::default();
@@ -204,7 +205,8 @@ async fn merge_lava_bm25(
     let mut compressed_tokenizer: Option<Vec<u8>> = None;
 
     for file in lava_files {
-        let (file_size, mut reader) = get_file_size_and_reader(file).await?;
+        let reader_type = reader_type.clone();
+        let (file_size, mut reader) = get_file_size_and_reader(file, reader_type).await?;
         let file_size = file_size as u64;
 
         let results = reader.read_usize_from_end(3).await?;
@@ -419,6 +421,7 @@ async fn merge_lava_substring(
     condensed_lava_file: &str,
     lava_files: Vec<String>,
     uid_offsets: Vec<u64>,
+    reader_type: ReaderType
 ) -> Result<(), LavaError> {
     // first merge the tokenizer, then merge the fm indices then merge the posting lists.
     // let mut builder = Fs::default();
@@ -441,8 +444,8 @@ async fn merge_lava_substring(
         // @Rain just make two different readers for now because this is hopefully low overhead
         // instead of bothering with wrapping this thing in Arc<Mutex<>>. Lots of tech debt to clean up
         // needed for the FMChunkIterator and PListIterator
-        let (_, mut reader) = get_file_size_and_reader(file.clone()).await?;
-        let (file_size, reader1) = get_file_size_and_reader(file.clone()).await?;
+        let (_, mut reader) = get_file_size_and_reader(file.clone(), reader_type.clone()).await?;
+        let (file_size, reader1) = get_file_size_and_reader(file.clone(), reader_type.clone()).await?;
         let file_size = file_size as u64;
 
         let results = reader.read_usize_from_end(4).await?;
@@ -636,11 +639,12 @@ async fn merge_lava_vector(
     condensed_lava_file: &str,
     lava_files: Vec<String>,
     mut vectors: Vec<Array2<f32>>,
+    reader_type: ReaderType,
 ) -> Result<(), LavaError> {
     assert_eq!(lava_files.len(), 2);
     assert_eq!(vectors.len(), 2);
 
-    let (file_sizes, mut readers) = get_file_sizes_and_readers(&lava_files).await?;
+    let (file_sizes, mut readers) = get_file_sizes_and_readers(&lava_files, reader_type).await?;
 
     let mut indices: Vec<VamanaIndex<f32, EuclideanF32, InMemoryAccessMethodF32>> = vec![];
 
@@ -707,6 +711,7 @@ async fn async_parallel_merge_files(
     uid_offsets: Vec<u64>,
     k: usize,
     mode: usize, // 0 for bm25 1 for substring
+    reader_type: ReaderType
 ) -> Result<(), LavaError> {
     assert!(mode == 1 || mode == 0);
     if mode == 1 {
@@ -760,6 +765,7 @@ async fn async_parallel_merge_files(
                 let merged_files_clone = Arc::clone(&merged_files_shared);
                 let new_uid_offsets_clone = Arc::clone(&new_uid_offsets_shared);
                 let do_not_delete_clone = do_not_delete.clone();
+                let reader_type = reader_type.clone();
 
                 let task = tokio::spawn(async move {
                     let my_uuid = uuid::Uuid::new_v4();
@@ -768,13 +774,14 @@ async fn async_parallel_merge_files(
                     println!("mergin {:?}", file_chunk);
 
                     if mode == 0 {
-                        merge_lava_bm25(&merged_filename, file_chunk.to_vec(), uid_chunk.to_vec())
+                        merge_lava_bm25(&merged_filename, file_chunk.to_vec(), uid_chunk.to_vec(), reader_type.clone())
                             .await
                     } else {
                         merge_lava_substring(
                             &merged_filename,
                             file_chunk.to_vec(),
                             uid_chunk.to_vec(),
+                            reader_type.clone(),
                         )
                         .await
                     }
@@ -824,6 +831,7 @@ async fn async_parallel_merge_files(
                 new_uid_offsets,
                 k,
                 mode,
+                reader_type.clone(),
             )
             .await
         }
@@ -836,6 +844,7 @@ async fn async_parallel_merge_vector_files(
     files: Vec<String>,
     do_not_delete: BTreeSet<String>,
     vectors: Vec<Array2<f32>>,
+    reader_type: ReaderType,
 ) -> Result<(), LavaError> {
     match files.len() {
         0 => Err(LavaError::Parse("out of chunks".to_string())), // Assuming LavaError can be constructed like this
@@ -878,13 +887,15 @@ async fn async_parallel_merge_vector_files(
                 let merged_stuff_clone = Arc::clone(&merged_stuff);
                 let do_not_delete_clone = do_not_delete.clone();
 
+                let reader_type = reader_type.clone();
+
                 let task = tokio::spawn(async move {
                     let my_uuid = uuid::Uuid::new_v4();
                     let merged_filename = my_uuid.to_string(); // Define this function based on your requirements
 
                     println!("mergin {:?}", file_chunk);
 
-                    merge_lava_vector(&merged_filename, file_chunk.clone(), vector_chunk.clone())
+                    merge_lava_vector(&merged_filename, file_chunk.clone(), vector_chunk.clone(), reader_type)
                         .await
                         .unwrap();
 
@@ -929,6 +940,7 @@ async fn async_parallel_merge_vector_files(
                 merged_filenames,
                 do_not_delete,
                 merged_vectors,
+                reader_type,
             )
             .await
         }
@@ -942,6 +954,7 @@ pub async fn parallel_merge_files(
     uid_offsets: Vec<u64>,
     k: usize,
     mode: usize, // 0 for bm25 1 for substring
+    reader_type: ReaderType,
 ) -> Result<(), LavaError> {
     let do_not_delete = BTreeSet::from_iter(files.clone().into_iter());
     let result = async_parallel_merge_files(
@@ -951,6 +964,7 @@ pub async fn parallel_merge_files(
         uid_offsets,
         k,
         mode,
+        reader_type,
     )
     .await?;
     Ok(result)
@@ -961,17 +975,18 @@ pub async fn parallel_merge_vector_files(
     condensed_lava_file: String,
     files: Vec<String>,
     vectors: Vec<Array2<f32>>,
+    reader_type: ReaderType,
 ) -> Result<(), LavaError> {
     let do_not_delete = BTreeSet::from_iter(files.clone().into_iter());
     let result =
-        async_parallel_merge_vector_files(condensed_lava_file, files, do_not_delete, vectors)
+        async_parallel_merge_vector_files(condensed_lava_file, files, do_not_delete, vectors, reader_type)
             .await?;
     Ok(result)
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::lava::merge::parallel_merge_files;
+    use crate::{formats::readers::ReaderType, lava::merge::parallel_merge_files};
 
     #[test]
     pub fn test_merge_lava_bm25() {
@@ -981,6 +996,7 @@ mod tests {
             vec![0, 1000000],
             2,
             0,
+            ReaderType::default(),
         );
 
         println!("{:?}", res);
@@ -997,6 +1013,7 @@ mod tests {
             vec![0, 1000000],
             2,
             1,
+            ReaderType::default(),
         );
 
         println!("{:?}", res);

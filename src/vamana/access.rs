@@ -1,4 +1,5 @@
 use crate::formats::parquet::read_indexed_pages_async;
+use crate::formats::readers::ReaderType;
 use crate::vamana::vamana::{
     Distance, Indexable, VectorAccessMethod,
 };
@@ -48,7 +49,7 @@ impl VectorAccessMethod<f32> for ReaderAccessMethodF32<'_> {
         unimplemented!("get_vec not implemented for ReaderAccessMethodF32")
     }
 
-    async fn get_vec<'a>(&'a self, idx: usize) -> Vec<f32> {
+    async fn get_vec<'a>(&'a self, idx: usize, reader_type: ReaderType) -> Vec<f32> {
         // self.data.slice(s![idx, ..]).reborrow().to_slice().unwrap()
 
         // the uid_nrows will look something like 0, 300, 600, 900 etc.
@@ -72,6 +73,7 @@ impl VectorAccessMethod<f32> for ReaderAccessMethodF32<'_> {
             vec![page_offset as u64],
             vec![page_size],
             vec![dict_page_size], // 0 means no dict page
+            reader_type,
         )
         .await
         .unwrap()
@@ -130,7 +132,7 @@ impl VectorAccessMethod<f32> for InMemoryAccessMethodF32 {
         self.data.slice(s![idx, ..]).reborrow().to_slice().unwrap()
     }
 
-    async fn get_vec<'a>(&'a self, idx: usize) -> Vec<f32> {
+    async fn get_vec<'a>(&'a self, idx: usize, _reader_type: ReaderType) -> Vec<f32> {
         self.data
             .slice(s![idx, ..])
             .clone()

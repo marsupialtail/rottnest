@@ -6,9 +6,7 @@ pub enum LavaError {
     Bincode(#[from] bincode::Error),
     Compression(String),
     Arrow(#[from] arrow::error::ArrowError),
-    #[cfg(feature = "opendal")]
     OpenDAL(#[from] opendal::Error),
-    #[cfg(feature = "aws_sdk")]
     AwsSdk(String),
     Parse(String),
     Parquet(#[from] parquet::errors::ParquetError),
@@ -27,9 +25,7 @@ impl Display for LavaError {
             LavaError::Bincode(err) => write!(f, "Bincode error: {}", err),
             LavaError::Compression(err) => write!(f, "Compression error: {}", err),
             LavaError::Arrow(err) => write!(f, "Arrow error: {}", err),
-            #[cfg(feature = "opendal")]
             LavaError::OpenDAL(err) => write!(f, "OpenDAL error: {}", err),
-            #[cfg(feature = "aws_sdk")]
             LavaError::AwsSdk(err) => write!(f, "AWS SDK error: {}", err),
             LavaError::Parse(err) => write!(f, "Parse error: {}", err),
             LavaError::Unknown => write!(f, "Unkown error"),

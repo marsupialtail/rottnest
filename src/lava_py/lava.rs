@@ -5,10 +5,8 @@ use pyo3::{pyfunction, types::PyString, PyAny};
 
 use crate::lava;
 use crate::lava::error::LavaError;
-use ndarray::{Array2, ArrayD, Ix2};
-use numpy::{IntoPyArray, PyArray1, PyArray2, PyArrayDyn, PyReadonlyArrayDyn};
-use pyo3::types::PyBytes;
-use pyo3::IntoPy;
+use ndarray::{Array2, Ix2};
+use numpy::{IntoPyArray, PyArray2, PyReadonlyArrayDyn};
 use pyo3::Py;
 
 #[pyfunction]
@@ -18,8 +16,13 @@ pub fn search_lava_bm25(
     query_tokens: Vec<u32>,
     query_weights: Vec<f32>,
     k: usize,
+    reader_type: Option<&PyString>,
 ) -> Result<Vec<(u64, u64)>, LavaError> {
-    py.allow_threads(|| lava::search_lava_bm25(files, query_tokens, query_weights, k))
+    let reader_type = reader_type.map(|x| x.to_string()).unwrap_or_default();
+
+    py.allow_threads(|| {
+        lava::search_lava_bm25(files, query_tokens, query_weights, k, reader_type.into())
+    })
 }
 
 #[pyfunction]
@@ -28,8 +31,11 @@ pub fn search_lava_substring(
     files: Vec<String>,
     query: String,
     k: usize,
+    reader_type: Option<&PyString>,
 ) -> Result<Vec<(u64, u64)>, LavaError> {
-    py.allow_threads(|| lava::search_lava_substring(files, query, k))
+    let reader_type = reader_type.map(|x| x.to_string()).unwrap_or_default();
+
+    py.allow_threads(|| lava::search_lava_substring(files, query, k, reader_type.into()))
 }
 
 #[pyfunction]
@@ -41,17 +47,34 @@ pub fn search_lava_vector(
     uid_to_metadatas: Vec<Vec<(String, usize, usize, usize, usize)>>,
     query: Vec<f32>,
     k: usize,
+    reader_type: Option<&PyString>,
 ) -> Result<(Vec<(usize, usize)>, Py<PyArray2<f32>>), LavaError> {
+    let reader_type = reader_type.map(|x| x.to_string()).unwrap_or_default();
+
     let (metadata, array) = py.allow_threads(|| {
-        lava::search_lava_vector(files, column_name, &uid_nrows, &uid_to_metadatas, &query, k)
+        lava::search_lava_vector(
+            files,
+            column_name,
+            &uid_nrows,
+            &uid_to_metadatas,
+            &query,
+            k,
+            reader_type.into(),
+        )
     })?;
 
     Ok((metadata, array.into_pyarray(py).to_owned()))
 }
 
 #[pyfunction]
-pub fn get_tokenizer_vocab(py: Python, files: Vec<String>) -> Result<Vec<String>, LavaError> {
-    py.allow_threads(|| lava::get_tokenizer_vocab(files))
+pub fn get_tokenizer_vocab(
+    py: Python,
+    files: Vec<String>,
+    reader_type: Option<&PyString>,
+) -> Result<Vec<String>, LavaError> {
+    let reader_type = reader_type.map(|x| x.to_string()).unwrap_or_default();
+
+    py.allow_threads(|| lava::get_tokenizer_vocab(files, reader_type.into()))
 }
 
 #[pyfunction]
@@ -60,9 +83,19 @@ pub fn merge_lava_bm25(
     condensed_lava_file: String,
     lava_files: Vec<String>,
     uid_offsets: Vec<u64>,
+    reader_type: Option<&PyString>,
 ) -> Result<(), LavaError> {
+    let reader_type = reader_type.map(|x| x.to_string()).unwrap_or_default();
+
     py.allow_threads(|| {
-        lava::parallel_merge_files(condensed_lava_file, lava_files, uid_offsets, 2, 0)
+        lava::parallel_merge_files(
+            condensed_lava_file,
+            lava_files,
+            uid_offsets,
+            2,
+            0,
+            reader_type.into(),
+        )
     })
 }
 
@@ -72,9 +105,19 @@ pub fn merge_lava_substring(
     condensed_lava_file: String,
     lava_files: Vec<String>,
     uid_offsets: Vec<u64>,
+    reader_type: Option<&PyString>,
 ) -> Result<(), LavaError> {
+    let reader_type = reader_type.map(|x| x.to_string()).unwrap_or_default();
+
     py.allow_threads(|| {
-        lava::parallel_merge_files(condensed_lava_file, lava_files, uid_offsets, 2, 1)
+        lava::parallel_merge_files(
+            condensed_lava_file,
+            lava_files,
+            uid_offsets,
+            2,
+            1,
+            reader_type.into(),
+        )
     })
 }
 
@@ -84,6 +127,7 @@ pub fn merge_lava_vector(
     condensed_lava_file: String,
     lava_files: Vec<String>,
     vectors: Vec<PyReadonlyArrayDyn<f32>>,
+    reader_type: Option<&PyString>,
 ) -> Result<(), LavaError> {
     let vectors = vectors
         .iter()
@@ -93,8 +137,16 @@ pub fn merge_lava_vector(
             owned_array
         })
         .collect();
+    let reader_type = reader_type.map(|x| x.to_string()).unwrap_or_default();
 
-    py.allow_threads(|| lava::parallel_merge_vector_files(condensed_lava_file, lava_files, vectors))
+    py.allow_threads(|| {
+        lava::parallel_merge_vector_files(
+            condensed_lava_file,
+            lava_files,
+            vectors,
+            reader_type.into(),
+        )
+    })
 }
 
 #[pyfunction]

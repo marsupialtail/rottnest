@@ -8,10 +8,7 @@ use zstd::stream::read::Decoder;
 
 use crate::lava::error::LavaError;
 
-#[cfg(feature = "opendal")]
 mod opendal_reader;
-
-#[cfg(feature = "aws_sdk")]
 mod aws_reader;
 
 #[async_trait]
@@ -77,65 +74,84 @@ impl AsyncReader {
     }
 }
 
-pub async fn get_file_sizes_and_readers(
-    files: &[String],
-) -> Result<(Vec<usize>, Vec<AsyncReader>), LavaError> {
-    #[cfg(feature = "opendal")]
-    {
-        let (file_sizes, readers) = opendal_reader::get_file_sizes_and_readers(files).await?;
-        let async_readers = readers
-            .into_iter()
-            .map(|reader| {
-                let filename = reader.filename.clone();
-                AsyncReader::new(Box::new(reader), filename)
-            })
-            .collect();
+#[derive(Debug, Clone, Default)]
+pub enum ReaderType {
+    #[default]
+    Opendal,
+    AwsSdk,
+}
 
-        Ok((file_sizes, async_readers))
-    }
-
-    #[cfg(feature = "aws_sdk")]
-    {
-        let (file_sizes, readers) = aws_reader::get_file_sizes_and_readers(files).await?;
-        let async_readers = readers
-            .into_iter()
-            .map(|reader| {
-                let filename = reader.filename.clone();
-                AsyncReader::new(Box::new(reader), filename)
-            })
-            .collect();
-        Ok((file_sizes, async_readers))
-    }
-
-    #[cfg(not(any(feature = "opendal", feature = "aws_sdk")))]
-    {
-        let _ = files;
-        Err(LavaError::Unsupported("Must set either opendal or aws_sdk feature.".to_string()))
+impl From<String> for ReaderType {
+    fn from(value: String) -> Self {
+        match value.to_lowercase().as_str() {
+            "opendal" => ReaderType::Opendal,
+            "aws" => ReaderType::AwsSdk,
+            _ => Default::default(),
+        }
     }
 }
 
+pub async fn get_file_sizes_and_readers(
+    files: &[String], reader_type: ReaderType
+) -> Result<(Vec<usize>, Vec<AsyncReader>), LavaError> {
+    let tasks: Vec<_> = files
+        .iter()
+        .map(|file| {
+            let file = file.clone();
+            let reader_type = reader_type.clone();
+            tokio::spawn(async move {
+                get_file_size_and_reader(file, reader_type).await
+            })
+        })
+        .collect();
+
+    // Wait for all tasks to complete
+    let results = futures::future::join_all(tasks).await;
+
+    // Process results, separating out file sizes and readers
+    let mut file_sizes = Vec::new();
+    let mut readers = Vec::new();
+
+    for result in results {
+        match result {
+            Ok(Ok((size, reader))) => {
+                file_sizes.push(size);
+                readers.push(reader);
+            }
+            Ok(Err(e)) => return Err(e), // Handle error from inner task
+            Err(e) => return Err(LavaError::Parse(format!("Task join error: {}", e.to_string()))), // Handle join error
+        }
+    }
+
+    Ok((file_sizes, readers))
+}
+
 pub async fn get_file_size_and_reader(
-    file: String,
+    file: String, reader_type: ReaderType
 ) -> Result<(usize, AsyncReader), LavaError> {
-    #[cfg(feature = "opendal")]
-    {
-        let (file_size, reader) = opendal_reader::get_file_size_and_reader(file).await?;
-        let filename = reader.filename.clone();
-        let async_reader = AsyncReader::new(Box::new(reader), filename);
-        Ok((file_size, async_reader))
-    }
-    #[cfg(feature = "aws_sdk")]
-    {
-        let (file_size, reader) = aws_reader::get_file_size_and_reader(file).await?;
-        let filename = reader.filename.clone();
-        let async_reader = AsyncReader::new(Box::new(reader), filename);
-        Ok((file_size, async_reader))
-    }
 
-    #[cfg(not(any(feature = "opendal", feature = "aws_sdk")))]
-    {
-        let _ = file;
-        Err(LavaError::Unsupported("Must set either opendal or aws_sdk feature.".to_string()))
-    }
+    // always choose opendal for none s3 file
+    let reader_type = if file.starts_with("s3://") {
+        reader_type
+    } else {
+        Default::default()
+    };
 
+    let (file_size, reader) = match reader_type {
+        ReaderType::Opendal => {
+            let (file_size, reader) = opendal_reader::get_reader(file).await?;
+            let filename = reader.filename.clone();
+            let reader = AsyncReader::new(Box::new(reader), filename);
+            (file_size, reader)
+        }
+        ReaderType::AwsSdk => {
+            let (file_size, reader) = aws_reader::get_reader(file).await?;
+            let filename = reader.filename.clone();
+            let async_reader = AsyncReader::new(Box::new(reader), filename);
+            (file_size, async_reader)
+        }
+    };
+    
+
+    Ok((file_size, reader))
 }
