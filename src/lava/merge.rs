@@ -3,21 +3,14 @@ use bincode;
 use bit_vec::BitVec;
 use itertools::Itertools;
 use ndarray::{concatenate, Array2, Axis};
-use opendal::raw::oio::ReadExt;
-use opendal::services::Fs;
-use opendal::Operator;
 use std::collections::BTreeSet;
-use std::env;
 use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::sync::{Arc, Mutex};
-use tokio::io::AsyncReadExt;
 use zstd::stream::encode_all;
 use zstd::stream::read::Decoder;
 
-use crate::formats::io::{
-    get_file_sizes_and_readers, AsyncReader, READER_BUFFER_SIZE,
-};
+use crate::formats::readers::{get_file_size_and_reader, get_file_sizes_and_readers, AsyncReader};
 use crate::lava::constants::*;
 use crate::lava::error::LavaError;
 use crate::lava::fm_chunk::FMChunk;
@@ -198,10 +191,10 @@ async fn merge_lava_bm25(
     uid_offsets: Vec<u64>,
 ) -> Result<(), LavaError> // hawaiian for lava condensation
 {
-    let mut builder = Fs::default();
-    let current_path = env::current_dir()?;
-    builder.root(current_path.to_str().expect("no path"));
-    let operator = Operator::new(builder)?.finish();
+    // let mut builder = Fs::default();
+    // let current_path = env::current_dir()?;
+    // builder.root(current_path.to_str().expect("no path"));
+    // let operator = Operator::new(builder)?.finish();
 
     let mut file_sizes: Vec<u64> = Vec::with_capacity(lava_files.len());
     let mut plist_chunk_iterators: Vec<PListChunkIterator> = Vec::with_capacity(lava_files.len());
@@ -211,16 +204,8 @@ async fn merge_lava_bm25(
     let mut compressed_tokenizer: Option<Vec<u8>> = None;
 
     for file in lava_files {
-        let file = file.as_ref();
-        let file_size: u64 = operator.stat(file).await?.content_length();
-        let mut reader: AsyncReader = AsyncReader::new(
-            operator
-                .clone()
-                .reader_with(file)
-                .buffer(READER_BUFFER_SIZE)
-                .await?,
-            file.to_string(),
-        );
+        let (file_size, mut reader) = get_file_size_and_reader(file).await?;
+        let file_size = file_size as u64;
 
         let results = reader.read_usize_from_end(3).await?;
         let compressed_term_dict_offset = results[0];
@@ -264,8 +249,7 @@ async fn merge_lava_bm25(
         }
         let num_elements = this_plist_offsets.len() / 2;
 
-        reader.seek(SeekFrom::Start(0)).await?;
-        let compressed_tokenizer_size = reader.read_u64_le().await?;
+        let compressed_tokenizer_size = reader.read_usize_from_start(0, 1).await?[0];
         let this_compressed_tokenizer: bytes::Bytes =
             reader.read_range(8, 8 + compressed_tokenizer_size).await?;
 
@@ -437,10 +421,10 @@ async fn merge_lava_substring(
     uid_offsets: Vec<u64>,
 ) -> Result<(), LavaError> {
     // first merge the tokenizer, then merge the fm indices then merge the posting lists.
-    let mut builder = Fs::default();
-    let current_path = env::current_dir()?;
-    builder.root(current_path.to_str().expect("no path"));
-    let operator = Operator::new(builder)?.finish();
+    // let mut builder = Fs::default();
+    // let current_path = env::current_dir()?;
+    // builder.root(current_path.to_str().expect("no path"));
+    // let operator = Operator::new(builder)?.finish();
 
     let mut compressed_tokenizer: Option<Vec<u8>> = None;
 
@@ -454,29 +438,12 @@ async fn merge_lava_substring(
     let mut plist_iterators: Vec<PListIterator> = vec![];
 
     for file in lava_files {
-        let file = file.as_ref();
-        let file_size: u64 = operator.stat(file).await?.content_length();
-        let mut reader: AsyncReader = AsyncReader::new(
-            operator
-                .clone()
-                .reader_with(file)
-                .buffer(READER_BUFFER_SIZE)
-                .await?,
-            file.to_string(),
-        );
-
         // @Rain just make two different readers for now because this is hopefully low overhead
         // instead of bothering with wrapping this thing in Arc<Mutex<>>. Lots of tech debt to clean up
         // needed for the FMChunkIterator and PListIterator
-
-        let reader1: AsyncReader = AsyncReader::new(
-            operator
-                .clone()
-                .reader_with(file)
-                .buffer(READER_BUFFER_SIZE)
-                .await?,
-            file.to_string(),
-        );
+        let (_, mut reader) = get_file_size_and_reader(file.clone()).await?;
+        let (file_size, reader1) = get_file_size_and_reader(file.clone()).await?;
+        let file_size = file_size as u64;
 
         let results = reader.read_usize_from_end(4).await?;
         let fm_chunk_offsets_offset = results[0];
@@ -486,8 +453,7 @@ async fn merge_lava_substring(
 
         ns.push(n);
 
-        reader.seek(SeekFrom::Start(0)).await?;
-        let compressed_tokenizer_size = reader.read_u64_le().await?;
+        let compressed_tokenizer_size = reader.read_usize_from_start(0, 1).await?[0];
         let this_compressed_tokenizer: bytes::Bytes =
             reader.read_range(8, 8 + compressed_tokenizer_size).await?;
 
@@ -683,14 +649,15 @@ async fn merge_lava_vector(
     for i in 0..2 {
         let mut reader = readers.remove(0);
         // let num_points = reader.read_u64_le().await?;
-        let dim = reader.read_u64_le().await?;
+        let metadata = reader.read_usize_from_start(0, 2).await?;
+        let dim = metadata[0] as u64;
+        let start = metadata[1];
         match all_dim {
             Some(d) => assert_eq!(dim, d),
             None => {
                 all_dim.replace(dim);
             }
         }
-        let start = reader.read_u64_le().await?;
 
         let compressed_nlist = reader.read_range(24, file_sizes[i] as u64).await?;
         let mut decompressor = Decoder::new(&compressed_nlist[..])?;

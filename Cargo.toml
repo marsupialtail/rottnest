@@ -9,11 +9,13 @@ name = "rottnest"
 crate-type = ["cdylib"]
 
 [features]
-default = ["aws_sdk"]                                 #['py']
+default = []                                 #['py']
+# default = ["opendal"]
 py = ["dep:pyo3", "pyarrow", "dep:pyo3-log"]
 pyarrow = ["arrow/pyarrow"]
 opendal = ["dep:opendal"]
 aws_sdk = ["dep:aws-sdk-s3", "dep:aws-config"]
+
 
 [dependencies]
 pyo3 = { version = "0.20.0", features = [

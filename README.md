@@ -46,5 +46,9 @@ Rottnest not only supports BM25 indices but also other indices, like regex and v
 
 ### Build Python wheel
 ```bash
-maturin develop --features py
+maturin develop --features "py,opendal"
+```
+or 
+```bash
+maturin develop --features "py,aws_sdk"
 ```

@@ -3,7 +3,7 @@ use ndarray::Array2;
 use std::collections::BTreeSet;
 use std::{
     collections::{HashMap, HashSet},
-    io::{Read, SeekFrom},
+    io::{Read},
 };
 use tokio::task::JoinSet;
 use zstd::stream::read::Decoder;
@@ -14,12 +14,11 @@ use crate::vamana::vamana::VectorAccessMethod;
 use crate::vamana::{access::ReaderAccessMethodF32, EuclideanF32, IndexParams, VamanaIndex};
 use crate::lava::plist::PListChunk;
 use crate::{
-    formats::io::{get_file_sizes_and_readers, AsyncReader},
+    formats::readers::{get_file_sizes_and_readers, AsyncReader},
     lava::error::LavaError,
 };
 
 use tokenizers::tokenizer::Tokenizer;
-use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
 use ordered_float::OrderedFloat;
 
@@ -30,8 +29,8 @@ async fn get_tokenizer_async(
 
     for i in 0..readers.len() {
         // now interpret this as a usize
-        readers[i].seek(SeekFrom::Start(0)).await?;
-        let compressed_tokenizer_size = readers[i].read_u64_le().await?;
+        // readers[i].seek(SeekFrom::Start(0)).await?;
+        let compressed_tokenizer_size = readers[i].read_usize_from_start(0, 1).await?[0];
         let this_compressed_tokenizer: bytes::Bytes = readers[i]
             .read_range(8, 8 + compressed_tokenizer_size)
             .await?;
