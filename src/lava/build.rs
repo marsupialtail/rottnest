@@ -1,5 +1,7 @@
 use arrow::array::{make_array, Array, ArrayData, StringArray, UInt64Array};
 use arrow_array::BinaryArray;
+use itertools::Itertools;
+use rayon::collections::btree_map;
 use serde_json;
 use tokenizers::parallelism::MaybeParallelIterator;
 use tokenizers::tokenizer::Tokenizer;
@@ -27,6 +29,26 @@ use ndarray::{s, Array2};
 
 use rayon::prelude::*;
 
+fn get_tokenizer(tokenizer_file: Option<String>) -> Result<(Tokenizer, Vec<u8>), LavaError> {
+    // if the tokenizer file is provided, check if the file exists. If it does not exist, raise an Error
+    let tokenizer = if let Some(tokenizer_file) = tokenizer_file {
+        if !std::path::Path::new(&tokenizer_file).exists() {
+            return Err(LavaError::Parse(
+                "Tokenizer file does not exist".to_string(),
+            ));
+        }
+        println!("Tokenizer file: {}", tokenizer_file);
+        Tokenizer::from_file(tokenizer_file).unwrap()
+    } else {
+        Tokenizer::from_pretrained("bert-base-uncased", None).unwrap()
+    };
+
+    let serialized_tokenizer = serde_json::to_string(&tokenizer).unwrap();
+    let compressed_tokenizer =
+        encode_all(serialized_tokenizer.as_bytes(), 0).expect("Compression failed");
+    Ok((tokenizer, compressed_tokenizer))
+}
+
 /*
 Structure of the lava file
 It is important to put the posting lists first. Just trust me bro.
@@ -51,24 +73,6 @@ pub async fn build_lava_bm25(
     let array = make_array(array);
     // let uid = make_array(ArrayData::from_pyarrow(uid)?);
     let uid = make_array(uid);
-
-    // if the tokenizer file is provided, check if the file exists. If it does not exist, raise an Error
-    let tokenizer = if let Some(tokenizer_file) = tokenizer_file {
-        if !std::path::Path::new(&tokenizer_file).exists() {
-            return Err(LavaError::Parse(
-                "Tokenizer file does not exist".to_string(),
-            ));
-        }
-        println!("Tokenizer file: {}", tokenizer_file);
-        Tokenizer::from_file(tokenizer_file).unwrap()
-    } else {
-        Tokenizer::from_pretrained("bert-base-uncased", None).unwrap()
-    };
-
-    let serialized_tokenizer = serde_json::to_string(&tokenizer).unwrap();
-    let compressed_tokenizer =
-        encode_all(serialized_tokenizer.as_bytes(), 0).expect("Compression failed");
-
     let array: &arrow_array::GenericByteArray<arrow_array::types::GenericStringType<i32>> = array
         .as_any()
         .downcast_ref::<StringArray>()
@@ -89,6 +93,7 @@ pub async fn build_lava_bm25(
         ));
     }
 
+    let (tokenizer, compressed_tokenizer) = get_tokenizer(tokenizer_file)?;
     let vocab_size: usize = tokenizer.get_vocab_size(false);
 
     let mut texts = Vec::with_capacity(array.len());
@@ -115,7 +120,7 @@ pub async fn build_lava_bm25(
     avg_len /= encodings.len() as f32;
 
     for (i, encoding) in encodings.iter().enumerate() {
-        let uid = uid.value(i) as usize;
+        let this_uid = uid.value(i) as usize;
         let mut local_token_counts: BTreeMap<u32, usize> = BTreeMap::new();
         for key in encoding {
             *local_token_counts.entry(*key).or_insert(0) += 1;
@@ -126,7 +131,7 @@ pub async fn build_lava_bm25(
                 / (local_count as f32 + k1 * (1.0 - b + b * encoding.len() as f32 / avg_len));
 
             inverted_index[*key as usize]
-                .entry(uid)
+                .entry(this_uid)
                 .and_modify(|e| *e = (*e).max(local_factor))
                 .or_insert(local_factor);
 
@@ -184,6 +189,186 @@ pub async fn build_lava_bm25(
 
     let compressed_term_dict_offset = file.seek(SeekFrom::Current(0))?;
     file.write_all(&compressed_token_counts)?;
+
+    let compressed_plist_offsets_offset = file.seek(SeekFrom::Current(0))?;
+    let serialized = bincode::serialize(&plist_offsets).unwrap();
+    let compressed_plist_offsets =
+        encode_all(&serialized[..], 0).expect("Compression of plist offsets failed");
+    file.write_all(&compressed_plist_offsets)?;
+
+    file.write_all(&(compressed_term_dict_offset as u64).to_le_bytes())?;
+    file.write_all(&(compressed_plist_offsets_offset as u64).to_le_bytes())?;
+    file.write_all(&(encodings.len() as u64).to_le_bytes())?;
+
+    Ok(())
+}
+
+#[tokio::main]
+pub async fn build_lava_kmer(
+    output_file_name: String,
+    array: ArrayData,
+    uid: ArrayData,
+    tokenizer_file: Option<String>,
+) -> Result<(), LavaError> {
+    let array = make_array(array);
+    // let uid = make_array(ArrayData::from_pyarrow(uid)?);
+    let uid = make_array(uid);
+
+    // if the tokenizer file is provided, check if the file exists. If it does not exist, raise an Error
+    let (tokenizer, compressed_tokenizer) = get_tokenizer(tokenizer_file)?;
+    let vocab_size: usize = tokenizer.get_vocab_size(false);
+
+    let array: &arrow_array::GenericByteArray<arrow_array::types::GenericStringType<i32>> = array
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .ok_or(LavaError::Parse(
+            "Expects string array as first argument".to_string(),
+        ))?;
+
+    let uid = uid
+        .as_any()
+        .downcast_ref::<UInt64Array>()
+        .ok_or(LavaError::Parse(
+            "Expects uint64 array as second argument".to_string(),
+        ))?;
+
+    if array.len() != uid.len() {
+        return Err(LavaError::Parse(
+            "The length of the array and the uid array must be the same".to_string(),
+        ));
+    }
+
+    let mut texts = Vec::with_capacity(array.len());
+    for i in 0..array.len() {
+        let text = array.value(i);
+        texts.push(text);
+    }
+
+    let encodings = texts
+        .into_maybe_par_iter()
+        .map(|text| {
+            let encoding = tokenizer.encode(text, false).unwrap();
+            encoding.get_ids().to_vec()
+        })
+        .collect::<Vec<Vec<u32>>>();
+
+    // get all trigrams.
+
+    let mut trigrams_inverted_index: BTreeMap<(u32, u32, u32), BTreeSet<u64>> = BTreeMap::new();
+
+    for (i, encoding) in encodings.iter().enumerate() {
+        let this_uid = uid.value(i) as usize;
+        for j in 0..(encoding.len() as i64 - 2) {
+            let j = j as usize;
+            // let trigram = (encoding[j], encoding[j + 1], encoding[j + 2]);
+            let bigram = (u32::MAX, encoding[j], encoding[j + 1]);
+            let unigram = (u32::MAX, u32::MAX, encoding[j]);
+            // trigrams_inverted_index
+            //     .entry(trigram)
+            //     .or_insert_with(BTreeSet::new)
+            //     .insert(this_uid as u64);
+            trigrams_inverted_index
+                .entry(bigram)
+                .or_insert_with(BTreeSet::new)
+                .insert(this_uid as u64);
+            trigrams_inverted_index
+                .entry(unigram)
+                .or_insert_with(BTreeSet::new)
+                .insert(this_uid as u64);
+        }
+
+        if encoding.len() >= 2 {
+            let bigram = (
+                u32::MAX,
+                encoding[encoding.len() - 2],
+                encoding[encoding.len() - 1],
+            );
+            trigrams_inverted_index
+                .entry(bigram)
+                .or_insert_with(BTreeSet::new)
+                .insert(this_uid as u64);
+            let unigram = (u32::MAX, u32::MAX, encoding[encoding.len() - 2]);
+            trigrams_inverted_index
+                .entry(unigram)
+                .or_insert_with(BTreeSet::new)
+                .insert(this_uid as u64);
+        }
+
+        if encoding.len() >= 1 {
+            let unigram = (u32::MAX, u32::MAX, encoding[encoding.len() - 1]);
+            trigrams_inverted_index
+                .entry(unigram)
+                .or_insert_with(BTreeSet::new)
+                .insert(this_uid as u64);
+        }
+    }
+
+    // figure out the average length of the inverted index posting lists
+    // filter the trigrams to include only things where the value length is smaller than 10
+
+    let trigrams_inverted_index = trigrams_inverted_index
+        .into_iter()
+        .filter(|(_, value)| value.len() < (uid.value(encodings.len() - 1) / 10 * 3) as usize)
+        .collect::<Vec<_>>();
+
+    let mut avg_len: f32 = 0.0;
+    let mut all_lens: Vec<usize> = vec![];
+    for (_, value) in trigrams_inverted_index.iter() {
+        avg_len += value.len() as f32;
+        all_lens.push(value.len());
+    }
+    //write out all_lens as a numpy file
+    let mut file = File::create("all_lens.npy")?;
+    for val in all_lens.iter() {
+        file.write_all(&val.to_le_bytes())?;
+    }
+
+    avg_len /= trigrams_inverted_index.len() as f32;
+    println!("Average length: {}", avg_len);
+
+    let mut file = File::create(output_file_name)?;
+    file.write_all(&(compressed_tokenizer.len() as u64).to_le_bytes())?;
+    file.write_all(&compressed_tokenizer)?;
+
+    // Handle the compressed data (for example, saving to a file or sending over a network)
+    println!("Number of trigrams: {}", trigrams_inverted_index.len());
+
+    let mut plist_offsets: Vec<u64> = vec![file.seek(SeekFrom::Current(0))?];
+    let mut plist_elems: Vec<u64> = vec![0];
+    let mut plist_chunk = PListChunk::new()?;
+    let mut counter: u64 = 0;
+
+    let mut term_dictionary: Vec<(u32, u32, u32)> = Vec::new();
+
+    for (key, value) in trigrams_inverted_index.iter() {
+        if value.len() < 5 {
+            continue;
+        }
+        counter += 1;
+
+        term_dictionary.push(*key);
+
+        let written = plist_chunk.add_plist(&value.iter().map(|x| *x as u64).collect_vec())?;
+        if written > 1024 * 1024 || counter == trigrams_inverted_index.len() as u64 {
+            let bytes = plist_chunk.finalize_compression()?;
+            file.write_all(&bytes)?;
+            plist_offsets.push(plist_offsets[plist_offsets.len() - 1] + bytes.len() as u64);
+            plist_elems.push(counter);
+            plist_chunk = PListChunk::new()?;
+        }
+    }
+
+    println!("{}", counter);
+
+    let serialized_term_dictionary = bincode::serialize(&term_dictionary).unwrap();
+    let compressed_term_dictionary = encode_all(&serialized_term_dictionary[..], 0)
+        .expect("Compression of term dictionary failed");
+
+    println!("{}", compressed_term_dictionary.len());
+
+    plist_offsets.append(&mut plist_elems);
+    let compressed_term_dict_offset = file.seek(SeekFrom::Current(0))?;
+    file.write_all(&compressed_term_dictionary)?;
 
     let compressed_plist_offsets_offset = file.seek(SeekFrom::Current(0))?;
     let serialized = bincode::serialize(&plist_offsets).unwrap();

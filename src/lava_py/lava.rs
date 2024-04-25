@@ -123,6 +123,22 @@ pub fn build_lava_bm25(
 }
 
 #[pyfunction]
+pub fn build_lava_kmer(
+    py: Python,
+    output_file_name: &PyString,
+    array: &PyAny,
+    uid: &PyAny,
+    tokenizer_file: Option<&PyString>,
+) -> Result<(), LavaError> {
+    let output_file_name = output_file_name.to_string();
+    let array = ArrayData::from_pyarrow(array)?;
+    let uid = ArrayData::from_pyarrow(uid)?;
+    let tokenizer_file = tokenizer_file.map(|x| x.to_string());
+
+    py.allow_threads(|| lava::build_lava_kmer(output_file_name, array, uid, tokenizer_file))
+}
+
+#[pyfunction]
 pub fn build_lava_substring(
     py: Python,
     output_file_name: &PyString,
