@@ -21,53 +21,26 @@ use parquet::{
 };
 use thrift::protocol::TCompactInputProtocol;
 
-use opendal::raw::oio::ReadExt;
-
 use bytes::Bytes;
 use std::convert::TryFrom;
-use std::io::{Read, SeekFrom};
+use std::io::Read;
 
 use futures::stream::{self, StreamExt};
 use itertools::{izip, Itertools};
-use regex::Regex;
 use std::collections::HashMap;
 
-use std::{env, usize};
 use tokio::{self};
 
 use crate::{
-    formats::io::{AsyncReader, FsBuilder, Operators, S3Builder},
+    formats::readers::{AsyncReader, get_file_size_and_reader},
     lava::error::LavaError,
 };
 
-use super::io::READER_BUFFER_SIZE;
+use super::readers::ReaderType;
 
-async fn get_reader_and_size_from_file(file: &str) -> Result<(usize, AsyncReader), LavaError> {
-    let mut file_name = file.to_string();
-    let operator = if file.starts_with("s3://") {
-        file_name = file_name.replace("s3://", "");
-        let mut iter = file_name.split("/");
-        let bucket = iter.next().expect("malformed s3 path");
-        file_name = file_name[bucket.len() + 1..].to_string();
-
-        Operators::from(S3Builder::from(file)).into_inner()
-    } else {
-        let current_path = env::current_dir().unwrap();
-        Operators::from(FsBuilder::from(current_path.to_str().expect("no path"))).into_inner()
-    };
-
-    let file_size: usize = operator.stat(&file_name).await?.content_length() as usize;
-    let reader: AsyncReader = AsyncReader::new(
-        operator
-            .clone()
-            .reader_with(&file_name)
-            .buffer(READER_BUFFER_SIZE)
-            .await?,
-        file_name.clone(),
-    );
-
-    Ok((file_size, reader))
-}
+// async fn get_reader_and_size_from_file(file: &str) -> Result<(usize, AsyncReader), LavaError> {
+//     get_file_size_and_reader(file.to_string()).await
+// }
 
 async fn parse_metadata(
     reader: &mut AsyncReader,
@@ -213,16 +186,18 @@ fn read_page_header<C: ChunkReader>(
     Ok((tracked.1, header))
 }
 
-async fn parse_metadatas(file_paths: &Vec<String>) -> HashMap<String, ParquetMetaData> {
+async fn parse_metadatas(file_paths: &Vec<String>, reader_type: ReaderType) -> HashMap<String, ParquetMetaData> {
     let iter = file_paths.iter().dedup();
 
     let handles = stream::iter(iter)
         .map(|file_path: &String| {
             let file_path = file_path.clone();
+            let reader_type = reader_type.clone();
 
             tokio::spawn(async move {
                 let (file_size, mut reader) =
-                    get_reader_and_size_from_file(&file_path).await.unwrap();
+                get_file_size_and_reader(file_path.clone(), reader_type).await.unwrap();
+
                 let metadata = parse_metadata(&mut reader, file_size as usize)
                     .await
                     .unwrap();
@@ -260,8 +235,9 @@ pub struct ParquetLayout {
 pub async fn get_parquet_layout(
     column_name: &str,
     file_path: &str,
+    reader_type: ReaderType,
 ) -> Result<(arrow::array::ArrayData, ParquetLayout), LavaError> {
-    let (file_size, mut reader) = get_reader_and_size_from_file(file_path).await?;
+    let (file_size, mut reader) = get_file_size_and_reader(file_path.to_string(), reader_type).await?;
     let metadata = parse_metadata(&mut reader, file_size as usize).await?;
 
     let codec_options = CodecOptionsBuilder::default()
@@ -439,6 +415,7 @@ pub async fn read_indexed_pages_async(
     page_offsets: Vec<u64>,
     page_sizes: Vec<usize>,
     dict_page_sizes: Vec<usize>, // 0 means no dict page
+    reader_type: ReaderType,
 ) -> Result<Vec<ArrayData>, LavaError> {
     // current implementation might re-read dictionary pages, this should be optimized
     // we are assuming that all the files are either on disk or cloud.
@@ -447,7 +424,7 @@ pub async fn read_indexed_pages_async(
         .set_backward_compatible_lz4(false)
         .build();
 
-    let metadatas = parse_metadatas(&file_paths).await;
+    let metadatas = parse_metadatas(&file_paths, reader_type.clone()).await;
 
     let iter = izip!(
         file_paths,
@@ -485,11 +462,12 @@ pub async fn read_indexed_pages_async(
                 let mut codec = create_codec(compression_scheme, &codec_options)
                     .unwrap()
                     .unwrap();
+                let reader_type = reader_type.clone();
 
                 let handle = tokio::spawn(async move {
                     debug!("tokio spawn thread: {:?}", std::thread::current().id());
                     let (_file_size, mut reader) =
-                        get_reader_and_size_from_file(&file_path).await.unwrap();
+                    get_file_size_and_reader(file_path.clone(), reader_type).await.unwrap();
                     let mut pages: Vec<parquet::column::page::Page> = Vec::new();
                     if dict_page_size > 0 {
                         let start = dict_page_offset.unwrap() as u64;
@@ -589,6 +567,7 @@ pub async fn read_indexed_pages(
     page_offsets: Vec<u64>,
     page_sizes: Vec<usize>,
     dict_page_sizes: Vec<usize>, // 0 means no dict page
+    reader_type: ReaderType,
 ) -> Result<Vec<ArrayData>, LavaError> {
     read_indexed_pages_async(
         column_name,
@@ -597,6 +576,7 @@ pub async fn read_indexed_pages(
         page_offsets,
         page_sizes,
         dict_page_sizes,
+        reader_type,
     )
     .await
 }

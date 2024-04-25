@@ -3,23 +3,23 @@ use ndarray::Array2;
 use std::collections::BTreeSet;
 use std::{
     collections::{HashMap, HashSet},
-    io::{BufRead, BufReader, Cursor, Read, SeekFrom},
+    io::{Read},
 };
 use tokio::task::JoinSet;
 use zstd::stream::read::Decoder;
 
+use crate::formats::readers::ReaderType;
 use crate::lava::constants::*;
 use crate::lava::fm_chunk::FMChunk;
-use crate::vamana::vamana::{Distance, VectorAccessMethod};
+use crate::vamana::vamana::VectorAccessMethod;
 use crate::vamana::{access::ReaderAccessMethodF32, EuclideanF32, IndexParams, VamanaIndex};
-use crate::{formats::io::READER_BUFFER_SIZE, lava::plist::PListChunk};
+use crate::lava::plist::PListChunk;
 use crate::{
-    formats::io::{get_file_sizes_and_readers, AsyncReader, FsBuilder, Operators, S3Builder},
+    formats::readers::{get_file_sizes_and_readers, AsyncReader},
     lava::error::LavaError,
 };
 
 use tokenizers::tokenizer::Tokenizer;
-use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
 use ordered_float::OrderedFloat;
 
@@ -30,8 +30,8 @@ async fn get_tokenizer_async(
 
     for i in 0..readers.len() {
         // now interpret this as a usize
-        readers[i].seek(SeekFrom::Start(0)).await?;
-        let compressed_tokenizer_size = readers[i].read_u64_le().await?;
+        // readers[i].seek(SeekFrom::Start(0)).await?;
+        let compressed_tokenizer_size = readers[i].read_usize_from_start(0, 1).await?[0];
         let this_compressed_tokenizer: bytes::Bytes = readers[i]
             .read_range(8, 8 + compressed_tokenizer_size)
             .await?;
@@ -83,7 +83,7 @@ async fn search_substring_one_file(
 
     let mut start: usize = 0;
     let mut end: usize = n as usize;
-    let previous_range: u64 = u64::MAX;
+    // let previous_range: u64 = u64::MAX;
 
     for i in (0..query.len()).rev() {
         let current_token = query[i];
@@ -321,7 +321,7 @@ async fn search_bm25_async(
     page_scores_vec.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
 
     // get the top k results
-    for (uid, score) in page_scores_vec.iter().take(k) {
+    for (uid, _score) in page_scores_vec.iter().take(k) {
         // println!("{}", score);
         plist_result.push(*uid);
     }
@@ -337,6 +337,7 @@ async fn search_vector_async(
     uid_to_metadatas: &Vec<Vec<(String, usize, usize, usize, usize)>>,
     query: &Vec<f32>,
     k: usize,
+    reader_type: ReaderType,
 ) -> Result<(Vec<(usize, usize)>, Array2<f32>), LavaError> {
     let mut results: BTreeSet<(OrderedFloat<f32>, usize, usize)> = BTreeSet::new();
     let mut reader_access_methods: Vec<ReaderAccessMethodF32> = vec![];
@@ -378,7 +379,7 @@ async fn search_vector_async(
         );
 
         let mut ctx = index.get_search_context();
-        let _ = index.search(&mut ctx, query.as_slice()).await;
+        let _ = index.search(&mut ctx, query.as_slice(), reader_type.clone()).await;
         let local_results: Vec<(OrderedFloat<f32>, usize, usize)> = ctx
             .frontier
             .iter()
@@ -397,7 +398,7 @@ async fn search_vector_async(
 
     let futures: Vec<_> = results
         .iter()
-        .map(|(file_id, n)| reader_access_methods[*file_id].get_vec(*n))
+        .map(|(file_id, n)| reader_access_methods[*file_id].get_vec(*n, reader_type.clone()))
         .collect();
 
     let vectors: Vec<Vec<f32>> = futures::future::join_all(futures).await;
@@ -415,8 +416,9 @@ pub async fn search_lava_bm25(
     query_tokens: Vec<u32>,
     query_weights: Vec<f32>,
     k: usize,
+    reader_type: ReaderType,
 ) -> Result<Vec<(u64, u64)>, LavaError> {
-    let (file_sizes, readers) = get_file_sizes_and_readers(&files).await?;
+    let (file_sizes, readers) = get_file_sizes_and_readers(&files, reader_type).await?;
     search_bm25_async(file_sizes, readers, query_tokens, query_weights, k).await
 }
 
@@ -425,8 +427,9 @@ pub async fn search_lava_substring(
     files: Vec<String>,
     query: String,
     k: usize,
+    reader_type: ReaderType,
 ) -> Result<Vec<(u64, u64)>, LavaError> {
-    let (file_sizes, readers) = get_file_sizes_and_readers(&files).await?;
+    let (_file_sizes, readers) = get_file_sizes_and_readers(&files, reader_type.clone()).await?;
     let tokenizer = get_tokenizer_async(readers).await?.0;
 
     let mut skip_tokens: HashSet<u32> = HashSet::new();
@@ -466,7 +469,7 @@ pub async fn search_lava_substring(
 
     // println!("{:?}", result);
 
-    let (file_sizes, readers) = get_file_sizes_and_readers(&files).await?;
+    let (file_sizes, readers) = get_file_sizes_and_readers(&files, reader_type).await?;
     search_substring_async(file_sizes, readers, result, k).await
 }
 
@@ -478,8 +481,9 @@ pub async fn search_lava_vector(
     uid_to_metadatas: &Vec<Vec<(String, usize, usize, usize, usize)>>,
     query: &Vec<f32>,
     k: usize,
+    reader_type: ReaderType,
 ) -> Result<(Vec<(usize, usize)>, Array2<f32>), LavaError> {
-    let (file_sizes, readers) = get_file_sizes_and_readers(&files).await?;
+    let (file_sizes, readers) = get_file_sizes_and_readers(&files, reader_type.clone()).await?;
     search_vector_async(
         column_name,
         file_sizes,
@@ -488,18 +492,21 @@ pub async fn search_lava_vector(
         uid_to_metadatas,
         query,
         k,
+        reader_type,
     )
     .await
 }
 
 #[tokio::main]
-pub async fn get_tokenizer_vocab(files: Vec<String>) -> Result<Vec<String>, LavaError> {
-    let (file_sizes, readers) = get_file_sizes_and_readers(&files).await?;
+pub async fn get_tokenizer_vocab(files: Vec<String>, reader_type: ReaderType) -> Result<Vec<String>, LavaError> {
+    let (_file_sizes, readers) = get_file_sizes_and_readers(&files, reader_type).await?;
     Ok(get_tokenizer_async(readers).await?.1)
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::formats::readers::ReaderType;
+
     use super::search_lava_bm25;
     use super::search_lava_substring;
 
@@ -512,6 +519,7 @@ mod tests {
             vec![6300, 15050],
             vec![0.1, 0.2],
             10,
+            ReaderType::default(),
         )
         .unwrap();
 
@@ -525,6 +533,7 @@ mod tests {
             vec![6300, 15050],
             vec![0.1, 0.2],
             10,
+            ReaderType::default(),
         )
         .unwrap();
 
@@ -537,6 +546,7 @@ mod tests {
             vec!["chinese_index/0.lava".to_string()],
             "Samsung Galaxy Note".to_string(),
             10,
+            ReaderType::default(),
         );
         println!("{:?}", result.unwrap());
     }

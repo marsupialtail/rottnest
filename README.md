@@ -1,6 +1,6 @@
 # Rottnest : Data Lake Indices
 
-You don't need ElasticSearch or some vector database to do full text search or vector search. Parquet + Rottnest is all you need. Rottnest is like Postgres indices for Parquet. 
+You don't need ElasticSearch or some vector database to do full text search or vector search. Parquet + Rottnest is all you need. Rottnest is like Postgres indices for Parquet. Read more on what it can do for e.g. logs [here](LogCloud.pdf).
 
 ## Installation
 
@@ -46,5 +46,9 @@ Rottnest not only supports BM25 indices but also other indices, like regex and v
 
 ### Build Python wheel
 ```bash
-maturin develop --features py
+maturin develop --features "py,opendal"
+```
+or 
+```bash
+maturin develop --features "py,aws_sdk"
 ```

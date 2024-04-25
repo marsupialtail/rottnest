@@ -94,11 +94,13 @@ pub fn get_parquet_layout(
     py: Python,
     column_name: &PyString,
     file: &PyString,
+    reader_type: Option<&PyString>,
 ) -> Result<(PyObject, ParquetLayoutWrapper), LavaError> {
     let column_name = column_name.to_string();
     let file = file.to_string();
+    let reader_type = reader_type.map(|x| x.to_string()).unwrap_or_default();
     let (arr, parquet_layout) =
-        py.allow_threads(|| parquet::get_parquet_layout(&column_name, &file))?;
+        py.allow_threads(|| parquet::get_parquet_layout(&column_name, &file, reader_type.into()))?;
     Ok((
         arr.to_pyarrow(py).unwrap(),
         ParquetLayoutWrapper::from_parquet_layout(parquet_layout),
@@ -114,10 +116,12 @@ pub fn read_indexed_pages(
     page_offsets: Vec<usize>,
     page_sizes: Vec<usize>,
     dict_page_sizes: Vec<usize>,
+    reader_type: Option<&PyString>,
 ) -> Result<Vec<PyArrowType<ArrayData>>, LavaError> {
     let column_name = column_name.to_string();
     let file_paths: Vec<String> = file_paths.iter().map(|x| x.to_string()).collect();
     let page_offsets: Vec<u64> = page_offsets.iter().map(|x| *x as u64).collect();
+    let reader_type = reader_type.map(|x| x.to_string()).unwrap_or_default();
     let match_result = py.allow_threads(|| {
         parquet::read_indexed_pages(
             column_name,
@@ -126,6 +130,7 @@ pub fn read_indexed_pages(
             page_offsets,
             page_sizes,
             dict_page_sizes, // 0 means no dict page
+            reader_type.into(),
         )
     })?;
     Ok(match_result.into_iter().map(|x| PyArrowType(x)).collect())

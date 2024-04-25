@@ -1,17 +1,12 @@
-use std::collections::HashMap;
-
 use crate::formats::parquet::read_indexed_pages_async;
-use crate::lava::error::LavaError;
+use crate::formats::readers::ReaderType;
 use crate::vamana::vamana::{
-    build_index_par, Distance, IndexParams, Indexable, VectorAccessMethod,
+    Distance, Indexable, VectorAccessMethod,
 };
 use arrow::array::BinaryArray;
-use arrow::compute::binary;
-use arrow::datatypes::ToByteSlice;
 use ndarray::parallel::prelude::*;
 use ndarray::{s, Array2};
-use opendal::Reader;
-use rayon::iter::empty;
+
 
 pub struct Euclidean<T: Indexable> {
     t: std::marker::PhantomData<T>,
@@ -50,11 +45,11 @@ pub struct ReaderAccessMethodF32<'a> {
 }
 
 impl VectorAccessMethod<f32> for ReaderAccessMethodF32<'_> {
-    fn get_vec_sync<'a>(&'a self, idx: usize) -> &'a [f32] {
+    fn get_vec_sync<'a>(&'a self, _idx: usize) -> &'a [f32] {
         unimplemented!("get_vec not implemented for ReaderAccessMethodF32")
     }
 
-    async fn get_vec<'a>(&'a self, idx: usize) -> Vec<f32> {
+    async fn get_vec<'a>(&'a self, idx: usize, reader_type: ReaderType) -> Vec<f32> {
         // self.data.slice(s![idx, ..]).reborrow().to_slice().unwrap()
 
         // the uid_nrows will look something like 0, 300, 600, 900 etc.
@@ -78,6 +73,7 @@ impl VectorAccessMethod<f32> for ReaderAccessMethodF32<'_> {
             vec![page_offset as u64],
             vec![page_size],
             vec![dict_page_size], // 0 means no dict page
+            reader_type,
         )
         .await
         .unwrap()
@@ -136,7 +132,7 @@ impl VectorAccessMethod<f32> for InMemoryAccessMethodF32 {
         self.data.slice(s![idx, ..]).reborrow().to_slice().unwrap()
     }
 
-    async fn get_vec<'a>(&'a self, idx: usize) -> Vec<f32> {
+    async fn get_vec<'a>(&'a self, idx: usize, _reader_type: ReaderType) -> Vec<f32> {
         self.data
             .slice(s![idx, ..])
             .clone()
