@@ -252,14 +252,14 @@ def search_index_substring(indices: List[str], query: str, K: int):
     
     return polars.from_arrow(result).filter(polars.col("text").str.to_lowercase().str.contains(query.lower()))
 
-def search_index_bm25(indices: List[str], query: str, K: int, query_expansion = "bge", quality_factor = 0.2, expansion_tokens = 20):
+def search_index_bm25(indices: List[str], query: str, K: int, query_expansion = "bge", quality_factor = 0.2, expansion_tokens = 20, cache_dir = None):
 
     assert query_expansion in {"bge", "openai", "keyword", "none"}
     
     tokenizer_vocab = rottnest.get_tokenizer_vocab([f"{index_name}.lava" for index_name in indices])
 
     if query_expansion in {"bge","openai"}:
-        tokens, token_ids, weights = query_expansion_llm(tokenizer_vocab, query, method = query_expansion, expansion_tokens=expansion_tokens)
+        tokens, token_ids, weights = query_expansion_llm(tokenizer_vocab, query, method = query_expansion, expansion_tokens=expansion_tokens, cache_dir = cache_dir)
     elif query_expansion == "keyword":
         tokens, token_ids, weights = query_expansion_keyword(tokenizer_vocab, query)
     else:

@@ -32,13 +32,12 @@ def embed_batch_openai(tokens: List[str], model = "text-embedding-3-large"):
     
     return np.vstack(all_vecs)
 
-def query_expansion_llm(tokenizer_vocab: List[str], query: str, method = "bge", expansion_tokens = 20):
+def query_expansion_llm(tokenizer_vocab: List[str], query: str, method = "bge", expansion_tokens = 20, cache_dir = None):
 
     assert type(query) == str, "query must be string. If you have a list of keywords, concatenate them with spaces."
 
-    cache_dir = os.path.expanduser('~/.cache')
+    cache_dir = os.path.join(os.path.expanduser('~/.cache'), 'rottnest') if cache_dir is None else cache_dir
     # make a subdirectory rottnest under cache_dir if it's not there already
-    cache_dir = os.path.join(cache_dir, 'rottnest')
     if not os.path.exists(cache_dir):
         os.makedirs(cache_dir)
     

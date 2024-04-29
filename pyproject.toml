@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "rottnest"
-version = '1.3.0'
+version = '1.3.1'
 requires-python = ">=3.7"
 classifiers = [
     "Programming Language :: Rust",
@@ -20,4 +20,4 @@ features = ["pyo3/extension-module"]
 
 # Defining optional dependencies for feature flags
 [project.optional-dependencies]
-bm25 = ["duckdb"]
+bm25 = ["duckdb", ""]
