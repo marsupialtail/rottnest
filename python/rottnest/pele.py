@@ -39,7 +39,8 @@ def read_columns():
 
 def index_file_bm25(file_path: str, column_name: str, name = None, tokenizer_file = None):
 
-    arr, layout = rottnest.get_parquet_layout(column_name, file_path)
+    arrs, layout = rottnest.get_parquet_layout(column_name, file_path)
+    arr = pyarrow.concat_arrays([i.cast(pyarrow.large_string()) for i in arrs])
     data_page_num_rows = np.array(layout.data_page_num_rows)
     uid = np.repeat(np.arange(len(data_page_num_rows)), data_page_num_rows) + 1
 
@@ -69,7 +70,8 @@ def index_file_bm25(file_path: str, column_name: str, name = None, tokenizer_fil
 
 def index_file_substring(file_path: str, column_name: str, name = None, tokenizer_file = None):
 
-    arr, layout = rottnest.get_parquet_layout(column_name, file_path)
+    arrs, layout = rottnest.get_parquet_layout(column_name, file_path)
+    arr = pyarrow.concat_arrays([i.cast(pyarrow.large_string()) for i in arrs])
     data_page_num_rows = np.array(layout.data_page_num_rows)
     uid = np.repeat(np.arange(len(data_page_num_rows)), data_page_num_rows) + 1
 
@@ -92,6 +94,34 @@ def index_file_substring(file_path: str, column_name: str, name = None, tokenize
 
     file_data.write_parquet(f"{name}.meta")
     print(rottnest.build_lava_substring(f"{name}.lava", arr, pyarrow.array(uid.astype(np.uint64)), tokenizer_file))
+
+
+def index_file_kmer(file_path: str, column_name: str, name = None, tokenizer_file = None):
+
+    arrs, layout = rottnest.get_parquet_layout(column_name, file_path)
+    arr = pyarrow.concat_arrays([i.cast(pyarrow.large_string()) for i in arrs])
+    data_page_num_rows = np.array(layout.data_page_num_rows)
+    uid = np.repeat(np.arange(len(data_page_num_rows)), data_page_num_rows) + 1
+
+    x = np.cumsum(np.hstack([[0],layout.data_page_num_rows[:-1]]))
+    y = np.repeat(x[np.cumsum(np.hstack([[0],layout.row_group_data_pages[:-1]])).astype(np.uint64)], layout.row_group_data_pages)
+    page_row_offsets_in_row_group = x - y
+
+    file_data = polars.from_dict({
+            "uid": np.arange(len(data_page_num_rows) + 1),
+            "file_path": [file_path] * (len(data_page_num_rows) + 1),
+            "column_name": [column_name] * (len(data_page_num_rows) + 1),
+            "data_page_offsets": [-1] + layout.data_page_offsets,
+            "data_page_sizes": [-1] + layout.data_page_sizes,
+            "dictionary_page_sizes": [-1] + layout.dictionary_page_sizes,
+            "row_groups": np.hstack([[-1] , np.repeat(np.arange(layout.num_row_groups), layout.row_group_data_pages)]),
+            "page_row_offset_in_row_group": np.hstack([[-1], page_row_offsets_in_row_group])
+        }
+    )
+    name = uuid.uuid4().hex if name is None else name
+
+    file_data.write_parquet(f"{name}.meta")
+    print(rottnest.build_lava_kmer(f"{name}.lava", arr, pyarrow.array(uid.astype(np.uint64)), tokenizer_file))
 
 def index_file_vector(file_path: str, column_name: str, name = None):
 

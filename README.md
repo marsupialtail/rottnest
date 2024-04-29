@@ -34,9 +34,9 @@ It will use the index to search against the Parquet files on S3 directly. Rottne
 
 Rottnest not only supports BM25 indices but also other indices, like regex and vector searches. More documentation will be forthcoming.
 
-### Regex
+### Phrase Matches
 
-### Vector
+### Vector Approximate Nearest Neighbor
 
 ## Architecture
 

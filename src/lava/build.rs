@@ -1,5 +1,4 @@
-use arrow::array::{make_array, Array, ArrayData, StringArray, UInt64Array};
-use arrow_array::BinaryArray;
+use arrow::array::{make_array, Array, ArrayData, LargeStringArray, UInt64Array};
 use itertools::Itertools;
 use rayon::collections::btree_map;
 use serde_json;
@@ -9,15 +8,16 @@ use tokenizers::tokenizer::Tokenizer;
 use bincode;
 
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::collections::HashSet;
-use std::fs::File;
-use std::io::{Seek, SeekFrom, Write};
-use zstd::stream::encode_all;
 
 use crate::lava::constants::*;
 use crate::lava::error::LavaError;
 use crate::lava::plist::PListChunk;
+use std::fs::File;
+use std::io::{Seek, SeekFrom, Write};
+use zstd::stream::encode_all;
 
 use crate::vamana::{build_index_par, IndexParams, VamanaIndex};
 use crate::vamana::{EuclideanF32, InMemoryAccessMethodF32};
@@ -69,9 +69,9 @@ pub async fn build_lava_bm25(
     let array = make_array(array);
     // let uid = make_array(ArrayData::from_pyarrow(uid)?);
     let uid = make_array(uid);
-    let array: &arrow_array::GenericByteArray<arrow_array::types::GenericStringType<i32>> = array
+    let array: &arrow_array::GenericByteArray<arrow_array::types::GenericStringType<i64>> = array
         .as_any()
-        .downcast_ref::<StringArray>()
+        .downcast_ref::<LargeStringArray>()
         .ok_or(LavaError::Parse(
             "Expects string array as first argument".to_string(),
         ))?;
@@ -214,9 +214,9 @@ pub async fn build_lava_kmer(
     let (tokenizer, compressed_tokenizer) = get_tokenizer(tokenizer_file)?;
     let vocab_size: usize = tokenizer.get_vocab_size(false);
 
-    let array: &arrow_array::GenericByteArray<arrow_array::types::GenericStringType<i32>> = array
+    let array: &arrow_array::GenericByteArray<arrow_array::types::GenericStringType<i64>> = array
         .as_any()
-        .downcast_ref::<StringArray>()
+        .downcast_ref::<LargeStringArray>()
         .ok_or(LavaError::Parse(
             "Expects string array as first argument".to_string(),
         ))?;
@@ -409,9 +409,9 @@ pub async fn build_lava_substring(
     let compressed_tokenizer =
         encode_all(serialized_tokenizer.as_bytes(), 0).expect("Compression failed");
 
-    let array: &arrow_array::GenericByteArray<arrow_array::types::GenericStringType<i32>> = array
+    let array: &arrow_array::GenericByteArray<arrow_array::types::GenericStringType<i64>> = array
         .as_any()
-        .downcast_ref::<StringArray>()
+        .downcast_ref::<LargeStringArray>()
         .ok_or(LavaError::Parse(
             "Expects string array as first argument".to_string(),
         ))?;

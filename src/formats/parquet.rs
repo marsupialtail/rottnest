@@ -1,7 +1,10 @@
 use arrow::array::ArrayData;
+use arrow::compute::kernels::concat_elements::concat_elements_utf8_many;
 use arrow::datatypes::ToByteSlice;
 use arrow::error::ArrowError;
-use arrow_array::{Array, BinaryArray, StringArray};
+use arrow_array::{Array, BinaryArray, LargeBinaryArray, LargeStringArray, StringArray};
+use arrow_select::concat::concat;
+
 use log::debug;
 use parquet::{
     arrow::array_reader::make_byte_array_reader,
@@ -22,8 +25,8 @@ use parquet::{
 use thrift::protocol::TCompactInputProtocol;
 
 use bytes::Bytes;
-use std::convert::TryFrom;
 use std::io::Read;
+use std::{convert::TryFrom, sync::Arc};
 
 use futures::stream::{self, StreamExt};
 use itertools::{izip, Itertools};
@@ -32,7 +35,7 @@ use std::collections::HashMap;
 use tokio::{self};
 
 use crate::{
-    formats::readers::{AsyncReader, get_file_size_and_reader},
+    formats::readers::{get_file_size_and_reader, AsyncReader},
     lava::error::LavaError,
 };
 
@@ -186,7 +189,10 @@ fn read_page_header<C: ChunkReader>(
     Ok((tracked.1, header))
 }
 
-async fn parse_metadatas(file_paths: &Vec<String>, reader_type: ReaderType) -> HashMap<String, ParquetMetaData> {
+async fn parse_metadatas(
+    file_paths: &Vec<String>,
+    reader_type: ReaderType,
+) -> HashMap<String, ParquetMetaData> {
     let iter = file_paths.iter().dedup();
 
     let handles = stream::iter(iter)
@@ -196,7 +202,9 @@ async fn parse_metadatas(file_paths: &Vec<String>, reader_type: ReaderType) -> H
 
             tokio::spawn(async move {
                 let (file_size, mut reader) =
-                get_file_size_and_reader(file_path.clone(), reader_type).await.unwrap();
+                    get_file_size_and_reader(file_path.clone(), reader_type)
+                        .await
+                        .unwrap();
 
                 let metadata = parse_metadata(&mut reader, file_size as usize)
                     .await
@@ -236,8 +244,9 @@ pub async fn get_parquet_layout(
     column_name: &str,
     file_path: &str,
     reader_type: ReaderType,
-) -> Result<(arrow::array::ArrayData, ParquetLayout), LavaError> {
-    let (file_size, mut reader) = get_file_size_and_reader(file_path.to_string(), reader_type).await?;
+) -> Result<(Vec<arrow::array::ArrayData>, ParquetLayout), LavaError> {
+    let (file_size, mut reader) =
+        get_file_size_and_reader(file_path.to_string(), reader_type).await?;
     let metadata = parse_metadata(&mut reader, file_size as usize).await?;
 
     let codec_options = CodecOptionsBuilder::default()
@@ -373,30 +382,42 @@ pub async fn get_parquet_layout(
         None,
     )
     .unwrap();
-    let array = array_reader.next_batch(total_values as usize).unwrap();
+    // let array = array_reader.next_batch(total_values as usize).unwrap();
 
-    let new_array: Result<
-        &arrow_array::GenericByteArray<arrow::datatypes::GenericStringType<i32>>,
-        ArrowError,
-    > = array.as_any().downcast_ref::<StringArray>().ok_or_else(|| {
-        ArrowError::ParseError("Expects string array as first argument".to_string())
-    });
+    // instead of reading in total_values at once, we need to read 10_000 at a time and collect results into a Vec<Arc<dyn Array>>
 
-    let data = match new_array {
-        Ok(_) => new_array.unwrap().to_data(),
-        Err(_) => array
-            .as_any()
-            .downcast_ref::<BinaryArray>()
-            .ok_or_else(|| {
-                ArrowError::ParseError(
-                    "Expects string or binary array as first argument".to_string(),
-                )
-            })
-            .unwrap()
-            .to_data(),
-    };
+    let mut arrays: Vec<ArrayData> = Vec::new();
 
-    Ok((data, parquet_layout))
+    for x in (0..total_values).step_by(10_000) {
+        let array = array_reader.next_batch(10_000).unwrap();
+        let new_array: Result<
+            &arrow_array::GenericByteArray<arrow::datatypes::GenericStringType<i32>>,
+            ArrowError,
+        > = array.as_any().downcast_ref::<StringArray>().ok_or_else(|| {
+            ArrowError::ParseError("Expects string array as first argument".to_string())
+        });
+
+        let data = match new_array {
+            Ok(_) => new_array.unwrap().to_data(),
+            Err(_) => array
+                .as_any()
+                .downcast_ref::<BinaryArray>()
+                .ok_or_else(|| {
+                    ArrowError::ParseError(
+                        "Expects string or binary array as first argument".to_string(),
+                    )
+                })
+                .unwrap()
+                .to_data(),
+        };
+        arrays.push(data);
+    }
+
+    // Weston's magic doesn't work, concat will overflow anyway.
+    // let array_refs = arrays.iter().map(|arr| arr.as_ref()).collect::<Vec<_>>();
+    // let array = concat(&array_refs).unwrap();
+
+    Ok((arrays, parquet_layout))
 }
 
 #[derive(Debug, Clone)]
@@ -467,7 +488,9 @@ pub async fn read_indexed_pages_async(
                 let handle = tokio::spawn(async move {
                     debug!("tokio spawn thread: {:?}", std::thread::current().id());
                     let (_file_size, mut reader) =
-                    get_file_size_and_reader(file_path.clone(), reader_type).await.unwrap();
+                        get_file_size_and_reader(file_path.clone(), reader_type)
+                            .await
+                            .unwrap();
                     let mut pages: Vec<parquet::column::page::Page> = Vec::new();
                     if dict_page_size > 0 {
                         let start = dict_page_offset.unwrap() as u64;

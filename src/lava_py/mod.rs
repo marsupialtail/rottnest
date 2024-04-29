@@ -10,6 +10,7 @@ fn rottnest(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(lava::build_lava_bm25, m)?)?;
     m.add_function(wrap_pyfunction!(lava::build_lava_substring, m)?)?;
     m.add_function(wrap_pyfunction!(lava::build_lava_vector, m)?)?;
+    m.add_function(wrap_pyfunction!(lava::build_lava_kmer, m)?)?;
     m.add_function(wrap_pyfunction!(lava::search_lava_bm25, m)?)?;
     m.add_function(wrap_pyfunction!(lava::search_lava_substring, m)?)?;
     m.add_function(wrap_pyfunction!(lava::search_lava_vector, m)?)?;

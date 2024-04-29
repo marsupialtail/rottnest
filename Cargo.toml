@@ -37,6 +37,7 @@ thiserror = "1"
 log = "0.4"
 
 arrow-array = "50.0.0"
+arrow-select = "50.0.0"
 parquet = { version = "50.0.0", features = [
     "arrow",
     "async",
@@ -66,14 +67,14 @@ rand = "0.8.5"
 serde_json = "1.0"
 uuid = { version = "1.0", features = ["v4", "serde"] }
 async-recursion = "1.0.5"
-aws-config = { version = "1.1.7", features = ["behavior-version-latest"]}
+aws-config = { version = "1.1.7", features = ["behavior-version-latest"] }
 aws-sdk-s3 = { version = "1.23.0" }
 bitvector = "0.1.5"
 ndarray = { version = "0.15.6", features = ["rayon", "serde"] }
 numpy = "0.20.0"
 num-traits = "0.2.18"
 ordered-float = "4.2.0"
-
+reqwest = "0.12.4"
 [profile.release]
 lto = false
 bit-vec = "0.6.3"

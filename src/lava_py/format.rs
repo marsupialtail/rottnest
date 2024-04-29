@@ -1,11 +1,11 @@
-use std::hash::{Hash, Hasher};
-use std::collections::hash_map::DefaultHasher;
 use crate::formats::{parquet, MatchResult, ParquetLayout};
 use crate::lava::error::LavaError;
-use arrow::pyarrow::{ToPyArrow, PyArrowType};
 use arrow::array::ArrayData;
+use arrow::pyarrow::{PyArrowType, ToPyArrow};
 use pyo3::prelude::*;
 use pyo3::{pyfunction, types::PyString};
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 
 #[pyclass]
 pub struct ParquetLayoutWrapper {
@@ -95,14 +95,14 @@ pub fn get_parquet_layout(
     column_name: &PyString,
     file: &PyString,
     reader_type: Option<&PyString>,
-) -> Result<(PyObject, ParquetLayoutWrapper), LavaError> {
+) -> Result<(Vec<PyArrowType<ArrayData>>, ParquetLayoutWrapper), LavaError> {
     let column_name = column_name.to_string();
     let file = file.to_string();
     let reader_type = reader_type.map(|x| x.to_string()).unwrap_or_default();
-    let (arr, parquet_layout) =
+    let (arrs, parquet_layout) =
         py.allow_threads(|| parquet::get_parquet_layout(&column_name, &file, reader_type.into()))?;
     Ok((
-        arr.to_pyarrow(py).unwrap(),
+        arrs.into_iter().map(|x| PyArrowType(x)).collect(),
         ParquetLayoutWrapper::from_parquet_layout(parquet_layout),
     ))
 }

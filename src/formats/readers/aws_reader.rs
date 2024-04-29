@@ -6,7 +6,6 @@ use aws_sdk_s3::Client;
 
 use crate::lava::error::LavaError;
 
-
 pub struct AsyncAwsReader {
     reader: Client,
     pub bucket: String,
@@ -65,15 +64,20 @@ impl super::Reader for AsyncAwsReader {
         let (bucket, filename) = (&self.bucket, &self.filename);
 
         let mut object = self
-                    .get_object()
-                    .bucket(bucket)
-                    .key(filename)
-                    .set_range(Some(format!("bytes={}-{}", from, to).to_string()))
-                    .send()
-                    .await
-                    .map_err(|e| LavaError::AwsSdk(e.to_string()))?;
-        
-        while let Some(chunk) = object.body.try_next().await.map_err(|e| LavaError::AwsSdk(e.to_string()))? {
+            .get_object()
+            .bucket(bucket)
+            .key(filename)
+            .set_range(Some(format!("bytes={}-{}", from, to - 1).to_string()))
+            .send()
+            .await
+            .map_err(|e| LavaError::AwsSdk(e.to_string()))?;
+
+        while let Some(chunk) = object
+            .body
+            .try_next()
+            .await
+            .map_err(|e| LavaError::AwsSdk(e.to_string()))?
+        {
             res.extend_from_slice(&chunk);
         }
 
@@ -90,7 +94,9 @@ impl super::Reader for AsyncAwsReader {
         let to = from + (n as i64) * 8;
         let bytes = self.read_range(from as u64, to as u64).await?;
         bytes.chunks_exact(8).for_each(|chunk| {
-            result.push(u64::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7]]));
+            result.push(u64::from_le_bytes([
+                chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
+            ]));
         });
         Ok(result)
     }
@@ -101,7 +107,9 @@ impl super::Reader for AsyncAwsReader {
         let to = from + (n as i64) * 8;
         let bytes = self.read_range(from as u64, to as u64).await?;
         bytes.chunks_exact(8).for_each(|chunk| {
-            result.push(u64::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7]]));
+            result.push(u64::from_le_bytes([
+                chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
+            ]));
         });
         Ok(result)
     }
@@ -132,9 +140,7 @@ impl Operator {
     }
 }
 
-pub(crate) async fn get_reader(
-    file: String,
-) -> Result<(usize, AsyncAwsReader), LavaError> {
+pub(crate) async fn get_reader(file: String) -> Result<(usize, AsyncAwsReader), LavaError> {
     // Extract filename
     if !file.starts_with("s3://") {
         return Err(LavaError::Parse("File scheme not supported".to_string()));

@@ -7,12 +7,12 @@ use std::{
 use zstd::stream::read::Decoder;
 
 use crate::lava::error::LavaError;
-
-mod opendal_reader;
 mod aws_reader;
+mod http_reader;
+mod opendal_reader;
 
 #[async_trait]
-pub trait Reader : Send + Sync {
+pub trait Reader: Send + Sync {
     async fn read_range(&mut self, from: u64, to: u64) -> Result<Bytes, LavaError>;
     async fn read_usize_from_end(&mut self, offset: i64, n: u64) -> Result<Vec<u64>, LavaError>;
     async fn read_usize_from_start(&mut self, offset: u64, n: u64) -> Result<Vec<u64>, LavaError>;
@@ -79,6 +79,7 @@ pub enum ReaderType {
     #[default]
     Opendal,
     AwsSdk,
+    Http,
 }
 
 impl From<String> for ReaderType {
@@ -86,22 +87,22 @@ impl From<String> for ReaderType {
         match value.to_lowercase().as_str() {
             "opendal" => ReaderType::Opendal,
             "aws" => ReaderType::AwsSdk,
+            "http" => ReaderType::Http,
             _ => Default::default(),
         }
     }
 }
 
 pub async fn get_file_sizes_and_readers(
-    files: &[String], reader_type: ReaderType
+    files: &[String],
+    reader_type: ReaderType,
 ) -> Result<(Vec<usize>, Vec<AsyncReader>), LavaError> {
     let tasks: Vec<_> = files
         .iter()
         .map(|file| {
             let file = file.clone();
             let reader_type = reader_type.clone();
-            tokio::spawn(async move {
-                get_file_size_and_reader(file, reader_type).await
-            })
+            tokio::spawn(async move { get_file_size_and_reader(file, reader_type).await })
         })
         .collect();
 
@@ -119,7 +120,12 @@ pub async fn get_file_sizes_and_readers(
                 readers.push(reader);
             }
             Ok(Err(e)) => return Err(e), // Handle error from inner task
-            Err(e) => return Err(LavaError::Parse(format!("Task join error: {}", e.to_string()))), // Handle join error
+            Err(e) => {
+                return Err(LavaError::Parse(format!(
+                    "Task join error: {}",
+                    e.to_string()
+                )))
+            } // Handle join error
         }
     }
 
@@ -127,14 +133,18 @@ pub async fn get_file_sizes_and_readers(
 }
 
 pub async fn get_file_size_and_reader(
-    file: String, reader_type: ReaderType
+    file: String,
+    reader_type: ReaderType,
 ) -> Result<(usize, AsyncReader), LavaError> {
-
     // always choose opendal for none s3 file
-    let reader_type = if file.starts_with("s3://") {
-        reader_type
+    let reader_type = if file.starts_with("http://") || file.starts_with("https://") {
+        ReaderType::Http
     } else {
-        Default::default()
+        if file.starts_with("s3://") {
+            reader_type
+        } else {
+            Default::default()
+        }
     };
 
     let (file_size, reader) = match reader_type {
@@ -150,8 +160,13 @@ pub async fn get_file_size_and_reader(
             let async_reader = AsyncReader::new(Box::new(reader), filename);
             (file_size, async_reader)
         }
+        ReaderType::Http => {
+            let (file_size, reader) = http_reader::get_reader(file).await?;
+            let filename = reader.url.clone();
+            let async_reader = AsyncReader::new(Box::new(reader), filename);
+            (file_size, async_reader)
+        }
     };
-    
 
     Ok((file_size, reader))
 }
