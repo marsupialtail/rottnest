@@ -179,8 +179,6 @@ pub async fn build_lava_bm25(
         }
     }
 
-    println!("{}", counter);
-
     plist_offsets.append(&mut plist_elems);
 
     let compressed_term_dict_offset = file.seek(SeekFrom::Current(0))?;
@@ -354,13 +352,9 @@ pub async fn build_lava_kmer(
         }
     }
 
-    println!("{}", counter);
-
     let serialized_term_dictionary = bincode::serialize(&term_dictionary).unwrap();
     let compressed_term_dictionary = encode_all(&serialized_term_dictionary[..], 0)
         .expect("Compression of term dictionary failed");
-
-    println!("{}", compressed_term_dictionary.len());
 
     plist_offsets.append(&mut plist_elems);
     let compressed_term_dict_offset = file.seek(SeekFrom::Current(0))?;
@@ -575,7 +569,7 @@ pub async fn build_lava_substring(
         }
     }
     // print out total file size so far
-    println!("total file size: {}", file.seek(SeekFrom::Current(0))?);
+    // println!("total file size: {}", file.seek(SeekFrom::Current(0))?);
 
     let mut cumulative_counts: Vec<u64> = vec![0];
     for i in 0..tokenizer.get_vocab_size(false) {
@@ -634,7 +628,6 @@ pub async fn build_lava_vector(
             "Expects uint64 array as second argument".to_string(),
         ))?;
 
-    println!("{} {}", array.len(), uid.len());
     let dim = array.shape()[1];
 
     if array.shape()[0] != uid.len() {
@@ -673,8 +666,6 @@ pub async fn build_lava_vector(
 
     let bytes = bincode::serialize(&nlist)?;
     let compressed_nlist: Vec<u8> = encode_all(&bytes[..], 0).expect("Compression failed");
-
-    // println!("{}", nlist);
 
     let mut file = File::create(output_file_name)?;
     file.write_all(&(num_points as u64).to_le_bytes())?;

@@ -61,7 +61,7 @@ jobs:
 
   build-macos-x86:
     name: Build Rust Project on macOS x86
-    runs-on: macos-latest
+    runs-on: macos-14-large
 
     steps:
       - uses: actions/checkout@v2
