@@ -3,7 +3,7 @@ use ndarray::Array2;
 use std::collections::BTreeSet;
 use std::{
     collections::{HashMap, HashSet},
-    io::{Read},
+    io::Read,
 };
 use tokio::task::JoinSet;
 use zstd::stream::read::Decoder;
@@ -11,9 +11,9 @@ use zstd::stream::read::Decoder;
 use crate::formats::readers::ReaderType;
 use crate::lava::constants::*;
 use crate::lava::fm_chunk::FMChunk;
+use crate::lava::plist::PListChunk;
 use crate::vamana::vamana::VectorAccessMethod;
 use crate::vamana::{access::ReaderAccessMethodF32, EuclideanF32, IndexParams, VamanaIndex};
-use crate::lava::plist::PListChunk;
 use crate::{
     formats::readers::{get_file_sizes_and_readers, AsyncReader},
     lava::error::LavaError,
@@ -379,7 +379,9 @@ async fn search_vector_async(
         );
 
         let mut ctx = index.get_search_context();
-        let _ = index.search(&mut ctx, query.as_slice(), reader_type.clone()).await;
+        let _ = index
+            .search(&mut ctx, query.as_slice(), reader_type.clone())
+            .await;
         let local_results: Vec<(OrderedFloat<f32>, usize, usize)> = ctx
             .frontier
             .iter()
@@ -498,7 +500,10 @@ pub async fn search_lava_vector(
 }
 
 #[tokio::main]
-pub async fn get_tokenizer_vocab(files: Vec<String>, reader_type: ReaderType) -> Result<Vec<String>, LavaError> {
+pub async fn get_tokenizer_vocab(
+    files: Vec<String>,
+    reader_type: ReaderType,
+) -> Result<Vec<String>, LavaError> {
     let (_file_sizes, readers) = get_file_sizes_and_readers(&files, reader_type).await?;
     Ok(get_tokenizer_async(readers).await?.1)
 }
