@@ -252,7 +252,7 @@ def search_index_substring(indices: List[str], query: str, K: int):
     
     return polars.from_arrow(result).filter(polars.col("text").str.to_lowercase().str.contains(query.lower()))
 
-def search_index_bm25(indices: List[str], query: str, K: int, query_expansion = "bge", quality_factor = 0.2, expansion_tokens = 20, cache_dir = None):
+def search_index_bm25(indices: List[str], query: str, K: int, query_expansion = "bge", quality_factor = 0.2, expansion_tokens = 20, cache_dir = None, reader_type = None):
 
     assert query_expansion in {"bge", "openai", "keyword", "none"}
     
@@ -271,7 +271,7 @@ def search_index_bm25(indices: List[str], query: str, K: int, query_expansion = 
         print(tokens)
 
     # metadata_file = f"{index_name}.meta"
-    index_search_results = rottnest.search_lava_bm25([f"{index_name}.lava" for index_name in indices], token_ids, weights, int(K * quality_factor))
+    index_search_results = rottnest.search_lava_bm25([f"{index_name}.lava" for index_name in indices], token_ids, weights, int(K * quality_factor), reader_type = reader_type)
     
     if len(index_search_results) == 0:
         return None
