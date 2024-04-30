@@ -11,6 +11,7 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
 use crate::lava::error::LavaError;
 
+#[derive(Clone)]
 pub struct AsyncHttpReader {
     reader: Client,
     pub url: String,
