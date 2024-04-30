@@ -288,10 +288,14 @@ async fn search_bm25_async(
 
     let mut join_set: JoinSet<Result<Vec<(usize, u64, u32, u64)>, LavaError>> = JoinSet::new();
     // need to parallelize this @Rain.
-    for (file_id, chunk_id, tokens, offsets) in chunks_to_search.into_iter().map(|((file_id, chunk_id), token_offsets)| {
-        let (tokens, offsets): (Vec<u32>, Vec<u64>) = token_offsets.into_iter().unzip();
-        (file_id, chunk_id, Arc::new(tokens), Arc::new(offsets))
-    }) {
+    for (file_id, chunk_id, tokens, offsets) in
+        chunks_to_search
+            .into_iter()
+            .map(|((file_id, chunk_id), token_offsets)| {
+                let (tokens, offsets): (Vec<u32>, Vec<u64>) = token_offsets.into_iter().unzip();
+                (file_id, chunk_id, Arc::new(tokens), Arc::new(offsets))
+            })
+    {
         let mut reader = readers[file_id].clone();
         let start = all_plist_offsets[file_id][chunk_id];
         let end = all_plist_offsets[file_id][chunk_id + 1];
@@ -300,12 +304,9 @@ async fn search_bm25_async(
 
         join_set.spawn(async move {
             // println!("file_id: {}, chunk_id: {}", file_id, chunk_id);
-            let buffer3 = reader
-                .read_range(start,end)
-                .await?;
+            let buffer3 = reader.read_range(start, end).await?;
 
             // get all the second item in the offsets into its own vector
-            
 
             let results: Vec<Vec<u64>> =
                 PListChunk::search_compressed(buffer3.to_vec(), offsets.as_ref())?;
@@ -324,9 +325,8 @@ async fn search_bm25_async(
         });
     }
 
-
     while let Some(res) = join_set.join_next().await {
-        let res = res.map_err(|e|LavaError::Parse(format!("join error: {:?}", e)))??;
+        let res = res.map_err(|e| LavaError::Parse(format!("join error: {:?}", e)))??;
         for (file_id, uid, token, page_score) in res {
             page_scores
                 .entry((file_id as u64, uid))
