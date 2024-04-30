@@ -6,6 +6,7 @@ use aws_sdk_s3::Client;
 
 use crate::lava::error::LavaError;
 
+#[derive(Clone)]
 pub struct AsyncAwsReader {
     reader: Client,
     pub bucket: String,
