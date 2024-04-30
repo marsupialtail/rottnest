@@ -1,8 +1,7 @@
 use async_trait::async_trait;
 use bytes::Bytes;
 use std::{
-    io::Read,
-    ops::{Deref, DerefMut},
+    io::Read, ops::{Deref, DerefMut}, sync::Arc
 };
 use zstd::stream::read::Decoder;
 
@@ -21,8 +20,9 @@ pub trait Reader: Send + Sync {
 pub const READER_BUFFER_SIZE: usize = 4 * 1024 * 1024;
 pub const WRITER_BUFFER_SIZE: usize = 4 * 1024 * 1024;
 
+#[derive(Clone)]
 pub struct AsyncReader {
-    reader: Box<dyn Reader>,
+    reader: Arc<dyn Reader>,
     pub filename: String,
 }
 
@@ -36,12 +36,17 @@ impl Deref for AsyncReader {
 
 impl DerefMut for AsyncReader {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        self.reader.as_mut()
+       Arc::get_mut(&mut self.reader).expect("could not dereference reader as mut")
     }
 }
 
 impl AsyncReader {
-    pub fn new(reader: Box<dyn Reader>, filename: String) -> Self {
+
+    pub fn into_inner(&self) -> Arc<dyn Reader> {
+        self.reader.clone()
+    }
+
+    pub fn new(reader: Arc<dyn Reader>, filename: String) -> Self {
         Self { reader, filename }
     }
 
@@ -151,19 +156,19 @@ pub async fn get_file_size_and_reader(
         ReaderType::Opendal => {
             let (file_size, reader) = opendal_reader::get_reader(file).await?;
             let filename = reader.filename.clone();
-            let reader = AsyncReader::new(Box::new(reader), filename);
+            let reader = AsyncReader::new(Arc::new(reader), filename);
             (file_size, reader)
         }
         ReaderType::AwsSdk => {
             let (file_size, reader) = aws_reader::get_reader(file).await?;
             let filename = reader.filename.clone();
-            let async_reader = AsyncReader::new(Box::new(reader), filename);
+            let async_reader = AsyncReader::new(Arc::new(reader), filename);
             (file_size, async_reader)
         }
         ReaderType::Http => {
             let (file_size, reader) = http_reader::get_reader(file).await?;
             let filename = reader.url.clone();
-            let async_reader = AsyncReader::new(Box::new(reader), filename);
+            let async_reader = AsyncReader::new(Arc::new(reader), filename);
             (file_size, async_reader)
         }
     };

@@ -138,7 +138,7 @@ impl PListChunkIterator {
             .read_range(plist_offsets[0], plist_offsets[1])
             .await?;
         let result: Vec<Vec<u64>> =
-            PListChunk::search_compressed(buffer3.to_vec(), (0..plist_elems[1]).collect()).unwrap();
+            PListChunk::search_compressed(buffer3.to_vec(), &(0..plist_elems[1]).collect()).unwrap();
 
         Ok(Self {
             reader: reader,
@@ -174,7 +174,7 @@ impl PListChunkIterator {
 
             self.current_chunk = PListChunk::search_compressed(
                 buffer3.to_vec(),
-                (0..(self.plist_elems[self.current_chunk_offset + 1]
+               &(0..(self.plist_elems[self.current_chunk_offset + 1]
                     - self.plist_elems[self.current_chunk_offset]))
                     .collect(),
             )

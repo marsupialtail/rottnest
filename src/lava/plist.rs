@@ -29,7 +29,7 @@ impl<'a> PListChunk<'a> {
     }
 
     // we should try to make the first argument a slice instead of Vec to avoid copying. @Rain
-    pub fn search_compressed(compressed: Vec<u8>, indices: Vec<u64>) -> Result<Vec<Vec<u64>>> {
+    pub fn search_compressed(compressed: Vec<u8>, indices: &Vec<u64>) -> Result<Vec<Vec<u64>>> {
         // first read the last 8 bytes
         let compressed_plist_offsets_offset = u64::from_le_bytes(
             compressed[compressed.len() - 8..compressed.len()]
@@ -52,8 +52,8 @@ impl<'a> PListChunk<'a> {
 
         let mut result = Vec::new();
         for index in indices {
-            let plist_offset = decompressed_plist_offsets[index as usize];
-            let plist_size = decompressed_plist_offsets[index as usize + 1] - plist_offset;
+            let plist_offset = decompressed_plist_offsets[*index as usize];
+            let plist_size = decompressed_plist_offsets[*index as usize + 1] - plist_offset;
             let plist: Vec<u64> = bincode::deserialize(
                 &decompressed_plists
                     [plist_offset as usize..plist_offset as usize + plist_size as usize],
@@ -121,7 +121,7 @@ mod tests {
         println!("written {}", b);
         let result = plist.finalize_compression()?;
         println!("{:?}", result);
-        let result = PListChunk::search_compressed(result, vec![0]).unwrap();
+        let result = PListChunk::search_compressed(result, &vec![0]).unwrap();
         assert_eq!(result[0], a.into_iter().collect::<Vec<u64>>());
         Ok(())
     }
@@ -143,7 +143,7 @@ mod tests {
         let result = plist.finalize_compression()?;
         println!("{:?}", result);
 
-        let result = PListChunk::search_compressed(result, vec![0]).unwrap();
+        let result = PListChunk::search_compressed(result, &vec![0]).unwrap();
         assert_eq!(result[0], sorted_numbers.into_iter().collect::<Vec<u64>>());
 
         Ok(())
