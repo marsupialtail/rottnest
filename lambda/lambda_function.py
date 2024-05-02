@@ -30,7 +30,7 @@ def handler(event, context):
         print('No K')
 
     # let's say we search 10 index files
-    result = rottnest.search_index_bm25([f"s3://{index_bucket}/{i}" for i in range(10)], query, K = K, query_expansion = "openai", cache_dir = "/tmp")
+    result = rottnest.search_index_bm25([f"s3://{index_bucket}/merged_index"], query, K = K, query_expansion = "openai", cache_dir = "/tmp", reader_type = "aws")
     
     res = {
         "statusCode": 200,

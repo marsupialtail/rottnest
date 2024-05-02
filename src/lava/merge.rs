@@ -10,7 +10,9 @@ use std::sync::{Arc, Mutex};
 use zstd::stream::encode_all;
 use zstd::stream::read::Decoder;
 
-use crate::formats::readers::{get_file_size_and_reader, get_file_sizes_and_readers, AsyncReader, ReaderType};
+use crate::formats::readers::{
+    get_file_size_and_reader, get_file_sizes_and_readers, AsyncReader, ReaderType,
+};
 use crate::lava::constants::*;
 use crate::lava::error::LavaError;
 use crate::lava::fm_chunk::FMChunk;
@@ -138,7 +140,8 @@ impl PListChunkIterator {
             .read_range(plist_offsets[0], plist_offsets[1])
             .await?;
         let result: Vec<Vec<u64>> =
-            PListChunk::search_compressed(buffer3.to_vec(), &(0..plist_elems[1]).collect()).unwrap();
+            PListChunk::search_compressed(buffer3.to_vec(), &(0..plist_elems[1]).collect())
+                .unwrap();
 
         Ok(Self {
             reader: reader,
@@ -174,7 +177,7 @@ impl PListChunkIterator {
 
             self.current_chunk = PListChunk::search_compressed(
                 buffer3.to_vec(),
-               &(0..(self.plist_elems[self.current_chunk_offset + 1]
+                &(0..(self.plist_elems[self.current_chunk_offset + 1]
                     - self.plist_elems[self.current_chunk_offset]))
                     .collect(),
             )
@@ -397,15 +400,15 @@ async fn compute_interleave(
         bwt1_reader.reset().await?;
 
         interleave_iterations += 1;
-        println!(
-            "{} {} ",
-            interleave_iterations,
-            interleave
-                .iter()
-                .zip(new_interleave.iter())
-                .filter(|&(a_bit, b_bit)| a_bit != b_bit)
-                .count()
-        );
+        // println!(
+        //     "{} {} ",
+        //     interleave_iterations,
+        //     interleave
+        //         .iter()
+        //         .zip(new_interleave.iter())
+        //         .filter(|&(a_bit, b_bit)| a_bit != b_bit)
+        //         .count()
+        // );
 
         if new_interleave == interleave {
             break;
@@ -413,7 +416,7 @@ async fn compute_interleave(
         interleave = new_interleave;
     }
 
-    println!("interleave iterations: {}", interleave_iterations);
+    // println!("interleave iterations: {}", interleave_iterations);
     Ok(interleave)
 }
 
@@ -421,7 +424,7 @@ async fn merge_lava_substring(
     condensed_lava_file: &str,
     lava_files: Vec<String>,
     uid_offsets: Vec<u64>,
-    reader_type: ReaderType
+    reader_type: ReaderType,
 ) -> Result<(), LavaError> {
     // first merge the tokenizer, then merge the fm indices then merge the posting lists.
     // let mut builder = Fs::default();
@@ -445,7 +448,8 @@ async fn merge_lava_substring(
         // instead of bothering with wrapping this thing in Arc<Mutex<>>. Lots of tech debt to clean up
         // needed for the FMChunkIterator and PListIterator
         let (_, mut reader) = get_file_size_and_reader(file.clone(), reader_type.clone()).await?;
-        let (file_size, reader1) = get_file_size_and_reader(file.clone(), reader_type.clone()).await?;
+        let (file_size, reader1) =
+            get_file_size_and_reader(file.clone(), reader_type.clone()).await?;
         let file_size = file_size as u64;
 
         let results = reader.read_usize_from_end(4).await?;
@@ -478,7 +482,7 @@ async fn merge_lava_substring(
             .read_range_and_decompress(total_counts_offset, (file_size - 32) as u64)
             .await?;
 
-        println!("{} {}", file, cumulative_counts.len());
+        // println!("{} {}", file, cumulative_counts.len());
 
         fm_chunk_iterators.push(FMChunkIterator::new(reader, fm_chunk_offsets).await?);
         plist_iterators.push(PListIterator::new(reader1, posting_list_offsets).await?);
@@ -511,7 +515,7 @@ async fn merge_lava_substring(
     let _ = bwt1_reader.reset().await?;
 
     let duration = start.elapsed();
-    println!("interleave time: {:?}", duration);
+    // println!("interleave time: {:?}", duration);
 
     let mut output_file = File::create(condensed_lava_file)?;
     let compressed_tokenizer = compressed_tokenizer.unwrap();
@@ -711,7 +715,7 @@ async fn async_parallel_merge_files(
     uid_offsets: Vec<u64>,
     k: usize,
     mode: usize, // 0 for bm25 1 for substring
-    reader_type: ReaderType
+    reader_type: ReaderType,
 ) -> Result<(), LavaError> {
     assert!(mode == 1 || mode == 0);
     if mode == 1 {
@@ -774,8 +778,13 @@ async fn async_parallel_merge_files(
                     println!("mergin {:?}", file_chunk);
 
                     if mode == 0 {
-                        merge_lava_bm25(&merged_filename, file_chunk.to_vec(), uid_chunk.to_vec(), reader_type.clone())
-                            .await
+                        merge_lava_bm25(
+                            &merged_filename,
+                            file_chunk.to_vec(),
+                            uid_chunk.to_vec(),
+                            reader_type.clone(),
+                        )
+                        .await
                     } else {
                         merge_lava_substring(
                             &merged_filename,
@@ -895,9 +904,14 @@ async fn async_parallel_merge_vector_files(
 
                     println!("mergin {:?}", file_chunk);
 
-                    merge_lava_vector(&merged_filename, file_chunk.clone(), vector_chunk.clone(), reader_type)
-                        .await
-                        .unwrap();
+                    merge_lava_vector(
+                        &merged_filename,
+                        file_chunk.clone(),
+                        vector_chunk.clone(),
+                        reader_type,
+                    )
+                    .await
+                    .unwrap();
 
                     // now go delete the input filesx
 
@@ -978,9 +992,14 @@ pub async fn parallel_merge_vector_files(
     reader_type: ReaderType,
 ) -> Result<(), LavaError> {
     let do_not_delete = BTreeSet::from_iter(files.clone().into_iter());
-    let result =
-        async_parallel_merge_vector_files(condensed_lava_file, files, do_not_delete, vectors, reader_type)
-            .await?;
+    let result = async_parallel_merge_vector_files(
+        condensed_lava_file,
+        files,
+        do_not_delete,
+        vectors,
+        reader_type,
+    )
+    .await?;
     Ok(result)
 }
 
