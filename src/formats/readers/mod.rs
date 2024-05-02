@@ -1,13 +1,16 @@
 use async_trait::async_trait;
 use bytes::Bytes;
 use std::{
-    io::Read, ops::{Deref, DerefMut}
+    io::Read,
+    ops::{Deref, DerefMut},
 };
 use zstd::stream::read::Decoder;
 
 use crate::lava::error::LavaError;
 
-use self::{aws_reader::AsyncAwsReader, http_reader::AsyncHttpReader, opendal_reader::AsyncOpendalReader};
+use self::{
+    aws_reader::AsyncAwsReader, http_reader::AsyncHttpReader, opendal_reader::AsyncOpendalReader,
+};
 mod aws_reader;
 mod http_reader;
 mod opendal_reader;
@@ -23,7 +26,7 @@ pub const READER_BUFFER_SIZE: usize = 4 * 1024 * 1024;
 pub const WRITER_BUFFER_SIZE: usize = 4 * 1024 * 1024;
 
 pub struct AsyncReader {
-    reader: ClonableAsyncReader,
+    pub reader: ClonableAsyncReader,
     pub filename: String,
 }
 
@@ -45,7 +48,9 @@ impl Clone for AsyncReader {
     fn clone(&self) -> Self {
         Self {
             reader: match &self.reader {
-                ClonableAsyncReader::Opendal(_) => panic!("Clone is not allowed with Opendal reader."),
+                ClonableAsyncReader::Opendal(_) => {
+                    panic!("Clone is not allowed with Opendal reader.")
+                }
                 ClonableAsyncReader::AwsSdk(reader) => ClonableAsyncReader::AwsSdk(reader.clone()),
                 ClonableAsyncReader::Http(reader) => ClonableAsyncReader::Http(reader.clone()),
             },
@@ -74,16 +79,15 @@ impl Deref for ClonableAsyncReader {
 
 impl DerefMut for ClonableAsyncReader {
     fn deref_mut(&mut self) -> &mut Self::Target {
-       match self {
-           ClonableAsyncReader::Opendal(reader) => reader,
-           ClonableAsyncReader::AwsSdk(reader) => reader,
-           ClonableAsyncReader::Http(reader) => reader,
-       }
+        match self {
+            ClonableAsyncReader::Opendal(reader) => reader,
+            ClonableAsyncReader::AwsSdk(reader) => reader,
+            ClonableAsyncReader::Http(reader) => reader,
+        }
     }
 }
 
 impl AsyncReader {
-
     pub fn new(reader: ClonableAsyncReader, filename: String) -> Self {
         Self { reader, filename }
     }
@@ -200,13 +204,13 @@ pub async fn get_file_size_and_reader(
         ReaderType::AwsSdk => {
             let (file_size, reader) = aws_reader::get_reader(file).await?;
             let filename = reader.filename.clone();
-            let async_reader = AsyncReader::new(ClonableAsyncReader::AwsSdk(reader),  filename);
+            let async_reader = AsyncReader::new(ClonableAsyncReader::AwsSdk(reader), filename);
             (file_size, async_reader)
         }
         ReaderType::Http => {
             let (file_size, reader) = http_reader::get_reader(file).await?;
             let filename = reader.url.clone();
-            let async_reader = AsyncReader::new(ClonableAsyncReader::Http(reader),  filename);
+            let async_reader = AsyncReader::new(ClonableAsyncReader::Http(reader), filename);
             (file_size, async_reader)
         }
     };

@@ -10,14 +10,14 @@ use std::{
 use tokio::task::JoinSet;
 use zstd::stream::read::Decoder;
 
-use crate::formats::readers::ReaderType;
+use crate::formats::readers::{ClonableAsyncReader, ReaderType};
 use crate::lava::constants::*;
 use crate::lava::fm_chunk::FMChunk;
 use crate::lava::plist::PListChunk;
 use crate::vamana::vamana::VectorAccessMethod;
 use crate::vamana::{access::ReaderAccessMethodF32, EuclideanF32, IndexParams, VamanaIndex};
 use crate::{
-    formats::readers::{get_file_sizes_and_readers, AsyncReader},
+    formats::readers::{get_file_size_and_reader, get_file_sizes_and_readers, AsyncReader},
     lava::error::LavaError,
 };
 
@@ -296,7 +296,21 @@ async fn search_bm25_async(
                 (file_id, chunk_id, Arc::new(tokens), Arc::new(offsets))
             })
     {
-        let mut reader = readers[file_id].clone();
+        let reader_type = match readers[file_id].reader {
+            ClonableAsyncReader::AwsSdk(_) => ReaderType::AwsSdk,
+            ClonableAsyncReader::Http(_) => ReaderType::Http,
+            ClonableAsyncReader::Opendal(_) => ReaderType::Opendal,
+        };
+
+        let mut reader = match reader_type {
+            ReaderType::AwsSdk | ReaderType::Http => readers[file_id].clone(),
+            ReaderType::Opendal => {
+                get_file_size_and_reader(readers[file_id].filename.clone(), reader_type)
+                    .await
+                    .unwrap()
+                    .1
+            }
+        };
         let start = all_plist_offsets[file_id][chunk_id];
         let end = all_plist_offsets[file_id][chunk_id + 1];
         let tokens = tokens.clone();
