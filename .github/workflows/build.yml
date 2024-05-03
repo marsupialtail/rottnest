@@ -59,9 +59,12 @@ jobs:
           name: wheels-macos-arm
           path: dist/*
 
-  build-macos-x86:
-    name: Build Rust Project on macOS x86
-    runs-on: macos-14-large
+  build-linux-arm64:
+    name: Build Rust Project on macOS Arm
+    runs-on: macos-14
+
+    container:
+      image: ghcr.io/pyo3/maturin
 
     steps:
       - uses: actions/checkout@v2
@@ -89,5 +92,5 @@ jobs:
 
       - uses: actions/upload-artifact@v2
         with:
-          name: wheels-macos-x86
+          name: wheels-linux-arm
           path: dist/*
