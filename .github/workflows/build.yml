@@ -69,11 +69,12 @@ jobs:
 
       - name: Install Docker
         run: |
-          brew install docker colima
+          brew install podman
           
       - name: Start colima
         run: | 
-          colima start
+          podman machine init
+          podman machine start
 
       - name: Create Dockerfile.build
         run: |
@@ -84,8 +85,8 @@ jobs:
 
       - name: Build build image
         run: |
-          docker build -t maturin-linux-arm64 -f Dockerfile.build .
-          docker run --rm -v $(pwd):/app -w /app maturin-linux-arm64 --release --features py --out dist
+          podman build -t docker.io/library/maturin-linux-arm64:latest -f Dockerfile.build .
+          podman run --rm -v $(pwd):/app -w /app maturin-linux-arm64 --release --features py --out dist
 
       - uses: actions/upload-artifact@v2
         with:
