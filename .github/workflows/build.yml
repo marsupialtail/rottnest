@@ -70,7 +70,7 @@ jobs:
       - name: Install Docker
         run: |
           brew install docker
-          ln -s ~/.docker/run/docker.sock /var/run/docker.sock
+          sudo ln -s ~/.docker/run/docker.sock /var/run/docker.sock
 
       - name: Create Dockerfile.build
         run: |
