@@ -71,27 +71,19 @@ jobs:
         run: |
           brew install docker
 
-      # - name: Setup Python
-      #   uses: actions/setup-python@v2
-      #   with:
-      #     python-version: '3.x'
+      - name: Create Dockerfile.build
+        run: |
+          cat <<EOF > Dockerfile.build
+          FROM ghcr.io/pyo3/maturin
+          RUN yum update -y && yum install -y openssl-devel
+          EOF
 
-      # - name: Install Rust
-      #   uses: actions-rs/toolchain@v1
-      #   with:
-      #     toolchain: stable
-      #     default: true
-      #     profile: minimal
+      - name: Build build image
+        run: |
+          docker build -t maturin-linux-arm64 -f Dockerfile.build .
+          docker run --rm -v $(pwd):/app -w /app maturin-linux-arm64 --release --features py --out dist
 
-      # - name: Install Maturin
-      #   run: |
-      #     python -m pip install maturin
-
-      # - name: Build with Maturin
-      #   run: |
-      #     maturin build --release --features py --out dist
-
-      # - uses: actions/upload-artifact@v2
-      #   with:
-      #     name: wheels-linux-arm
-      #     path: dist/*
+      - uses: actions/upload-artifact@v2
+        with:
+          name: wheels-linux-arm
+          path: dist/*
