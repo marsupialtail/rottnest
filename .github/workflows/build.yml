@@ -60,7 +60,7 @@ jobs:
           path: dist/*
 
   build-linux-arm64:
-    name: Build Rust Project on macOS Arm
+    name: Build Rust Project on macOS Arm with Linux to make linux arm64
     runs-on: macos-14
 
     steps:
@@ -70,6 +70,7 @@ jobs:
       - name: Install Docker
         run: |
           brew install docker
+          ln -s ~/.docker/run/docker.sock /var/run/docker.sock
 
       - name: Create Dockerfile.build
         run: |
