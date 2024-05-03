@@ -60,7 +60,7 @@ jobs:
           path: dist/*
 
   build-linux-arm64:
-    name: Build Rust Project on macOS Arm
+    name: Build Rust Project on macOS Arm with Linux to make linux arm64
     runs-on: macos-14
 
     steps:
@@ -69,29 +69,26 @@ jobs:
 
       - name: Install Docker
         run: |
-          brew install docker
+          brew install podman
+          
+      - name: Start colima
+        run: | 
+          podman machine init
+          podman machine start
 
-      # - name: Setup Python
-      #   uses: actions/setup-python@v2
-      #   with:
-      #     python-version: '3.x'
+      - name: Create Dockerfile.build
+        run: |
+          cat <<EOF > Dockerfile.build
+          FROM ghcr.io/pyo3/maturin
+          RUN yum update -y && yum install -y openssl-devel
+          EOF
 
-      # - name: Install Rust
-      #   uses: actions-rs/toolchain@v1
-      #   with:
-      #     toolchain: stable
-      #     default: true
-      #     profile: minimal
+      - name: Build build image
+        run: |
+          podman build -t docker.io/library/maturin-linux-arm64:latest -f Dockerfile.build .
+          podman run --rm -v $(pwd):/app -w /app maturin-linux-arm64 --release --features py --out dist
 
-      # - name: Install Maturin
-      #   run: |
-      #     python -m pip install maturin
-
-      # - name: Build with Maturin
-      #   run: |
-      #     maturin build --release --features py --out dist
-
-      # - uses: actions/upload-artifact@v2
-      #   with:
-      #     name: wheels-linux-arm
-      #     path: dist/*
+      - uses: actions/upload-artifact@v2
+        with:
+          name: wheels-linux-arm
+          path: dist/*
