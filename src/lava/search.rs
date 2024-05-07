@@ -15,7 +15,7 @@ use crate::lava::constants::*;
 use crate::lava::fm_chunk::FMChunk;
 use crate::lava::plist::PListChunk;
 use crate::vamana::vamana::VectorAccessMethod;
-use crate::vamana::{access::ReaderAccessMethodF32, EuclideanF32, IndexParams, VamanaIndex};
+use crate::vamana::{access::ReaderAccessMethodF32, access::InMemoryAccessMethodF32, EuclideanF32, IndexParams, VamanaIndex};
 use crate::{
     formats::readers::{get_file_size_and_reader, get_file_sizes_and_readers, AsyncReader},
     lava::error::LavaError,
@@ -362,6 +362,88 @@ async fn search_bm25_async(
     Ok(plist_result)
 }
 
+
+
+async fn search_vector_mem_async(
+    file_sizes: Vec<usize>,
+    mut readers: Vec<AsyncReader>,
+    array: Array2<f32>,
+    queries: &Vec<Vec<f32>>,
+    k: usize,
+    reader_type: ReaderType,
+) -> Result<Vec<Vec<usize>>, LavaError> {
+    
+    let mut reader_access_methods: Vec<InMemoryAccessMethodF32> = vec![];
+
+    let mut indices: Vec<VamanaIndex<f32, EuclideanF32, _>> = vec![];
+
+    for i in 0..readers.len() {
+        let bytes = readers[i].read_range(0, file_sizes[i] as u64).await?;
+        let num_points = u64::from_le_bytes(bytes[0..8].try_into().unwrap());
+        let dim = u64::from_le_bytes(bytes[8..16].try_into().unwrap());
+        let start = u64::from_le_bytes(bytes[16..24].try_into().unwrap());
+        let compressed_nlist = &bytes[24..];
+
+        let mut decompressor = Decoder::new(&compressed_nlist[..])?;
+        let mut serialized_nlist: Vec<u8> = Vec::with_capacity(compressed_nlist.len() as usize);
+        decompressor.read_to_end(&mut serialized_nlist)?;
+        let nlist: Array2<usize> = bincode::deserialize(&serialized_nlist).unwrap();
+
+        let reader_access_method = InMemoryAccessMethodF32 { data: array.clone() };
+        reader_access_methods.push(InMemoryAccessMethodF32 { data: array.clone() });
+
+        // we probably want to serialize and deserialize the indexparams too
+        // upon merging if they are not the same throw an error
+
+        let index: VamanaIndex<f32, EuclideanF32, _> = VamanaIndex::hydrate(
+            reader_access_method,
+            IndexParams {
+                num_neighbors: 32,
+                search_frontier_size: 32,
+                pruning_threshold: 2.0,
+            },
+            nlist,
+            start as usize,
+        );
+
+        indices.push(index);
+    }
+
+
+    let mut all_results: Vec<Vec<usize>> = vec![];
+        
+
+    for query in queries.iter() {
+
+        let mut results: BTreeSet<(OrderedFloat<f32>, usize, usize)> = BTreeSet::new();
+
+        for (i, index) in indices.iter().enumerate() {
+            let mut ctx: crate::vamana::vamana::SearchContext = index.get_search_context();
+            let _ = index
+                .search(&mut ctx, query.as_slice(), reader_type.clone())
+                .await;
+            let local_results: Vec<(OrderedFloat<f32>, usize, usize)> = ctx
+                .frontier
+                .iter()
+                .map(|(v, d)| (OrderedFloat(*d as f32), i, *v))
+                .sorted_by_key(|k| k.0)
+                .collect();
+            results.extend(local_results);
+        }
+        let results: Vec<usize> = results
+            .iter()
+            .take(k)
+            .cloned()
+            .map(|(_v, _i, d)| d)
+            .collect();
+
+        all_results.push(results);
+            
+    }
+
+    Ok(all_results)
+}
+
 async fn search_vector_async(
     column_name: &str,
     file_sizes: Vec<usize>,
@@ -528,6 +610,27 @@ pub async fn search_lava_vector(
         query,
         k,
         reader_type,
+    )
+    .await
+}
+
+#[tokio::main]
+pub async fn search_lava_vector_mem(
+    files: Vec<String>,
+    array: Array2<f32>,
+    queries: &Vec<Vec<f32>>,
+    k: usize,
+    reader_type: ReaderType,
+) -> Result<Vec<Vec<usize>>, LavaError> {
+    let (file_sizes, readers) = get_file_sizes_and_readers(&files, reader_type.clone()).await?;
+
+    search_vector_mem_async(
+        file_sizes,
+        readers,
+        array,
+        queries,
+        k,
+        reader_type
     )
     .await
 }

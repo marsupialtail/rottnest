@@ -125,7 +125,11 @@ def index_file_kmer(file_path: str, column_name: str, name = None, tokenizer_fil
 
 def index_file_vector(file_path: str, column_name: str, name = None):
 
-    arr, layout = rottnest.get_parquet_layout(column_name, file_path)
+    arrs, layout = rottnest.get_parquet_layout(column_name, file_path)
+    arr = pyarrow.concat_arrays([i.cast(pyarrow.large_binary()) for i in arrs])
+    # convert arr into numpy
+    arr = np.vstack([np.frombuffer(i, dtype = np.float32) for i in arr.to_pylist()])
+
     data_page_num_rows = np.array(layout.data_page_num_rows)
     uid = np.repeat(np.arange(len(data_page_num_rows)), data_page_num_rows) 
 
@@ -148,8 +152,7 @@ def index_file_vector(file_path: str, column_name: str, name = None):
     name = uuid.uuid4().hex if name is None else name
     file_data.write_parquet(f"{name}.meta")
 
-    # convert arr into numpy
-    arr = np.vstack([np.frombuffer(i, dtype = np.float32) for i in arr.to_pylist()])
+    
     print(rottnest.build_lava_vector(f"{name}.lava", arr, pyarrow.array(uid.astype(np.uint64))))
 
 def merge_index_bm25(new_index_name: str, index_names: List[str]):
@@ -197,6 +200,11 @@ def merge_index_vector(new_index_name: str, index_names: List[str]):
     rottnest.merge_lava_vector(f"{new_index_name}.lava", [f"{name}.lava" for name in index_names], vectors)
     polars.concat(metadatas).write_parquet(f"{new_index_name}.meta")
 
+def search_index_vector_mem(indices: List[str], arr: np.array, queries: List[np.array], K: int):
+    
+    index_search_results = rottnest.search_lava_vector_mem([f"{index_name}.lava" for index_name in indices], arr, queries, K)
+    # print(index_search_results)
+    return index_search_results
 
 def search_index_vector(indices: List[str], query: np.array, K: int):
     

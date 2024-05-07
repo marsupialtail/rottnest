@@ -25,14 +25,14 @@ import polars
     # rottnest.index_file_substring(f"{f}", "content_split", name = f"chinese_index/{i}", tokenizer_file = "../tok/tokenizer.json")
     # rottnest.index_file_kmer(f"{f}", "content_split", name = f"chinese_index/{i}", tokenizer_file = "../tok/tokenizer.json")
     # print(rottnest.search_index_substring([f"chinese_index/{i}"], "iPhone 13 Pro", 10))
-rottnest.index_file_kmer(f"../aggregate.parquet", "content_split", name = f"chinese_index/test", tokenizer_file = "../tok/tokenizer.json")
+# rottnest.index_file_kmer(f"../aggregate.parquet", "content_split", name = f"chinese_index/test", tokenizer_file = "../tok/tokenizer.json")
 # rottnest.merge_index_substring("chinese_index/condensed", [f"chinese_index/{i}" for i in range(5, 20)])
 # print(rottnest.search_index_substring(["chinese_index/condensed"], " Joe Biden", 10))
 
 # import h5py
 # test_vector = h5py.File("mnist/mnist.hdf5")["test"][230]
 # print(h5py.File("mnist/mnist.hdf5")["neighbors"][23][:10])
-# rottnest.index_file_vector("mnist/test.parquet", "vector", name = "mnist/mnist_index")
+rottnest.index_file_vector("sift_base.parquet", "vectors", name = "sift/sift_index")
 # rottnest.search_index_vector(["mnist/mnist_index", "mnist/mnist_index"], test_vector, 10)
 
 # rottnest.index_file_vector("mnist/shard0.parquet", "vector", name = "mnist/mnist_index0")
@@ -40,3 +40,21 @@ rottnest.index_file_kmer(f"../aggregate.parquet", "content_split", name = f"chin
 # rottnest.merge_index_vector("mnist/mnist_index2", ["mnist/mnist_index0", "mnist/mnist_index1"])
 # rottnest.search_index_vector(["mnist/mnist_index0", "mnist/mnist_index1"], test_vector, 10)
 # rottnest.search_index_vector(["mnist/mnist_index1"], test_vector, 10)
+
+
+# import numpy as np
+# from tqdm import tqdm
+# import pyarrow
+
+# labels = np.frombuffer(open("sift_groundtruth.ivecs","rb").read(), dtype = np.int32).reshape((10000,101))[:,1:]
+# test_vecs = np.frombuffer(open("sift_query.fvecs","rb").read(), dtype = np.float32).reshape(-1,129)[:,1:]
+
+# arrs, layout = rottnest.rottnest.get_parquet_layout("vectors", "sift_base.parquet")
+# arr = pyarrow.concat_arrays([i.cast(pyarrow.large_binary()) for i in arrs])
+# # convert arr into numpy
+# arr = np.vstack([np.frombuffer(i, dtype = np.float32) for i in arr.to_pylist()])
+
+# result = rottnest.search_index_vector_mem(["sift/sift_index"], arr, test_vecs, 10)
+
+# recall = np.mean([len(np.intersect1d(result[i], labels[i][:10])) / 10 for i in range(10000)])
+# print(recall)

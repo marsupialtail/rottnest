@@ -142,7 +142,7 @@ impl<T: Indexable, D: Distance<T>, V: VectorAccessMethod<T>> VamanaIndex<T, D, V
         while closest_unvisited_vertex < ctx.frontier.len() {
             let closest = ctx.frontier[closest_unvisited_vertex];
             ctx.visited.visit(closest.0);
-            println!("{:?}", closest);
+            // println!("{:?}", closest);
             for n in self.neighbors(closest.0) {
                 counter += 1;
                 let neighbor_vector = self.get_vector(*n, reader_type.clone()).await;

@@ -635,13 +635,13 @@ pub async fn build_lava_vector(
             "The length of the array and the uid array must be the same".to_string(),
         ));
     }
-
+    let access_method = InMemoryAccessMethodF32 { data: array }; 
     let index: VamanaIndex<f32, EuclideanF32, _> = build_index_par::<f32, EuclideanF32, _>(
-        InMemoryAccessMethodF32 { data: array },
+        access_method,
         IndexParams {
-            num_neighbors: 32,
-            search_frontier_size: 32,
-            pruning_threshold: 2.0,
+            num_neighbors: 100,
+            search_frontier_size: 64,
+            pruning_threshold: 1.2,
         },
     );
 

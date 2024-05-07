@@ -67,6 +67,32 @@ pub fn search_lava_vector(
 }
 
 #[pyfunction]
+pub fn search_lava_vector_mem(
+    py: Python,
+    files: Vec<String>,
+    array: PyReadonlyArrayDyn<f32>,
+    query: Vec<Vec<f32>>,
+    k: usize,
+    reader_type: Option<&PyString>,
+) -> Result<Vec<Vec<usize>>, LavaError> {
+    let reader_type = reader_type.map(|x| x.to_string()).unwrap_or_default();
+    let array = array.as_array();
+    let owned_array: Array2<f32> = array.into_dimensionality::<Ix2>().unwrap().to_owned();
+
+    let metadata = py.allow_threads(|| {
+        lava::search_lava_vector_mem(
+            files,
+            owned_array,
+            &query,
+            k,
+            reader_type.into(),
+        )
+    })?;
+
+    Ok(metadata.to_owned())
+}
+
+#[pyfunction]
 pub fn get_tokenizer_vocab(
     py: Python,
     files: Vec<String>,
