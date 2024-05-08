@@ -1,26 +1,25 @@
 use async_trait::async_trait;
 use bytes::{Bytes, BytesMut};
 use opendal::services::{Fs, S3};
-use opendal::Operator;
+use opendal::{FuturesAsyncReader, Operator};
 use opendal::Reader;
 use std::env;
 use std::io::SeekFrom;
 use std::ops::{Deref, DerefMut};
-use tokio::pin;
+use futures::{AsyncSeekExt, AsyncReadExt};
 
-use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
 use crate::lava::error::LavaError;
 
 pub const READER_BUFFER_SIZE: usize = 4 * 1024 * 1024;
 
 pub struct AsyncOpendalReader {
-    reader: Reader,
+    reader: FuturesAsyncReader,
     pub filename: String,
 }
 
 impl Deref for AsyncOpendalReader {
-    type Target = Reader;
+    type Target = FuturesAsyncReader;
 
     fn deref(&self) -> &Self::Target {
         &self.reader
@@ -34,7 +33,7 @@ impl DerefMut for AsyncOpendalReader {
 }
 
 impl AsyncOpendalReader {
-    pub fn new(reader: Reader, filename: String) -> Self {
+    pub fn new(reader: FuturesAsyncReader, filename: String) -> Self {
         Self { reader, filename }
     }
 }
@@ -47,7 +46,6 @@ impl super::Reader for AsyncOpendalReader {
         }
 
         let reader = self;
-        pin!(reader);
 
         let mut current = 0;
         let total = to - from;
@@ -56,7 +54,7 @@ impl super::Reader for AsyncOpendalReader {
         while current < total {
             let mut buffer = res.split_off(current as usize);
             reader.seek(SeekFrom::Start(from + current)).await?;
-            let size = reader.read_buf(&mut buffer).await?;
+            let size = reader.read(&mut buffer).await?;
             res.unsplit(buffer);
             current += size as u64;
         }
@@ -70,22 +68,30 @@ impl super::Reader for AsyncOpendalReader {
 
     async fn read_usize_from_end(&mut self, offset: i64, n: u64) -> Result<Vec<u64>, LavaError> {
         let reader = self;
-        pin!(reader);
         reader.seek(SeekFrom::End(offset)).await?;
         let mut result: Vec<u64> = vec![];
         for _print in 0..n {
-            result.push(reader.read_u64_le().await?);
+            let mut buffer = vec![0; 8];
+            reader.read(&mut buffer).await?;
+            result.push(u64::from_le_bytes([
+                buffer[0], buffer[1], buffer[2], buffer[3], buffer[4], buffer[5], buffer[6],
+                buffer[7],
+            ]));
         }
         Ok(result)
     }
 
     async fn read_usize_from_start(&mut self, offset: u64, n: u64) -> Result<Vec<u64>, LavaError> {
         let reader = self;
-        pin!(reader);
         reader.seek(SeekFrom::Start(offset as u64)).await?;
         let mut result: Vec<u64> = vec![];
         for _ in 0..n {
-            result.push(reader.read_u64_le().await?);
+            let mut buffer = vec![0; 8];
+            reader.read(&mut buffer).await?;
+            result.push(u64::from_le_bytes([
+                buffer[0], buffer[1], buffer[2], buffer[3], buffer[4], buffer[5], buffer[6],
+                buffer[7],
+            ]));
         }
         Ok(result)
     }
@@ -177,8 +183,8 @@ pub(crate) async fn get_reader(
         operator
             .clone()
             .reader_with(&filename)
-            .buffer(READER_BUFFER_SIZE)
-            .await?,
+            .chunk(READER_BUFFER_SIZE)
+            .await?.into_futures_async_read(0..READER_BUFFER_SIZE as u64),
         filename.clone(),
     );
 
