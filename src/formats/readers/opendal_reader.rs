@@ -1,8 +1,7 @@
 use async_trait::async_trait;
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use opendal::services::{Fs, S3};
 use opendal::{FuturesAsyncReader, Operator};
-use opendal::Reader;
 use std::env;
 use std::io::SeekFrom;
 use std::ops::{Deref, DerefMut};
@@ -47,23 +46,11 @@ impl super::Reader for AsyncOpendalReader {
 
         let reader = self;
 
-        let mut current = 0;
         let total = to - from;
-        let mut res = BytesMut::with_capacity(total as usize);
-
-        while current < total {
-            let mut buffer = res.split_off(current as usize);
-            reader.seek(SeekFrom::Start(from + current)).await?;
-            let size = reader.read(&mut buffer).await?;
-            res.unsplit(buffer);
-            current += size as u64;
-        }
-
-        if res.len() < total as usize {
-            return Err(LavaError::Io(std::io::ErrorKind::Interrupted.into()));
-        }
-
-        Ok(res.freeze())
+        let mut res = vec![0; total as usize];
+        reader.seek(SeekFrom::Start(from)).await?;
+        reader.read_exact(&mut res).await?;
+        Ok(res.into())
     }
 
     async fn read_usize_from_end(&mut self, offset: i64, n: u64) -> Result<Vec<u64>, LavaError> {
@@ -72,7 +59,7 @@ impl super::Reader for AsyncOpendalReader {
         let mut result: Vec<u64> = vec![];
         for _print in 0..n {
             let mut buffer = vec![0; 8];
-            reader.read(&mut buffer).await?;
+            reader.read_exact(&mut buffer).await?;
             result.push(u64::from_le_bytes([
                 buffer[0], buffer[1], buffer[2], buffer[3], buffer[4], buffer[5], buffer[6],
                 buffer[7],
@@ -178,18 +165,19 @@ pub(crate) async fn get_reader(
         file.clone()
     };
 
+    // Get the file size
+    let file_size: u64 = operator.stat(&filename).await?.content_length();
+
     // Create the reader
     let reader: AsyncOpendalReader = AsyncOpendalReader::new(
         operator
             .clone()
             .reader_with(&filename)
             .chunk(READER_BUFFER_SIZE)
-            .await?.into_futures_async_read(0..READER_BUFFER_SIZE as u64),
+            .await?
+            .into_futures_async_read(0..file_size as u64),
         filename.clone(),
     );
-
-    // Get the file size
-    let file_size: u64 = operator.stat(&filename).await?.content_length();
 
     Ok((file_size as usize, reader))
 }

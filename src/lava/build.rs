@@ -1,6 +1,5 @@
 use arrow::array::{make_array, Array, ArrayData, LargeStringArray, UInt64Array};
 use itertools::Itertools;
-use rayon::collections::btree_map;
 use serde_json;
 use tokenizers::parallelism::MaybeParallelIterator;
 use tokenizers::tokenizer::Tokenizer;
@@ -210,7 +209,7 @@ pub async fn build_lava_kmer(
 
     // if the tokenizer file is provided, check if the file exists. If it does not exist, raise an Error
     let (tokenizer, compressed_tokenizer) = get_tokenizer(tokenizer_file)?;
-    let vocab_size: usize = tokenizer.get_vocab_size(false);
+    // let vocab_size: usize = tokenizer.get_vocab_size(false);
 
     let array: &arrow_array::GenericByteArray<arrow_array::types::GenericStringType<i64>> = array
         .as_any()
