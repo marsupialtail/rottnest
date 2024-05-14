@@ -1,6 +1,5 @@
 use itertools::Itertools;
 use ndarray::Array2;
-use std::borrow::BorrowMut;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::{
@@ -379,8 +378,8 @@ async fn search_vector_mem_async(
 
     for i in 0..readers.len() {
         let bytes = readers[i].read_range(0, file_sizes[i] as u64).await?;
-        let num_points = u64::from_le_bytes(bytes[0..8].try_into().unwrap());
-        let dim = u64::from_le_bytes(bytes[8..16].try_into().unwrap());
+        // let num_points = u64::from_le_bytes(bytes[0..8].try_into().unwrap());
+        // let dim = u64::from_le_bytes(bytes[8..16].try_into().unwrap());
         let start = u64::from_le_bytes(bytes[16..24].try_into().unwrap());
         let compressed_nlist = &bytes[24..];
 
