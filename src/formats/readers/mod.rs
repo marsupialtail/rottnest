@@ -202,7 +202,7 @@ pub async fn get_file_size_and_reader(
             (file_size, reader)
         }
         ReaderType::AwsSdk => {
-            let (file_size, reader) = aws_reader::get_reader(file).await?;
+            let (file_size, reader) = aws_reader::get_file_size_and_reader(file).await?;
             let filename = reader.filename.clone();
             let async_reader = AsyncReader::new(ClonableAsyncReader::AwsSdk(reader), filename);
             (file_size, async_reader)
@@ -216,4 +216,44 @@ pub async fn get_file_size_and_reader(
     };
 
     Ok((file_size, reader))
+}
+
+
+pub async fn get_reader(
+    file: String,
+    reader_type: ReaderType,
+) -> Result<AsyncReader, LavaError> {
+    // always choose opendal for none s3 file
+    let reader_type = if file.starts_with("http://") || file.starts_with("https://") {
+        ReaderType::Http
+    } else {
+        if file.starts_with("s3://") {
+            reader_type
+        } else {
+            Default::default()
+        }
+    };
+
+    let reader = match reader_type {
+        ReaderType::Opendal => {
+            let (file_size, reader) = opendal_reader::get_reader(file).await?;
+            let filename = reader.filename.clone();
+            let reader = AsyncReader::new(ClonableAsyncReader::Opendal(reader), filename);
+            reader
+        }
+        ReaderType::AwsSdk => {
+            let reader = aws_reader::get_reader(file).await?;
+            let filename = reader.filename.clone();
+            let async_reader = AsyncReader::new(ClonableAsyncReader::AwsSdk(reader), filename);
+            async_reader
+        }
+        ReaderType::Http => {
+            let (file_size, reader) = http_reader::get_reader(file).await?;
+            let filename = reader.url.clone();
+            let async_reader = AsyncReader::new(ClonableAsyncReader::Http(reader), filename);
+            async_reader
+        }
+    };
+
+    Ok(reader)
 }

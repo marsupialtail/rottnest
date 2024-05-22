@@ -4,6 +4,7 @@ use rayon::collections::btree_map;
 use serde_json;
 use tokenizers::parallelism::MaybeParallelIterator;
 use tokenizers::tokenizer::Tokenizer;
+use byteorder::{WriteBytesExt, LittleEndian}; // You'll need the `byteorder` crate
 
 use bincode;
 
@@ -11,12 +12,13 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::io::Read;
 
 use crate::lava::constants::*;
 use crate::lava::error::LavaError;
 use crate::lava::plist::PListChunk;
 use std::fs::File;
-use std::io::{Seek, SeekFrom, Write};
+use std::io::{Seek, SeekFrom, Write, BufWriter};
 use zstd::stream::encode_all;
 
 use crate::vamana::{build_index_par, IndexParams, VamanaIndex};
@@ -515,6 +517,12 @@ pub async fn build_lava_substring(
         suffices.push(suffix);
     }
 
+    // for i in 11..encodings.len() {
+    //     let mut suffix = encodings[i - 10..i].to_vec();
+    //     suffix.push(encodings[i - 11]);
+    //     suffices.push(suffix);
+    // }
+
     let mut sa: Vec<usize> = (0..suffices.len()).collect();
 
     // let start = std::time::Instant::now();
@@ -534,6 +542,19 @@ pub async fn build_lava_substring(
             idx.push(uids[(sa[i] - 1) as usize]);
         }
     }
+
+    // write out the bwt to a numpy array
+
+    let file = File::create("output.bin")?;
+    let mut writer = BufWriter::new(file);
+
+    // Write each u32 to the file as bytes
+    for number in bwt.iter() {
+        writer.write_u32::<LittleEndian>(*number)?;
+    }
+
+    // Flush the buffer to ensure all data is written to the file
+    writer.flush()?;
 
     let mut file = File::create(output_file_name)?;
     file.write_all(&(compressed_tokenizer.len() as u64).to_le_bytes())?;
@@ -557,6 +578,7 @@ pub async fn build_lava_substring(
             let serialized_counts = bincode::serialize(&current_chunk_counts)?;
             let compressed_counts =
                 encode_all(&serialized_counts[..], 10).expect("Compression failed");
+            println!("chunk size: {}", compressed_counts.len());
             file.write_all(&(compressed_counts.len() as u64).to_le_bytes())?;
             file.write_all(&compressed_counts)?;
             let serialized_chunk = bincode::serialize(&current_chunk)?;
@@ -569,7 +591,7 @@ pub async fn build_lava_substring(
         }
     }
     // print out total file size so far
-    // println!("total file size: {}", file.seek(SeekFrom::Current(0))?);
+    println!("total file size: {}", file.seek(SeekFrom::Current(0))?);
 
     let mut cumulative_counts: Vec<u64> = vec![0];
     for i in 0..tokenizer.get_vocab_size(false) {

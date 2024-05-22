@@ -32,7 +32,7 @@ import polars
 # import h5py
 # test_vector = h5py.File("mnist/mnist.hdf5")["test"][230]
 # print(h5py.File("mnist/mnist.hdf5")["neighbors"][23][:10])
-rottnest.index_file_vector("sift_base.parquet", "vectors", name = "sift/sift_index")
+# rottnest.index_file_vector("mnist_train.parquet", "vectors", name = "mnist_index/mnist")
 # rottnest.search_index_vector(["mnist/mnist_index", "mnist/mnist_index"], test_vector, 10)
 
 # rottnest.index_file_vector("mnist/shard0.parquet", "vector", name = "mnist/mnist_index0")
@@ -42,19 +42,19 @@ rottnest.index_file_vector("sift_base.parquet", "vectors", name = "sift/sift_ind
 # rottnest.search_index_vector(["mnist/mnist_index1"], test_vector, 10)
 
 
-# import numpy as np
-# from tqdm import tqdm
-# import pyarrow
+import numpy as np
+from tqdm import tqdm
+import pyarrow
 
-# labels = np.frombuffer(open("sift_groundtruth.ivecs","rb").read(), dtype = np.int32).reshape((10000,101))[:,1:]
-# test_vecs = np.frombuffer(open("sift_query.fvecs","rb").read(), dtype = np.float32).reshape(-1,129)[:,1:]
+labels = np.frombuffer(open("sift_groundtruth.ivecs","rb").read(), dtype = np.int32).reshape((10000,101))[:,1:]
+test_vecs = np.frombuffer(open("sift_query.fvecs","rb").read(), dtype = np.float32).reshape(-1,129)[:,1:]
 
-# arrs, layout = rottnest.rottnest.get_parquet_layout("vectors", "sift_base.parquet")
-# arr = pyarrow.concat_arrays([i.cast(pyarrow.large_binary()) for i in arrs])
-# # convert arr into numpy
-# arr = np.vstack([np.frombuffer(i, dtype = np.float32) for i in arr.to_pylist()])
+arrs, layout = rottnest.rottnest.get_parquet_layout("vectors", "sift_base.parquet")
+arr = pyarrow.concat_arrays([i.cast(pyarrow.large_binary()) for i in arrs])
+# convert arr into numpy
+arr = np.vstack([np.frombuffer(i, dtype = np.float32) for i in arr.to_pylist()])
 
-# result = rottnest.search_index_vector_mem(["sift/sift_index"], arr, test_vecs, 10)
+result = rottnest.search_index_vector_mem(["sift/sift_index"], arr, test_vecs, 10)
 
-# recall = np.mean([len(np.intersect1d(result[i], labels[i][:10])) / 10 for i in range(10000)])
-# print(recall)
+recall = np.mean([len(np.intersect1d(result[i], labels[i][:10])) / 10 for i in range(10000)])
+print(recall)

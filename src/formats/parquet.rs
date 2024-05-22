@@ -25,7 +25,7 @@ use parquet::{
 use thrift::protocol::TCompactInputProtocol;
 
 use bytes::Bytes;
-use std::io::Read;
+use std::{collections::BTreeMap, hash::Hash, io::Read};
 use std::{convert::TryFrom, sync::Arc};
 
 use futures::stream::{self, StreamExt};
@@ -35,20 +35,17 @@ use std::collections::HashMap;
 use tokio::{self};
 
 use crate::{
-    formats::readers::{get_file_size_and_reader, AsyncReader},
+    formats::readers::{get_file_size_and_reader, get_reader, AsyncReader},
     lava::error::LavaError,
 };
 
 use super::readers::ReaderType;
+use serde::{Serialize, Deserialize};
 
-// async fn get_reader_and_size_from_file(file: &str) -> Result<(usize, AsyncReader), LavaError> {
-//     get_file_size_and_reader(file.to_string()).await
-// }
-
-async fn parse_metadata(
+async fn get_metadata_bytes(
     reader: &mut AsyncReader,
     file_size: usize,
-) -> Result<ParquetMetaData, LavaError> {
+) -> Result<Bytes, LavaError> {
     // check file is large enough to hold footer
 
     let footer: [u8; 8] = reader
@@ -72,7 +69,7 @@ async fn parse_metadata(
         .read_range(start, start + metadata_len as u64)
         .await?;
 
-    decode_metadata(bytes.to_byte_slice()).map_err(LavaError::from)
+    Ok(bytes)
 }
 
 pub(crate) fn decode_page(
@@ -206,10 +203,11 @@ async fn parse_metadatas(
                         .await
                         .unwrap();
 
-                let metadata = parse_metadata(&mut reader, file_size as usize)
+                let metadata_bytes = get_metadata_bytes(&mut reader, file_size as usize)
                     .await
                     .unwrap();
 
+                let metadata = decode_metadata(metadata_bytes.to_byte_slice()).map_err(LavaError::from).unwrap();
                 (file_path, metadata)
             })
         })
@@ -232,6 +230,7 @@ async fn parse_metadatas(
 #[derive(Debug, Clone)]
 pub struct ParquetLayout {
     pub num_row_groups: usize,
+    pub metadata_bytes: Bytes,
     pub dictionary_page_sizes: Vec<usize>, // 0 means no dict page
     pub data_page_sizes: Vec<usize>,
     pub data_page_offsets: Vec<usize>,
@@ -247,7 +246,8 @@ pub async fn get_parquet_layout(
 ) -> Result<(Vec<arrow::array::ArrayData>, ParquetLayout), LavaError> {
     let (file_size, mut reader) =
         get_file_size_and_reader(file_path.to_string(), reader_type).await?;
-    let metadata = parse_metadata(&mut reader, file_size as usize).await?;
+    let metadata_bytes = get_metadata_bytes(&mut reader, file_size as usize).await?;
+    let metadata = decode_metadata(metadata_bytes.to_byte_slice()).map_err(LavaError::from)?;
 
     let codec_options = CodecOptionsBuilder::default()
         .set_backward_compatible_lz4(false)
@@ -255,6 +255,7 @@ pub async fn get_parquet_layout(
 
     let mut parquet_layout = ParquetLayout {
         num_row_groups: metadata.num_row_groups(),
+        metadata_bytes: metadata_bytes,
         dictionary_page_sizes: vec![],
         data_page_sizes: vec![],
         data_page_offsets: vec![],
@@ -413,10 +414,6 @@ pub async fn get_parquet_layout(
         arrays.push(data);
     }
 
-    // Weston's magic doesn't work, concat will overflow anyway.
-    // let array_refs = arrays.iter().map(|arr| arr.as_ref()).collect::<Vec<_>>();
-    // let array = concat(&array_refs).unwrap();
-
     Ok((arrays, parquet_layout))
 }
 
@@ -437,6 +434,7 @@ pub async fn read_indexed_pages_async(
     page_sizes: Vec<usize>,
     dict_page_sizes: Vec<usize>, // 0 means no dict page
     reader_type: ReaderType,
+    file_metadatas: Option<HashMap<String, Bytes>>,
 ) -> Result<Vec<ArrayData>, LavaError> {
     // current implementation might re-read dictionary pages, this should be optimized
     // we are assuming that all the files are either on disk or cloud.
@@ -445,7 +443,16 @@ pub async fn read_indexed_pages_async(
         .set_backward_compatible_lz4(false)
         .build();
 
-    let metadatas = parse_metadatas(&file_paths, reader_type.clone()).await;
+    let metadatas = match file_metadatas {
+        Some(file_metadatas) => {
+            let mut metadatas: HashMap<String, ParquetMetaData> = HashMap::new();
+            for (key, value) in file_metadatas.into_iter() {
+                metadatas.insert(key, decode_metadata(value.to_byte_slice()).map_err(LavaError::from).unwrap());
+            }
+            metadatas
+        },
+        None => parse_metadatas(&file_paths, reader_type.clone()).await
+    };
 
     let iter = izip!(
         file_paths,
@@ -472,6 +479,7 @@ pub async fn read_indexed_pages_async(
                     .row_group(row_group)
                     .schema_descr()
                     .column(column_index);
+                
                 let compression_scheme = metadatas[&file_path]
                     .row_group(row_group)
                     .column(column_index)
@@ -487,8 +495,7 @@ pub async fn read_indexed_pages_async(
 
                 let handle = tokio::spawn(async move {
                     debug!("tokio spawn thread: {:?}", std::thread::current().id());
-                    let (_file_size, mut reader) =
-                        get_file_size_and_reader(file_path.clone(), reader_type)
+                    let mut reader = get_reader(file_path.clone(), reader_type)
                             .await
                             .unwrap();
                     let mut pages: Vec<parquet::column::page::Page> = Vec::new();
@@ -591,6 +598,7 @@ pub async fn read_indexed_pages(
     page_sizes: Vec<usize>,
     dict_page_sizes: Vec<usize>, // 0 means no dict page
     reader_type: ReaderType,
+    file_metadatas: Option<HashMap<String, Bytes>>
 ) -> Result<Vec<ArrayData>, LavaError> {
     read_indexed_pages_async(
         column_name,
@@ -600,6 +608,7 @@ pub async fn read_indexed_pages(
         page_sizes,
         dict_page_sizes,
         reader_type,
+        file_metadatas
     )
     .await
 }

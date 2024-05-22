@@ -74,6 +74,7 @@ impl VectorAccessMethod<f32> for ReaderAccessMethodF32<'_> {
             vec![page_size],
             vec![dict_page_size], // 0 means no dict page
             reader_type,
+            None,
         )
         .await
         .unwrap()
@@ -115,7 +116,6 @@ impl VectorAccessMethod<f32> for ReaderAccessMethodF32<'_> {
 }
 
 pub struct EuclideanF32;
-
 impl Distance<f32> for EuclideanF32 {
     #[inline(always)]
     fn calculate(a: &[f32], b: &[f32]) -> f64 {
