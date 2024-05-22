@@ -1,13 +1,8 @@
 use async_trait::async_trait;
-use bytes::{Bytes, BytesMut};
+use bytes::Bytes;
 use reqwest::{self, Client};
 
-use std::env;
-use std::io::SeekFrom;
 use std::ops::{Deref, DerefMut};
-use tokio::pin;
-
-use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
 use crate::lava::error::LavaError;
 

@@ -362,7 +362,7 @@ async fn compute_interleave(
         interleave.set(i, false);
     }
 
-    let mut interleave_iterations = 0;
+    // let mut interleave_iterations = 0;
 
     for _ in 0..10 {
         let mut ind: [usize; 2] = [0, 0];
@@ -399,7 +399,7 @@ async fn compute_interleave(
         bwt0_reader.reset().await?;
         bwt1_reader.reset().await?;
 
-        interleave_iterations += 1;
+        // interleave_iterations += 1;
         // println!(
         //     "{} {} ",
         //     interleave_iterations,
@@ -502,7 +502,7 @@ async fn merge_lava_substring(
     let mut plist0_reader = plist_iterators.remove(0);
     let mut plist1_reader = plist_iterators.remove(0);
 
-    let start = std::time::Instant::now();
+    // let start = std::time::Instant::now();
     let interleave: BitVec = compute_interleave(
         &mut bwt0_reader,
         &mut bwt1_reader,
@@ -514,7 +514,7 @@ async fn merge_lava_substring(
     let _ = bwt0_reader.reset().await?;
     let _ = bwt1_reader.reset().await?;
 
-    let duration = start.elapsed();
+    // let duration = start.elapsed();
     // println!("interleave time: {:?}", duration);
 
     let mut output_file = File::create(condensed_lava_file)?;

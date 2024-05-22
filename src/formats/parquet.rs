@@ -1,9 +1,7 @@
 use arrow::array::ArrayData;
-use arrow::compute::kernels::concat_elements::concat_elements_utf8_many;
 use arrow::datatypes::ToByteSlice;
 use arrow::error::ArrowError;
-use arrow_array::{Array, BinaryArray, LargeBinaryArray, LargeStringArray, StringArray};
-use arrow_select::concat::concat;
+use arrow_array::{Array, BinaryArray, StringArray};
 
 use log::debug;
 use parquet::{
@@ -389,7 +387,7 @@ pub async fn get_parquet_layout(
 
     let mut arrays: Vec<ArrayData> = Vec::new();
 
-    for x in (0..total_values).step_by(10_000) {
+    for _ in (0..total_values).step_by(10_000) {
         let array = array_reader.next_batch(10_000).unwrap();
         let new_array: Result<
             &arrow_array::GenericByteArray<arrow::datatypes::GenericStringType<i32>>,
