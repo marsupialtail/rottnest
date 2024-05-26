@@ -18,7 +18,7 @@ pub fn run_bwt(input: &Vec<u8>) -> BWTData {
         .map(|(i, _)| i)
         .collect::<Vec<usize>>();
 
-    let sa = divsufsort64(&input).unwrap();
+    let sa = divsufsort64(input).unwrap();
 
     let mut bwt = Vec::with_capacity(input.len());
     let mut line_index = Vec::with_capacity(input.len());
@@ -40,7 +40,7 @@ pub fn run_bwt(input: &Vec<u8>) -> BWTData {
         counts[bwt[i] as usize] += 1;
     }
 
-    return (bwt, line_index, counts);
+    (bwt, line_index, counts)
 }
 
 // Compute the interleave of two BWTs.
@@ -61,7 +61,7 @@ fn compute_interleave(bwt0: &BWT, bwt1: &BWT, counts: &[usize; 256]) -> BitVec {
     loop {
         let mut ind: [usize; 2] = [0, 0];
 
-        let mut offsets = starts.clone();
+        let mut offsets = starts;
         let mut new_interleave = BitVec::from_elem(interleave.len(), false);
         for i in 0..interleave.len() {
             if interleave[i] {
@@ -103,7 +103,7 @@ pub fn bwt_merge(bwt0_d: &BWTData, bwt1_d: &BWTData) -> BWTData {
 
     // assumes the number of lines in bwt0 is the number of newlines
     let num_newlines = counts0[b'\n' as usize];
-    
+
     for i in 0..interleave.len() {
         if interleave[i] {
             bwt.push(bwt1[ind1]);
@@ -115,7 +115,7 @@ pub fn bwt_merge(bwt0_d: &BWTData, bwt1_d: &BWTData) -> BWTData {
             ind0 += 1;
         }
     }
-    return (bwt, line_index, counts);
+    (bwt, line_index, counts)
 }
 
 const BLOCK_SIZE: usize = 1024;
@@ -146,14 +146,14 @@ pub fn fm_index(data: &BWTData) -> Vec<FMBlock> {
         if end > bwt.len() {
             blocks.push(FMBlock {
                 bwt_slice: bwt[start..].to_vec(),
-                c_arr: c_arr.clone(),
-                offsets: counts.clone(),
+                c_arr,
+                offsets: counts,
             });
         } else {
             blocks.push(FMBlock {
                 bwt_slice: bwt[start..end].to_vec(),
-                c_arr: c_arr.clone(),
-                offsets: counts.clone(),
+                c_arr,
+                offsets: counts,
             });
 
             for j in start..end {
@@ -165,7 +165,7 @@ pub fn fm_index(data: &BWTData) -> Vec<FMBlock> {
 }
 
 // Run LF-mapping on the index
-fn lf_map(blocks: &Vec<FMBlock>, ind: usize, chr: u8) -> usize {
+fn lf_map(blocks: &[FMBlock], ind: usize, chr: u8) -> usize {
     let block_ind = ind / BLOCK_SIZE;
     let ind = ind % BLOCK_SIZE;
 
@@ -176,12 +176,12 @@ fn lf_map(blocks: &Vec<FMBlock>, ind: usize, chr: u8) -> usize {
         }
     }
 
-    return blocks[block_ind].c_arr[chr as usize] + offset;
+    blocks[block_ind].c_arr[chr as usize] + offset
 }
 
 // Search FM-index for a pattern
 // Returns (start, end) indices of the pattern in the BWT, end is exclusive
-pub fn substring_search(blocks: &Vec<FMBlock>, pattern: &Vec<u8>, n: usize) -> Option<(usize, usize)> {
+pub fn substring_search(blocks: &[FMBlock], pattern: &[u8], n: usize) -> Option<(usize, usize)> {
     let mut start = 0;
     let mut end = n;
     for i in (0..pattern.len()).rev() {
@@ -197,7 +197,11 @@ pub fn substring_search(blocks: &Vec<FMBlock>, pattern: &Vec<u8>, n: usize) -> O
 }
 
 // Get all matching line indices from the BWT
-pub fn get_matching_lines(bwt_data: &BWTData, blocks: &Vec<FMBlock>, pattern: &Vec<u8>) -> BTreeSet<usize> {
+pub fn get_matching_lines(
+    bwt_data: &BWTData,
+    blocks: &[FMBlock],
+    pattern: &[u8],
+) -> BTreeSet<usize> {
     let (bwt, line_ind, _) = bwt_data;
     let n = bwt.len();
     let res = substring_search(blocks, pattern, n);
@@ -207,8 +211,8 @@ pub fn get_matching_lines(bwt_data: &BWTData, blocks: &Vec<FMBlock>, pattern: &V
 
     let (start, end) = res.unwrap();
     let mut lines: BTreeSet<usize> = BTreeSet::new();
-    for i in start..end {
-        lines.insert(line_ind[i]);
+    for val in line_ind.iter().take(end).skip(start) {
+        lines.insert(*val);
     }
     lines
 }
