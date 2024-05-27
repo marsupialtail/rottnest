@@ -86,13 +86,13 @@ async fn main() {
             let mut trie_data = Vec::new();
             decoder.read_to_end(&mut trie_data).unwrap();
             println!("deserializing");
-            trie = postcard::from_bytes(&trie_data).unwrap();
+            trie = bincode::deserialize(&trie_data[..]).unwrap();
         } else {
             // build trie
             let input_inds: Vec<Vec<usize>> = (0..input_lines.len()).map(|x| vec![x]).collect();
 
             let start_time = Instant::now();
-            trie = bwt_merge::trie::build_binary_trie(&input_lines, &input_inds);
+            trie = bwt_merge::trie::BinaryTrieNode::build(&input_lines, &input_inds);
             let trie_duration = start_time.elapsed();
             println!("trie build time: {:?}", trie_duration);
         }
@@ -101,13 +101,13 @@ async fn main() {
             // try a query
             let query_str = cli.query.unwrap();
             let query = query_str.as_bytes().to_vec();
-            let res = bwt_merge::trie::query_string(&trie, &query);
+            let res = trie.query(&query);
             println!("trie res: {:?}", res);
         }
 
         if cli.compare_zstd {
             // serialize trie
-            let serialized = postcard::to_stdvec(&trie).unwrap();
+            let serialized = bincode::serialize(&trie).unwrap();
 
             // compress
             println!("original trie size: {}", serialized.len());
@@ -128,7 +128,7 @@ async fn main() {
             println!("bwt build time: {:?}", bwt_duration);
 
             // exclude indices
-            let serialized_bwt = postcard::to_stdvec(&data.0).unwrap();
+            let serialized_bwt = bincode::serialize(&data.0).unwrap();
             println!("original bwt size: {}", serialized_bwt.len());
             let mut encoder = zstd::stream::Encoder::new(Vec::new(), 0).unwrap();
             encoder.write_all(&serialized_bwt).unwrap();
@@ -137,7 +137,7 @@ async fn main() {
 
             let counts_vec = data.2.to_vec();
             let serialize_data = (data.0, data.1, counts_vec);
-            let serialized_bwt = postcard::to_stdvec(&serialize_data).unwrap();
+            let serialized_bwt = bincode::serialize(&serialize_data).unwrap();
             println!("original bwt size, with indices: {}", serialized_bwt.len());
             let mut encoder = zstd::stream::Encoder::new(Vec::new(), 0).unwrap();
             encoder.write_all(&serialized_bwt).unwrap();
