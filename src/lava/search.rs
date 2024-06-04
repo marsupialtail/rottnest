@@ -26,6 +26,11 @@ use ordered_float::OrderedFloat;
 
 use super::trie::FastTrie;
 
+enum QueryParam {
+    Substring(Vec<u32>),
+    Uuid(String)
+}
+
 async fn get_tokenizer_async(
     mut readers: Vec<AsyncReader>,
 ) -> Result<(Tokenizer, Vec<String>), LavaError> {
@@ -165,25 +170,56 @@ async fn search_substring_one_file(
     Ok(res)
 }
 
-async fn search_substring_async(
+async fn search_uuid_one_file(
+    file_id: u64,
+    mut reader: AsyncReader,
+    file_size: usize,
+    query: String,
+) -> Result<Vec<(u64, u64)>, LavaError> {
+
+    let mut result: Vec<(u64, u64)> = Vec::new();
+    let mut start_time = Instant::now();
+    let mut end_time = Instant::now();
+
+    let this_result: Vec<usize> = FastTrie::query_with_reader(file_size, &mut reader, &query).await?;
+    result.extend(this_result.iter().map(|x| (file_id , *x as u64)));
+    
+    Ok(result)
+}
+
+async fn search_generic_async(
     mut file_sizes: Vec<usize>,
     mut readers: Vec<AsyncReader>,
-    query: Vec<u32>,
+    query: QueryParam,
     k: usize,
 ) -> Result<Vec<(u64, u64)>, LavaError> {
+
     let mut join_set = JoinSet::new();
 
     for file_id in 0..readers.len() {
         let reader = readers.remove(0);
         let file_size = file_sizes.remove(0);
-        let query_clone = query.clone();
 
-        join_set.spawn(search_substring_one_file(
-            file_id as u64,
-            reader,
-            file_size,
-            query_clone,
-        ));
+        match query {
+            QueryParam::Substring(ref value) => {
+                join_set.spawn(search_substring_one_file(
+                    file_id as u64,
+                    reader,
+                    file_size,
+                    value.clone(),
+                ));
+            },
+            QueryParam::Uuid(ref value) => {
+                join_set.spawn(search_uuid_one_file(
+                    file_id as u64,
+                    reader,
+                    file_size,
+                    value.clone(),
+                ));
+            },
+            _ => panic!("invalid mode"),
+        }
+            
     }
 
     let mut result: BTreeSet<(u64, u64)> = BTreeSet::new();
@@ -203,30 +239,7 @@ async fn search_substring_async(
     Ok(result)
 }
 
-async fn search_uuid_async(
-    file_sizes: Vec<usize>,
-    mut readers: Vec<AsyncReader>,
-    query: &str,
-    k: usize
-) -> Result<Vec<(u64, u64)>, LavaError> {
 
-    let mut result: Vec<(u64, u64)> = Vec::new();
-    let mut start_time = Instant::now();
-    let mut end_time = Instant::now();
-    for i in 0..readers.len() {
-
-        let this_result: Vec<usize> = FastTrie::query_with_reader(file_sizes[i], &mut readers[i],  query).await?;
-
-        result.extend(this_result.iter().map(|x| (i as u64, *x as u64)));
-        if result.len() >= k {
-            break;
-        }
-
-    }
-    
-    Ok(result)
-
-}
 
 async fn search_bm25_async(
     file_sizes: Vec<usize>,
@@ -573,7 +586,7 @@ pub async fn search_lava_uuid(
     reader_type: ReaderType,
 ) -> Result<Vec<(u64, u64)>, LavaError> {
     let (file_sizes, readers) = get_file_sizes_and_readers(&files, reader_type).await?;
-    search_uuid_async(file_sizes, readers, &query, k).await
+    search_generic_async(file_sizes, readers, QueryParam::Uuid(query), k).await
 }
 
 #[tokio::main]
@@ -624,7 +637,7 @@ pub async fn search_lava_substring(
     // println!("{:?}", result);
 
     let (file_sizes, readers) = get_file_sizes_and_readers(&files, reader_type).await?;
-    search_substring_async(file_sizes, readers, result, k).await
+    search_generic_async(file_sizes, readers, QueryParam::Substring(result), k).await
 }
 
 #[tokio::main]
