@@ -162,6 +162,28 @@ pub fn merge_lava_substring(
 }
 
 #[pyfunction]
+pub fn merge_lava_uuid(
+    py: Python,
+    condensed_lava_file: String,
+    lava_files: Vec<String>,
+    uid_offsets: Vec<u64>,
+    reader_type: Option<&PyString>,
+) -> Result<(), LavaError> {
+    let reader_type = reader_type.map(|x| x.to_string()).unwrap_or_default();
+
+    py.allow_threads(|| {
+        lava::parallel_merge_files(
+            condensed_lava_file,
+            lava_files,
+            uid_offsets,
+            2,
+            2,
+            reader_type.into(),
+        )
+    })
+}
+
+#[pyfunction]
 pub fn merge_lava_vector(
     py: Python,
     condensed_lava_file: String,

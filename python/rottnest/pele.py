@@ -10,36 +10,39 @@ import boto3
 from botocore.config import Config
 import os
 import pyarrow.compute as pac
-from pyarrow.fs import S3FileSystem
+from pyarrow.fs import S3FileSystem, LocalFileSystem
 from .nlp import query_expansion_keyword, query_expansion_llm
+
+def get_fs_from_file_path(filepath):
+
+    if filepath.startswith("s3://"):
+        if os.getenv('AWS_VIRTUAL_HOST_STYLE'):
+            try:
+                s3fs = S3FileSystem(endpoint_override = os.getenv('AWS_ENDPOINT_URL'), force_virtual_addressing = True )
+            except:
+                raise ValueError("Requires pyarrow >= 16.0.0 for virtual addressing.")
+        else:
+            s3fs = S3FileSystem(endpoint_override = os.getenv('AWS_ENDPOINT_URL'))
+    else:
+        s3fs = LocalFileSystem()
+
+    return s3fs
 
 def read_metadata_file(file_path: str):
 
-    # currently only support aws and s3 compatible things, this wrapper is temporary, eventually move 
-    # entirely to Rust
+    fs = get_fs_from_file_path(file_path)
+    return polars.from_arrow(pq.read_table(file_path, filesystem=fs))
 
-    if file_path.startswith("s3://"):
-        style = os.getenv("AWS_VIRTUAL_HOST_STYLE")
-        endpoint_url = os.getenv("AWS_ENDPOINT_URL")
-        if style:
-            s3 = boto3.client('s3', config = Config(s3 = {'addressing_style': 'virtual'}), endpoint_url = endpoint_url if endpoint_url else None)
-        else:
-            s3 = boto3.client('s3', endpoint_url = endpoint_url if endpoint_url else None)
-
-        obj = s3.get_object(Bucket=file_path.split("/")[2], Key="/".join(file_path.split("/")[3:]))
-        return polars.read_parquet(obj['Body'].read())
-    else:
-        return polars.read_parquet(file_path)
-
-def read_columns():
+def read_columns(file_path: str, ):
 
     try:
-        s3fs = S3FileSystem(endpoint_override = 'https://tos-s3-cn-beijing.volces.com', force_virtual_addressing = True)
+        s3fs = S3FileSystem(endpoint_override = os.getenv('AWS_VIRTUAL_HOST_STYLE'), force_virtual_addressing = True if os.getenv('AWS_VIRTUAL_HOST_STYLE') else False)
     except:
         raise ValueError("Requires pyarrow >= 16.0.0.")
 
-def index_file_bm25(file_path: str, column_name: str, name = None, tokenizer_file = None):
+def get_physical_layout(file_path: str, column_name: str, type = "str"):
 
+    assert type in {"str", "binary"}
     arrs, layout = rottnest.get_parquet_layout(column_name, file_path)
     arr = pyarrow.concat_arrays([i.cast(pyarrow.large_string()) for i in arrs])
     data_page_num_rows = np.array(layout.data_page_num_rows)
@@ -64,70 +67,35 @@ def index_file_bm25(file_path: str, column_name: str, name = None, tokenizer_fil
         }
     )
 
-    name = uuid.uuid4().hex if name is None else name
+    return arr, pyarrow.array(uid.astype(np.uint64)), file_data
 
+def index_file_bm25(file_path: str, column_name: str, name = None, tokenizer_file = None):
+
+    arr, uid, file_data = get_physical_layout(file_path, column_name)
+
+    name = uuid.uuid4().hex if name is None else name
     file_data.write_parquet(f"{name}.meta")
-    print(rottnest.build_lava_bm25(f"{name}.lava", arr, pyarrow.array(uid.astype(np.uint64)), tokenizer_file))
+    rottnest.build_lava_bm25(f"{name}.lava", arr, uid, tokenizer_file)
 
 def index_file_substring(file_path: str, column_name: str, name = None, tokenizer_file = None, token_skip_factor = None):
 
-    arrs, layout = rottnest.get_parquet_layout(column_name, file_path)
-    arr = pyarrow.concat_arrays([i.cast(pyarrow.large_string()) for i in arrs])
-    data_page_num_rows = np.array(layout.data_page_num_rows)
-    uid = np.repeat(np.arange(len(data_page_num_rows)), data_page_num_rows) + 1
+    arr, uid, file_data = get_physical_layout(file_path, column_name)
 
-    x = np.cumsum(np.hstack([[0],layout.data_page_num_rows[:-1]]))
-    y = np.repeat(x[np.cumsum(np.hstack([[0],layout.row_group_data_pages[:-1]])).astype(np.uint64)], layout.row_group_data_pages)
-    page_row_offsets_in_row_group = x - y
-
-    file_data = polars.from_dict({
-            "uid": np.arange(len(data_page_num_rows) + 1),
-            "file_path": [file_path] * (len(data_page_num_rows) + 1),
-            "column_name": [column_name] * (len(data_page_num_rows) + 1),
-            "data_page_offsets": [-1] + layout.data_page_offsets,
-            "data_page_sizes": [-1] + layout.data_page_sizes,
-            "dictionary_page_sizes": [-1] + layout.dictionary_page_sizes,
-            "row_groups": np.hstack([[-1] , np.repeat(np.arange(layout.num_row_groups), layout.row_group_data_pages)]),
-            "page_row_offset_in_row_group": np.hstack([[-1], page_row_offsets_in_row_group])
-        }
-    )
     name = uuid.uuid4().hex if name is None else name
-
     file_data.write_parquet(f"{name}.meta")
-    print(rottnest.build_lava_substring(f"{name}.lava", arr, pyarrow.array(uid.astype(np.uint64)), tokenizer_file, token_skip_factor))
-
+    rottnest.build_lava_substring(f"{name}.lava", arr, pyarrow.array(uid.astype(np.uint64)), tokenizer_file, token_skip_factor)
 
 def index_file_uuid(file_path: str, column_name: str, name = None):
 
-    arrs, layout = rottnest.get_parquet_layout(column_name, file_path)
-    arr = pyarrow.concat_arrays([i.cast(pyarrow.large_string()) for i in arrs])
-    data_page_num_rows = np.array(layout.data_page_num_rows)
-    uid = np.repeat(np.arange(len(data_page_num_rows)), data_page_num_rows) + 1
-
-    x = np.cumsum(np.hstack([[0],layout.data_page_num_rows[:-1]]))
-    y = np.repeat(x[np.cumsum(np.hstack([[0],layout.row_group_data_pages[:-1]])).astype(np.uint64)], layout.row_group_data_pages)
-    page_row_offsets_in_row_group = x - y
-
-    file_data = polars.from_dict({
-            "uid": np.arange(len(data_page_num_rows) + 1),
-            "file_path": [file_path] * (len(data_page_num_rows) + 1),
-            "column_name": [column_name] * (len(data_page_num_rows) + 1),
-            "data_page_offsets": [-1] + layout.data_page_offsets,
-            "data_page_sizes": [-1] + layout.data_page_sizes,
-            "dictionary_page_sizes": [-1] + layout.dictionary_page_sizes,
-            "row_groups": np.hstack([[-1] , np.repeat(np.arange(layout.num_row_groups), layout.row_group_data_pages)]),
-            "page_row_offset_in_row_group": np.hstack([[-1], page_row_offsets_in_row_group])
-        }
-    )
-    name = uuid.uuid4().hex if name is None else name
+    arr, uid, file_data = get_physical_layout(file_path, column_name)
 
     idx = pac.sort_indices(arr)
     arr = arr.take(idx)
-    uid = pyarrow.array(uid.astype(np.uint64)).take(idx)
+    uid = uid.take(idx)
 
+    name = uuid.uuid4().hex if name is None else name
     file_data.write_parquet(f"{name}.meta")
-    print(rottnest.build_lava_uuid(f"{name}.lava", arr, uid))
-
+    rottnest.build_lava_uuid(f"{name}.lava", arr, uid)
 
 def index_file_kmer(file_path: str, column_name: str, name = None, tokenizer_file = None):
 
@@ -156,7 +124,13 @@ def index_file_kmer(file_path: str, column_name: str, name = None, tokenizer_fil
     file_data.write_parquet(f"{name}.meta")
     print(rottnest.build_lava_kmer(f"{name}.lava", arr, pyarrow.array(uid.astype(np.uint64)), tokenizer_file))
 
-def index_file_vector(file_path: str, column_name: str, name = None):
+def index_file_vector(file_path: str, column_name: str, name = None, gpu = False):
+
+    try:
+        import faiss
+    except:
+        print("Please install faiss")
+        return
 
     arrs, layout = rottnest.get_parquet_layout(column_name, file_path)
     arr = pyarrow.concat_arrays([i.cast(pyarrow.large_binary()) for i in arrs])
@@ -188,28 +162,30 @@ def index_file_vector(file_path: str, column_name: str, name = None):
     
     print(rottnest.build_lava_vector(f"{name}.lava", arr, pyarrow.array(uid.astype(np.uint64))))
 
-def merge_index_bm25(new_index_name: str, index_names: List[str]):
+def merge_metadatas(new_index_name: str, index_names: List[str]):
     assert len(index_names) > 1
-
     # first read the metadata files and merge those
     metadatas = [read_metadata_file(f"{name}.meta")for name in index_names]
     metadata_lens = [len(metadata) for metadata in metadatas]
     offsets = np.cumsum([0] + metadata_lens)[:-1]
     metadatas = [metadata.with_columns(polars.col("uid") + offsets[i]) for i, metadata in enumerate(metadatas)]
-    rottnest.merge_lava_bm25(f"{new_index_name}.lava", [f"{name}.lava" for name in index_names], offsets)
     polars.concat(metadatas).write_parquet(f"{new_index_name}.meta")
+    return offsets
+
+def merge_index_bm25(new_index_name: str, index_names: List[str]):
+    
+    offsets = merge_metadatas(new_index_name, index_names)
+    rottnest.merge_lava_bm25(f"{new_index_name}.lava", [f"{name}.lava" for name in index_names], offsets)
+
+def merge_index_uuid(new_index_name: str, index_names: List[str]):
+    
+    offsets = merge_metadatas(new_index_name, index_names)
+    rottnest.merge_lava_uuid(f"{new_index_name}.lava", [f"{name}.lava" for name in index_names], offsets)
 
 def merge_index_substring(new_index_name: str, index_names: List[str]):
-    assert len(index_names) > 1
-
-    # first read the metadata files and merge those
-    metadatas = [read_metadata_file(f"{name}.meta")for name in index_names]
-    metadata_lens = [len(metadata) for metadata in metadatas]
-    offsets = np.cumsum([0] + metadata_lens)[:-1]
-    print(offsets)
-    metadatas = [metadata.with_columns(polars.col("uid") + offsets[i]) for i, metadata in enumerate(metadatas)]
+    
+    offsets = merge_metadatas(new_index_name, index_names)
     rottnest.merge_lava_substring(f"{new_index_name}.lava", [f"{name}.lava" for name in index_names], offsets)
-    polars.concat(metadatas).write_parquet(f"{new_index_name}.meta")
 
 def merge_index_vector(new_index_name: str, index_names: List[str]):
 
@@ -274,7 +250,6 @@ def search_index_uuid(indices: List[str], query: str, K: int):
     
     index_search_results = rottnest.search_lava_uuid([f"{index_name}.lava" for index_name in indices], query, K)
     print(index_search_results)
-    return
 
     if len(index_search_results) == 0:
         return None

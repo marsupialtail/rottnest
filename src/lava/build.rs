@@ -64,7 +64,7 @@ pub async fn build_lava_uuid(
             "Expects string array as first argument".to_string(),
         ))?;
 
-    let uid = uid
+    let uid: &arrow_array::PrimitiveArray<arrow::datatypes::UInt64Type> = uid
         .as_any()
         .downcast_ref::<UInt64Array>()
         .ok_or(LavaError::Parse(
@@ -88,14 +88,8 @@ pub async fn build_lava_uuid(
     }
 
     let root = BinaryTrieNode::build(&texts, &inds);
-    let serialized = bincode::serialize(&root).unwrap();
-    println!("original trie size: {}", serialized.len());
-    // let compressed = encode_all(&serialized[..], 10).unwrap();
-    // std::fs::write(output_file_name, compressed).unwrap();
-
     let fast_trie = FastTrie::new(root, Some(8));
     let serialized_fast_trie = fast_trie.serialize();
-    println!("fast trie size: {}", serialized_fast_trie.len());
     std::fs::write(output_file_name, serialized_fast_trie).unwrap();
 
     Ok(())

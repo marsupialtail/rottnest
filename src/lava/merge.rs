@@ -17,6 +17,7 @@ use crate::lava::constants::*;
 use crate::lava::error::LavaError;
 use crate::lava::fm_chunk::FMChunk;
 use crate::lava::plist::PListChunk;
+use crate::lava::trie::FastTrie;
 use std::collections::HashMap;
 
 use crate::vamana::{
@@ -188,12 +189,40 @@ impl PListChunkIterator {
     }
 }
 
+async fn merge_lava_uuid(
+    condensed_lava_file: &str,
+    lava_files: Vec<String>,
+    uid_offsets: Vec<u64>,
+    reader_type: ReaderType,
+) -> Result<(), LavaError> 
+{
+    // currently only support merging two files, but can support more in the future.
+    assert_eq!(lava_files.len(), 2);
+    assert_eq!(uid_offsets.len(), 2);
+    
+    let (file_size, mut reader) = get_file_size_and_reader(lava_files[0].clone(), reader_type.clone()).await?;
+    let buffer: bytes::Bytes = reader.read_range(0, file_size as u64).await?;
+    let mut fast_trie1 = FastTrie::deserialize(buffer.to_vec());
+
+    let (file_size, mut reader) = get_file_size_and_reader(lava_files[1].clone(), reader_type.clone()).await?;
+    let buffer: bytes::Bytes = reader.read_range(0, file_size as u64).await?;
+    let mut fast_trie2 = FastTrie::deserialize(buffer.to_vec());
+
+    fast_trie1.extend(&mut fast_trie2, uid_offsets[0] as usize, uid_offsets[1] as usize);
+
+    let serialized = fast_trie1.serialize();
+    let mut output_file = File::create(condensed_lava_file)?;
+    output_file.write(&serialized)?;
+
+    Ok(())
+}
+
 async fn merge_lava_bm25(
     condensed_lava_file: &str,
     lava_files: Vec<String>,
     uid_offsets: Vec<u64>,
     reader_type: ReaderType,
-) -> Result<(), LavaError> // hawaiian for lava condensation
+) -> Result<(), LavaError> 
 {
     // let mut builder = Fs::default();
     // let current_path = env::current_dir()?;
@@ -714,11 +743,11 @@ async fn async_parallel_merge_files(
     do_not_delete: BTreeSet<String>,
     uid_offsets: Vec<u64>,
     k: usize,
-    mode: usize, // 0 for bm25 1 for substring
+    mode: usize, // 0 for bm25 1 for substring 2 for uuid
     reader_type: ReaderType,
 ) -> Result<(), LavaError> {
-    assert!(mode == 1 || mode == 0);
-    if mode == 1 {
+    assert!(mode == 1 || mode == 0 || mode == 2);
+    if  mode == 2 || mode == 1 {
         assert_eq!(k, 2);
     }
 
@@ -777,24 +806,30 @@ async fn async_parallel_merge_files(
 
                     println!("mergin {:?}", file_chunk);
 
-                    if mode == 0 {
-                        merge_lava_bm25(
+                    let _ = match mode {
+                        0 =>  merge_lava_bm25(
                             &merged_filename,
                             file_chunk.to_vec(),
                             uid_chunk.to_vec(),
                             reader_type.clone(),
                         )
-                        .await
-                    } else {
-                        merge_lava_substring(
+                        .await, 
+                        1 => merge_lava_substring(
                             &merged_filename,
                             file_chunk.to_vec(),
                             uid_chunk.to_vec(),
                             reader_type.clone(),
                         )
-                        .await
-                    }
-                    .unwrap();
+                        .await, 
+                        2 => merge_lava_uuid(
+                            &merged_filename,
+                            file_chunk.to_vec(),
+                            uid_chunk.to_vec(),
+                            reader_type.clone(),
+                        )
+                        .await,
+                        _ => unreachable!(),
+                    }?;
 
                     // now go delete the input files
 
@@ -967,7 +1002,7 @@ pub async fn parallel_merge_files(
     files: Vec<String>,
     uid_offsets: Vec<u64>,
     k: usize,
-    mode: usize, // 0 for bm25 1 for substring
+    mode: usize, // 0 for bm25 1 for substring 2 for uuid
     reader_type: ReaderType,
 ) -> Result<(), LavaError> {
     let do_not_delete = BTreeSet::from_iter(files.clone().into_iter());

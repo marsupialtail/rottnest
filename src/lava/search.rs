@@ -215,14 +215,6 @@ async fn search_uuid_async(
     let mut end_time = Instant::now();
     for i in 0..readers.len() {
 
-        // let serialized_trie = readers[i].read_range(0, file_sizes[i] as u64).await?;
-        // let mut decompressor = Decoder::new(&serialized_trie[..]).unwrap();
-        // let mut decompressed_serialized_tokenizer: Vec<u8> = Vec::with_capacity(serialized_trie.len() as usize);
-        // decompressor.read_to_end(&mut decompressed_serialized_tokenizer).unwrap();
-        // let root: BinaryTrieNode<usize> = bincode::deserialize(&decompressed_serialized_tokenizer).unwrap();
-        // let this_result = root.query(query.as_bytes());
-    
-
         let this_result: Vec<usize> = FastTrie::query_with_reader(file_sizes[i], &mut readers[i],  query).await?;
 
         result.extend(this_result.iter().map(|x| (i as u64, *x as u64)));
