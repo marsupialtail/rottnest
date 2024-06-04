@@ -9,6 +9,7 @@ import numpy as np
 import boto3
 from botocore.config import Config
 import os
+import pyarrow.compute as pac
 from pyarrow.fs import S3FileSystem
 from .nlp import query_expansion_keyword, query_expansion_llm
 
@@ -68,7 +69,7 @@ def index_file_bm25(file_path: str, column_name: str, name = None, tokenizer_fil
     file_data.write_parquet(f"{name}.meta")
     print(rottnest.build_lava_bm25(f"{name}.lava", arr, pyarrow.array(uid.astype(np.uint64)), tokenizer_file))
 
-def index_file_substring(file_path: str, column_name: str, name = None, tokenizer_file = None):
+def index_file_substring(file_path: str, column_name: str, name = None, tokenizer_file = None, token_skip_factor = None):
 
     arrs, layout = rottnest.get_parquet_layout(column_name, file_path)
     arr = pyarrow.concat_arrays([i.cast(pyarrow.large_string()) for i in arrs])
@@ -93,7 +94,39 @@ def index_file_substring(file_path: str, column_name: str, name = None, tokenize
     name = uuid.uuid4().hex if name is None else name
 
     file_data.write_parquet(f"{name}.meta")
-    print(rottnest.build_lava_substring(f"{name}.lava", arr, pyarrow.array(uid.astype(np.uint64)), tokenizer_file))
+    print(rottnest.build_lava_substring(f"{name}.lava", arr, pyarrow.array(uid.astype(np.uint64)), tokenizer_file, token_skip_factor))
+
+
+def index_file_uuid(file_path: str, column_name: str, name = None):
+
+    arrs, layout = rottnest.get_parquet_layout(column_name, file_path)
+    arr = pyarrow.concat_arrays([i.cast(pyarrow.large_string()) for i in arrs])
+    data_page_num_rows = np.array(layout.data_page_num_rows)
+    uid = np.repeat(np.arange(len(data_page_num_rows)), data_page_num_rows) + 1
+
+    x = np.cumsum(np.hstack([[0],layout.data_page_num_rows[:-1]]))
+    y = np.repeat(x[np.cumsum(np.hstack([[0],layout.row_group_data_pages[:-1]])).astype(np.uint64)], layout.row_group_data_pages)
+    page_row_offsets_in_row_group = x - y
+
+    file_data = polars.from_dict({
+            "uid": np.arange(len(data_page_num_rows) + 1),
+            "file_path": [file_path] * (len(data_page_num_rows) + 1),
+            "column_name": [column_name] * (len(data_page_num_rows) + 1),
+            "data_page_offsets": [-1] + layout.data_page_offsets,
+            "data_page_sizes": [-1] + layout.data_page_sizes,
+            "dictionary_page_sizes": [-1] + layout.dictionary_page_sizes,
+            "row_groups": np.hstack([[-1] , np.repeat(np.arange(layout.num_row_groups), layout.row_group_data_pages)]),
+            "page_row_offset_in_row_group": np.hstack([[-1], page_row_offsets_in_row_group])
+        }
+    )
+    name = uuid.uuid4().hex if name is None else name
+
+    idx = pac.sort_indices(arr)
+    arr = arr.take(idx)
+    uid = pyarrow.array(uid.astype(np.uint64)).take(idx)
+
+    file_data.write_parquet(f"{name}.meta")
+    print(rottnest.build_lava_uuid(f"{name}.lava", arr, uid))
 
 
 def index_file_kmer(file_path: str, column_name: str, name = None, tokenizer_file = None):
@@ -236,6 +269,33 @@ def search_index_vector(indices: List[str], query: np.array, K: int):
     # result = pyarrow.table([result], names = ["text"])
     
     # return polars.from_arrow(result).filter(polars.col("text").str.to_lowercase().str.contains(query.lower()))
+
+def search_index_uuid(indices: List[str], query: str, K: int):
+    
+    index_search_results = rottnest.search_lava_uuid([f"{index_name}.lava" for index_name in indices], query, K)
+    print(index_search_results)
+    return
+
+    if len(index_search_results) == 0:
+        return None
+
+    uids = polars.from_dict({"file_id": [i[0] for i in index_search_results], "uid": [i[1] for i in index_search_results]})
+
+    metadatas = [read_metadata_file(f"{index_name}.meta").with_columns(polars.lit(i).alias("file_id").cast(polars.Int64)) for i, index_name in enumerate(indices)]
+    metadata = polars.concat(metadatas)
+    metadata = metadata.join(uids, on = ["file_id", "uid"])
+    
+    assert len(metadata["column_name"].unique()) == 1, "index is not allowed to span multiple column names"
+    column_name = metadata["column_name"].unique()[0]
+
+    result = pyarrow.chunked_array(rottnest.read_indexed_pages(column_name, metadata["file_path"].to_list(), metadata["row_groups"].to_list(),
+                                     metadata["data_page_offsets"].to_list(), metadata["data_page_sizes"].to_list(), metadata["dictionary_page_sizes"].to_list()))
+    result = pyarrow.table([result], names = [column_name])
+    
+    result =  polars.from_arrow(result).filter(polars.col(column_name) == query)
+
+    return result
+
 
 def search_index_substring(indices: List[str], query: str, K: int):
     

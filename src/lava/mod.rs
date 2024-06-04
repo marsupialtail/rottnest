@@ -5,7 +5,9 @@ mod fm_chunk;
 mod merge;
 mod plist;
 mod search;
+mod trie;
 
+pub use build::build_lava_uuid;
 pub use build::build_lava_bm25;
 pub use build::build_lava_kmer;
 pub use build::build_lava_substring;
@@ -19,3 +21,4 @@ pub use search::search_lava_bm25;
 pub use search::search_lava_substring;
 pub use search::search_lava_vector;
 pub use search::search_lava_vector_mem;
+pub use search::search_lava_uuid;

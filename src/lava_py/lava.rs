@@ -9,6 +9,7 @@ use ndarray::{Array2, Ix2};
 use numpy::{IntoPyArray, PyArray2, PyReadonlyArrayDyn};
 use pyo3::Py;
 
+
 #[pyfunction]
 pub fn search_lava_bm25(
     py: Python,
@@ -36,6 +37,19 @@ pub fn search_lava_substring(
     let reader_type = reader_type.map(|x| x.to_string()).unwrap_or_default();
 
     py.allow_threads(|| lava::search_lava_substring(files, query, k, reader_type.into()))
+}
+
+#[pyfunction]
+pub fn search_lava_uuid(
+    py: Python,
+    files: Vec<String>,
+    query: String,
+    k: usize,
+    reader_type: Option<&PyString>,
+) -> Result<Vec<(u64, u64)>, LavaError> {
+    let reader_type = reader_type.map(|x| x.to_string()).unwrap_or_default();
+
+    py.allow_threads(|| lava::search_lava_uuid(files, query, k, reader_type.into()))
 }
 
 #[pyfunction]
@@ -196,6 +210,26 @@ pub fn build_lava_bm25(
             tokenizer_file,
             Some(1.2),
             Some(0.75),
+        )
+    })
+}
+
+#[pyfunction]
+pub fn build_lava_uuid(
+    py: Python,
+    output_file_name: &PyString,
+    array: &PyAny,
+    uid: &PyAny,
+) -> Result<(), LavaError> {
+    let output_file_name = output_file_name.to_string();
+    let array = ArrayData::from_pyarrow(array)?;
+    let uid = ArrayData::from_pyarrow(uid)?;
+
+    py.allow_threads(|| {
+        lava::build_lava_uuid(
+            output_file_name,
+            array,
+            uid,
         )
     })
 }

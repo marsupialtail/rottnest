@@ -1,5 +1,6 @@
 use itertools::Itertools;
 use ndarray::Array2;
+use rayon::result;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::{
@@ -8,21 +9,22 @@ use std::{
 };
 use tokio::task::JoinSet;
 use zstd::stream::read::Decoder;
-
-use crate::formats::readers::{ClonableAsyncReader, ReaderType};
+use crate::lava::trie::BinaryTrieNode;
 use crate::lava::constants::*;
 use crate::lava::fm_chunk::FMChunk;
 use crate::lava::plist::PListChunk;
 use crate::vamana::vamana::VectorAccessMethod;
 use crate::vamana::{access::ReaderAccessMethodF32, access::InMemoryAccessMethodF32, EuclideanF32, IndexParams, VamanaIndex};
 use crate::{
-    formats::readers::{get_file_size_and_reader, get_file_sizes_and_readers, AsyncReader},
+    formats::readers::{get_file_size_and_reader, get_file_sizes_and_readers, AsyncReader, ClonableAsyncReader, ReaderType},
     lava::error::LavaError,
 };
-
+use std::time::Instant;
 use tokenizers::tokenizer::Tokenizer;
 
 use ordered_float::OrderedFloat;
+
+use super::trie::FastTrie;
 
 async fn get_tokenizer_async(
     mut readers: Vec<AsyncReader>,
@@ -199,6 +201,39 @@ async fn search_substring_async(
     let mut result: Vec<(u64, u64)> = result.into_iter().collect_vec();
     result.truncate(k);
     Ok(result)
+}
+
+async fn search_uuid_async(
+    file_sizes: Vec<usize>,
+    mut readers: Vec<AsyncReader>,
+    query: &str,
+    k: usize
+) -> Result<Vec<(u64, u64)>, LavaError> {
+
+    let mut result: Vec<(u64, u64)> = Vec::new();
+    let mut start_time = Instant::now();
+    let mut end_time = Instant::now();
+    for i in 0..readers.len() {
+
+        // let serialized_trie = readers[i].read_range(0, file_sizes[i] as u64).await?;
+        // let mut decompressor = Decoder::new(&serialized_trie[..]).unwrap();
+        // let mut decompressed_serialized_tokenizer: Vec<u8> = Vec::with_capacity(serialized_trie.len() as usize);
+        // decompressor.read_to_end(&mut decompressed_serialized_tokenizer).unwrap();
+        // let root: BinaryTrieNode<usize> = bincode::deserialize(&decompressed_serialized_tokenizer).unwrap();
+        // let this_result = root.query(query.as_bytes());
+    
+
+        let this_result: Vec<usize> = FastTrie::query_with_reader(file_sizes[i], &mut readers[i],  query).await?;
+
+        result.extend(this_result.iter().map(|x| (i as u64, *x as u64)));
+        if result.len() >= k {
+            break;
+        }
+
+    }
+    
+    Ok(result)
+
 }
 
 async fn search_bm25_async(
@@ -536,6 +571,17 @@ pub async fn search_lava_bm25(
 ) -> Result<Vec<(u64, u64)>, LavaError> {
     let (file_sizes, readers) = get_file_sizes_and_readers(&files, reader_type).await?;
     search_bm25_async(file_sizes, readers, query_tokens, query_weights, k).await
+}
+
+#[tokio::main]
+pub async fn search_lava_uuid(
+    files: Vec<String>,
+    query: String,
+    k: usize,
+    reader_type: ReaderType,
+) -> Result<Vec<(u64, u64)>, LavaError> {
+    let (file_sizes, readers) = get_file_sizes_and_readers(&files, reader_type).await?;
+    search_uuid_async(file_sizes, readers, &query, k).await
 }
 
 #[tokio::main]

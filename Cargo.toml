@@ -66,6 +66,7 @@ lz4_flex = { version = "0.11", default-features = false, features = [
 thrift = { version = "0.17.0" }
 itertools = "0.12.1"
 bit-vec = "0.6"
+bitvec = { version = "1.0.1", features = ["serde"] }
 rayon = "1.9.0"
 tokio-stream = "0.1.14"
 futures = "0.3"

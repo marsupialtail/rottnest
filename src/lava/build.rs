@@ -6,7 +6,7 @@ use tokenizers::tokenizer::Tokenizer;
 use byteorder::{WriteBytesExt, LittleEndian}; // You'll need the `byteorder` crate
 
 use bincode;
-
+use bytes;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
@@ -16,6 +16,7 @@ use std::io::Read;
 use crate::lava::constants::*;
 use crate::lava::error::LavaError;
 use crate::lava::plist::PListChunk;
+use crate::lava::trie::{FastTrie, BinaryTrieNode};
 use std::fs::File;
 use std::io::{Seek, SeekFrom, Write, BufWriter};
 use zstd::stream::encode_all;
@@ -44,6 +45,60 @@ fn get_tokenizer(tokenizer_file: Option<String>) -> Result<(Tokenizer, Vec<u8>),
     let compressed_tokenizer =
         encode_all(serialized_tokenizer.as_bytes(), 0).expect("Compression failed");
     Ok((tokenizer, compressed_tokenizer))
+}
+
+#[tokio::main]
+pub async fn build_lava_uuid(
+    output_file_name: String,
+    array: ArrayData,
+    uid: ArrayData,
+) -> Result<(), LavaError> {
+
+    let array = make_array(array);
+    // let uid = make_array(ArrayData::from_pyarrow(uid)?);
+    let uid = make_array(uid);
+    let array: &arrow_array::GenericByteArray<arrow_array::types::GenericStringType<i64>> = array
+        .as_any()
+        .downcast_ref::<LargeStringArray>()
+        .ok_or(LavaError::Parse(
+            "Expects string array as first argument".to_string(),
+        ))?;
+
+    let uid = uid
+        .as_any()
+        .downcast_ref::<UInt64Array>()
+        .ok_or(LavaError::Parse(
+            "Expects uint64 array as second argument".to_string(),
+        ))?;
+
+    if array.len() != uid.len() {
+        return Err(LavaError::Parse(
+            "The length of the array and the uid array must be the same".to_string(),
+        ));
+    }
+
+    let mut texts = Vec::with_capacity(array.len());
+    for i in 0..array.len() {
+        let text = array.value(i);
+        texts.push(text.as_bytes().to_vec());
+    }
+    let mut inds = Vec::with_capacity(array.len());
+    for i in 0..uid.len() {
+        inds.push(vec![uid.value(i) as usize]);
+    }
+
+    let root = BinaryTrieNode::build(&texts, &inds);
+    let serialized = bincode::serialize(&root).unwrap();
+    println!("original trie size: {}", serialized.len());
+    // let compressed = encode_all(&serialized[..], 10).unwrap();
+    // std::fs::write(output_file_name, compressed).unwrap();
+
+    let fast_trie = FastTrie::new(root, Some(8));
+    let serialized_fast_trie = fast_trie.serialize();
+    println!("fast trie size: {}", serialized_fast_trie.len());
+    std::fs::write(output_file_name, serialized_fast_trie).unwrap();
+
+    Ok(())
 }
 
 /*
