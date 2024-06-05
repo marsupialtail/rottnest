@@ -218,7 +218,7 @@ pub fn build_lava_bm25(
     array: &PyAny,
     uid: &PyAny,
     tokenizer_file: Option<&PyString>,
-) -> Result<(), LavaError> {
+) -> Result<Vec<(usize, usize)>, LavaError> {
     let output_file_name = output_file_name.to_string();
     let array = ArrayData::from_pyarrow(array)?;
     let uid = ArrayData::from_pyarrow(uid)?;
@@ -242,7 +242,7 @@ pub fn build_lava_uuid(
     output_file_name: &PyString,
     array: &PyAny,
     uid: &PyAny,
-) -> Result<(), LavaError> {
+) -> Result<Vec<(usize, usize)>, LavaError> {
     let output_file_name = output_file_name.to_string();
     let array = ArrayData::from_pyarrow(array)?;
     let uid = ArrayData::from_pyarrow(uid)?;
@@ -256,21 +256,21 @@ pub fn build_lava_uuid(
     })
 }
 
-#[pyfunction]
-pub fn build_lava_kmer(
-    py: Python,
-    output_file_name: &PyString,
-    array: &PyAny,
-    uid: &PyAny,
-    tokenizer_file: Option<&PyString>,
-) -> Result<(), LavaError> {
-    let output_file_name = output_file_name.to_string();
-    let array = ArrayData::from_pyarrow(array)?;
-    let uid = ArrayData::from_pyarrow(uid)?;
-    let tokenizer_file = tokenizer_file.map(|x| x.to_string());
+// #[pyfunction]
+// pub fn build_lava_kmer(
+//     py: Python,
+//     output_file_name: &PyString,
+//     array: &PyAny,
+//     uid: &PyAny,
+//     tokenizer_file: Option<&PyString>,
+// ) -> Result<(), LavaError> {
+//     let output_file_name = output_file_name.to_string();
+//     let array = ArrayData::from_pyarrow(array)?;
+//     let uid = ArrayData::from_pyarrow(uid)?;
+//     let tokenizer_file = tokenizer_file.map(|x| x.to_string());
 
-    py.allow_threads(|| lava::build_lava_kmer(output_file_name, array, uid, tokenizer_file))
-}
+//     py.allow_threads(|| lava::build_lava_kmer(output_file_name, array, uid, tokenizer_file))
+// }
 
 #[pyfunction]
 pub fn build_lava_substring(
@@ -280,7 +280,7 @@ pub fn build_lava_substring(
     uid: &PyAny,
     tokenizer_file: Option<&PyString>,
     token_skip_factor: Option<u32>,
-) -> Result<(), LavaError> {
+) -> Result<Vec<(usize, usize)>, LavaError> {
     let output_file_name = output_file_name.to_string();
     let array = ArrayData::from_pyarrow(array)?;
     let uid = ArrayData::from_pyarrow(uid)?;

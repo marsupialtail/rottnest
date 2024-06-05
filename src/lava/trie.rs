@@ -84,7 +84,7 @@ impl FastTrie {
 
     // structure is serialized trie | serialized trie | ... | serialized (lut, offsets) | metadata page offset
 
-    pub fn serialize(&self) -> Vec<u8> {
+    pub fn serialize(&self) -> (Vec<u8>, (usize, usize)) {
         let mut bytes: Vec<u8> = Vec::new();
         let mut offsets: Vec<usize> = vec![0];
 
@@ -106,10 +106,14 @@ impl FastTrie {
         let rehydrate_metadata: (BTreeMap<BitVec, (Vec<usize>, Option<usize>)>, Vec<usize>, usize) = bincode::deserialize(&serialized_metadata[..]).unwrap();
         println!("{} {}", rehydrate_metadata.0.len(), rehydrate_metadata.1.len());
 
+        let cache_start = bytes.len();
+        
         bytes.extend(compressed);
         bytes.extend(&(metadata_page_offset as u64).to_le_bytes());
 
-        bytes
+        let cache_end = bytes.len();
+        
+        (bytes, (cache_start, cache_end))
     }
 
     pub fn deserialize(bytes:Vec<u8>) -> Self {

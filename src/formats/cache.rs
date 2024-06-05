@@ -1,19 +1,39 @@
-/*
-The LRU Disk Cache caches AsyncReader's read_range requests. The key is the filename,
-*/
+use crate::{
+    formats::readers::{get_file_size_and_reader, get_reader, AsyncReader, ReaderType},
+    lava::error::LavaError,
+};
+use std::collections::BTreeMap;
+use std::io::Write;
 
-// use std::fs;
-// use std::io::{Read, Seek, SeekFrom, Write};
-// use std::path::Path;
+#[tokio::main]
+pub async fn populate_cache(
+    ranges: BTreeMap<String, Vec<(usize, usize)>>,
+    cache_dir: &str,
+    reader_type: ReaderType
+) -> Result<(), LavaError> {
 
-// struct LRUDiskCache {
+    let path = std::path::Path::new(cache_dir);
+    // find path/filename.cache
 
-// }
+    for (file_path, ranges) in &ranges {
+        let (_, mut reader) = get_file_size_and_reader(file_path.to_string(), reader_type.clone()).await?;
+        let cache_file = path.join(&file_path.split("/").last().unwrap());
+        let path = cache_file.with_extension("cache");
 
-// impl LRUDiskCache {
-//     pub fn new() -> Self {
-//         Self {}
-//     }
+        // check if exists
+        if ! path.exists() {
+            let mut regions: BTreeMap<(usize, usize), Vec<u8>> = BTreeMap::new();
+            for (from, to) in ranges {
+                let data = reader.read_range(*from as u64, *to as u64).await?;
+                regions.insert((*from, *to), data.to_vec());
+            }
 
-//     pub fn insert
-// }
+            let mut file = std::fs::File::create(path)?;
+            let bytes = bincode::serialize(&regions)?;
+            file.write_all(&bytes)?;
+        }
+        
+    }
+    Ok(())
+
+}

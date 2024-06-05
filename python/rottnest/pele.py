@@ -12,6 +12,7 @@ import os
 import pyarrow.compute as pac
 from pyarrow.fs import S3FileSystem, LocalFileSystem
 from .nlp import query_expansion_keyword, query_expansion_llm
+import json
 
 def get_fs_from_file_path(filepath):
 
@@ -30,7 +31,14 @@ def get_fs_from_file_path(filepath):
 
 def read_metadata_file(file_path: str):
 
-    return polars.from_arrow(pq.read_table(file_path, filesystem = get_fs_from_file_path(file_path)))
+    table = pq.read_table(file_path, filesystem = get_fs_from_file_path(file_path))
+
+    try:
+        cache_ranges = json.loads(table.schema.metadata[b'cache_ranges'].decode())
+    except:
+        cache_ranges = []
+
+    return polars.from_arrow(table), cache_ranges
 
 def read_columns(file_path: str, ):
 
@@ -82,23 +90,27 @@ def get_virtual_layout(file_path: str, column_name: str, key_column_name: str, t
     metadata = table.groupby("__uid__").agg([polars.col(key_column_name).min().alias("min"), polars.col(key_column_name).max().alias("max")]).sort("__uid__")
     return arr, uid, metadata
 
-def index_file_bm25(file_path: str, column_name: str, name = None, index_mode = "physical", tokenizer_file = None):
+def index_file_bm25(file_path: str, column_name: str, name = uuid.uuid4().hex, index_mode = "physical", tokenizer_file = None):
 
     arr, uid, file_data = get_physical_layout(file_path, column_name) if index_mode == "physical" else get_virtual_layout(file_path, column_name, "uid")
 
-    name = uuid.uuid4().hex if name is None else name
-    file_data.write_parquet(f"{name}.meta")
-    rottnest.build_lava_bm25(f"{name}.lava", arr, uid, tokenizer_file)
+    cache_ranges = rottnest.build_lava_bm25(f"{name}.lava", arr, uid, tokenizer_file)
 
-def index_file_substring(file_path: str, column_name: str, name = None, index_mode = "physical", tokenizer_file = None, token_skip_factor = None):
+    file_data = file_data.to_arrow()
+    file_data = file_data.replace_schema_metadata({"cache_ranges": json.dumps(cache_ranges)})
+    pq.write_table(file_data, f"{name}.meta", write_statistics = False, compression = 'zstd')
+
+def index_file_substring(file_path: str, column_name: str, name = uuid.uuid4().hex, index_mode = "physical", tokenizer_file = None, token_skip_factor = None):
 
     arr, uid, file_data = get_physical_layout(file_path, column_name) if index_mode == "physical" else get_virtual_layout(file_path, column_name, "uid")
 
-    name = uuid.uuid4().hex if name is None else name
-    file_data.write_parquet(f"{name}.meta")
-    rottnest.build_lava_substring(f"{name}.lava", arr, pyarrow.array(uid.astype(np.uint64)), tokenizer_file, token_skip_factor)
+    cache_ranges = rottnest.build_lava_substring(f"{name}.lava", arr, pyarrow.array(uid.astype(np.uint64)), tokenizer_file, token_skip_factor)
 
-def index_file_uuid(file_path: str, column_name: str, name = None, index_mode = "physical"):
+    file_data = file_data.to_arrow()
+    file_data = file_data.replace_schema_metadata({"cache_ranges": json.dumps(cache_ranges)})
+    pq.write_table(file_data, f"{name}.meta", write_statistics = False, compression = 'zstd')
+
+def index_file_uuid(file_path: str, column_name: str, name = uuid.uuid4().hex, index_mode = "physical"):
 
     arr, uid, file_data = get_physical_layout(file_path, column_name) if index_mode == "physical" else get_virtual_layout(file_path, column_name, "uid")
 
@@ -106,9 +118,11 @@ def index_file_uuid(file_path: str, column_name: str, name = None, index_mode = 
     arr = arr.take(idx)
     uid = uid.take(idx)
 
-    name = uuid.uuid4().hex if name is None else name
-    file_data.write_parquet(f"{name}.meta")
-    rottnest.build_lava_uuid(f"{name}.lava", arr, uid)
+    cache_ranges = rottnest.build_lava_uuid(f"{name}.lava", arr, uid)
+    
+    file_data = file_data.to_arrow()
+    file_data = file_data.replace_schema_metadata({"cache_ranges": json.dumps(cache_ranges)})
+    pq.write_table(file_data, f"{name}.meta", write_statistics = False, compression = 'zstd')
 
 def index_file_vector(file_path: str, column_name: str, name = None, gpu = False):
 
@@ -143,7 +157,7 @@ def index_file_vector(file_path: str, column_name: str, name = None, gpu = False
         }
     )
     name = uuid.uuid4().hex if name is None else name
-    file_data.write_parquet(f"{name}.meta")
+    file_data.write_parquet(f"{name}.meta", statistics=False)
 
     
     print(rottnest.build_lava_vector(f"{name}.lava", arr, pyarrow.array(uid.astype(np.uint64))))
@@ -151,11 +165,12 @@ def index_file_vector(file_path: str, column_name: str, name = None, gpu = False
 def merge_metadatas(new_index_name: str, index_names: List[str]):
     assert len(index_names) > 1
     # first read the metadata files and merge those
-    metadatas = [read_metadata_file(f"{name}.meta")for name in index_names]
+    # discard the cache ranges
+    metadatas = [read_metadata_file(f"{name}.meta")[0] for name in index_names]
     metadata_lens = [len(metadata) for metadata in metadatas]
     offsets = np.cumsum([0] + metadata_lens)[:-1]
     metadatas = [metadata.with_columns(polars.col("uid") + offsets[i]) for i, metadata in enumerate(metadatas)]
-    polars.concat(metadatas).write_parquet(f"{new_index_name}.meta")
+    polars.concat(metadatas).write_parquet(f"{new_index_name}.meta", statistics=False)
     return offsets
 
 def merge_index_bm25(new_index_name: str, index_names: List[str]):
@@ -178,7 +193,7 @@ def merge_index_vector(new_index_name: str, index_names: List[str]):
     assert len(index_names) > 1
 
     # first read the metadata files and merge those
-    metadatas = [read_metadata_file(f"{index_name}.meta").with_columns(polars.lit(i).alias("file_id").cast(polars.Int64)) for i, index_name in enumerate(index_names)]
+    metadatas = [read_metadata_file(f"{index_name}.meta").with_columns(polars.lit(i).alias("file_id").cast(polars.Int64))[0] for i, index_name in enumerate(index_names)]
     column_names = set(metadata["column_name"].unique()[0] for metadata in metadatas)
     assert len(column_names) == 1, "index is not allowed to span multiple column names"
     column_name = column_names.pop()
@@ -193,7 +208,7 @@ def merge_index_vector(new_index_name: str, index_names: List[str]):
     import pdb;pdb.set_trace()
 
     rottnest.merge_lava_vector(f"{new_index_name}.lava", [f"{name}.lava" for name in index_names], vectors)
-    polars.concat(metadatas).write_parquet(f"{new_index_name}.meta")
+    polars.concat(metadatas).write_parquet(f"{new_index_name}.meta", statistics=False)
 
 def search_index_vector_mem(indices: List[str], arr: np.array, queries: List[np.array], K: int):
     
@@ -232,10 +247,9 @@ def search_index_vector(indices: List[str], query: np.array, K: int):
     
     # return polars.from_arrow(result).filter(polars.col("text").str.to_lowercase().str.contains(query.lower()))
 
-def get_result_from_index_result(indices: List[str], index_search_results: list):
+def get_result_from_index_result(metadata: polars.DataFrame, index_search_results: list):
     uids = polars.from_dict({"file_id": [i[0] for i in index_search_results], "uid": [i[1] for i in index_search_results]})
-    metadatas = [read_metadata_file(f"{index_name}.meta").with_columns(polars.lit(i).alias("file_id").cast(polars.Int64)) for i, index_name in enumerate(indices)]
-    metadata = polars.concat(metadatas)
+
     file_metadatas = metadata.filter(polars.col("metadata_bytes").is_not_null()).group_by("file_path").first().select(["file_path", "metadata_bytes"])
     metadata = metadata.join(uids, on = ["file_id", "uid"])
     
@@ -251,6 +265,15 @@ def get_result_from_index_result(indices: List[str], index_search_results: list)
     return result, column_name
 
 def search_index_uuid(indices: List[str], query: str, K: int):
+
+    metadatas = [read_metadata_file(f"{index_name}.meta") for i, index_name in enumerate(indices)]
+    metadata = polars.concat([f[0].with_columns(polars.lit(i).alias("file_id").cast(polars.Int64)) for i, f in enumerate(metadatas)])
+    cache_dir = os.getenv("ROTTNEST_CACHE_DIR")
+    if cache_dir:
+        cache_ranges = {f"{indices[i]}.lava": f[1] for i, f in enumerate(metadatas) if len(f[1]) > 0}
+        cached_files = list(cache_ranges.keys())
+        ranges = [[tuple(k) for k in cache_ranges[f]] for f in cached_files]
+        rottnest.populate_cache(cached_files, ranges, cache_dir, "aws")
     
     index_search_results = rottnest.search_lava_uuid([f"{index_name}.lava" for index_name in indices], query, K)
     print(index_search_results)
@@ -258,13 +281,22 @@ def search_index_uuid(indices: List[str], query: str, K: int):
     if len(index_search_results) == 0:
         return None
 
-    result, column_name = get_result_from_index_result(indices, index_search_results)
+    result, column_name = get_result_from_index_result(metadata, index_search_results)
     result =  polars.from_arrow(result).filter(polars.col(column_name) == query)
 
     return result
 
 
 def search_index_substring(indices: List[str], query: str, K: int):
+
+    metadatas = [read_metadata_file(f"{index_name}.meta") for i, index_name in enumerate(indices)]
+    metadata = polars.concat([f[0].with_columns(polars.lit(i).alias("file_id").cast(polars.Int64)) for i, f in enumerate(metadatas)])
+    cache_dir = os.getenv("ROTTNEST_CACHE_DIR")
+    if cache_dir:
+        cache_ranges = {f"{indices[i]}.lava": f[1] for i, f in enumerate(metadatas) if len(f[1]) > 0}
+        cached_files = list(cache_ranges.keys())
+        ranges = [[tuple(k) for k in cache_ranges[f]] for f in cached_files]
+        rottnest.populate_cache(cached_files, ranges, cache_dir, "aws")
     
     index_search_results = rottnest.search_lava_substring([f"{index_name}.lava" for index_name in indices], query, K)
     print(index_search_results)
@@ -272,7 +304,7 @@ def search_index_substring(indices: List[str], query: str, K: int):
     if len(index_search_results) == 0:
         return None
 
-    result, column_name = get_result_from_index_result(indices, index_search_results)
+    result, column_name = get_result_from_index_result(metadata, index_search_results)
     result =  polars.from_arrow(result).filter(polars.col(column_name).str.to_lowercase().str.contains(query.lower()))
 
     return result
@@ -303,7 +335,7 @@ def search_index_bm25(indices: List[str], query: str, K: int, query_expansion = 
     
     uids = polars.from_dict({"file_id": [i[0] for i in index_search_results], "uid": [i[1] for i in index_search_results]})
 
-    metadatas = [read_metadata_file(f"{index_name}.meta").with_columns(polars.lit(i).alias("file_id").cast(polars.Int64)) for i, index_name in enumerate(indices)]
+    metadatas = [read_metadata_file(f"{index_name}.meta")[0].with_columns(polars.lit(i).alias("file_id").cast(polars.Int64)) for i, index_name in enumerate(indices)]
     metadata = polars.concat(metadatas)
     metadata = metadata.join(uids, on = ["file_id", "uid"])
     

@@ -1,4 +1,4 @@
-use crate::formats::{parquet, MatchResult, ParquetLayout};
+use crate::formats::{parquet, cache, MatchResult, ParquetLayout};
 use crate::lava::error::LavaError;
 use bytes::Bytes;
 use arrow::array::ArrayData;
@@ -7,8 +7,8 @@ use pyo3::prelude::*;
 use pyo3::{pyfunction, types::PyString};
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
-use pyo3::types::{PyDict, PyBytes};
-use std::collections::HashMap;
+use pyo3::types::{PyDict, PyBytes, PyTuple, PyList};
+use std::collections::{BTreeMap, HashMap};
 
 #[pyclass]
 pub struct ParquetLayoutWrapper {
@@ -93,6 +93,29 @@ impl From<MatchResult> for MatchResultWrapper {
             matched: match_result.matched,
         }
     }
+}
+
+
+#[pyfunction]
+pub fn populate_cache(
+    py: Python,
+    filenames: Vec<&PyString>,
+    ranges: Vec<Vec<(usize, usize)>>,
+    cache_dir: &PyString,
+    reader_type: Option<&PyString>
+)  -> Result<(), LavaError> {
+
+    let reader_type = reader_type.map(|x| x.to_string()).unwrap_or_default();
+    let cache_dir = cache_dir.to_string();
+   
+    let mut range_dict: BTreeMap<String, Vec<(usize, usize)>> = BTreeMap::new();
+    for (i, filename) in filenames.iter().enumerate() {
+        range_dict.insert(filename.to_string(), ranges[i].clone());
+    }
+
+    py.allow_threads(|| {
+        cache::populate_cache(range_dict, &cache_dir, reader_type.into())
+    })
 }
 
 #[pyfunction]

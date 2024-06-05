@@ -52,7 +52,7 @@ pub async fn build_lava_uuid(
     output_file_name: String,
     array: ArrayData,
     uid: ArrayData,
-) -> Result<(), LavaError> {
+) -> Result<Vec<(usize, usize)>, LavaError> {
 
     let array = make_array(array);
     // let uid = make_array(ArrayData::from_pyarrow(uid)?);
@@ -88,11 +88,11 @@ pub async fn build_lava_uuid(
     }
 
     let root = BinaryTrieNode::build(&texts, &inds);
-    let fast_trie = FastTrie::new(root, Some(8));
-    let serialized_fast_trie = fast_trie.serialize();
+    let fast_trie = FastTrie::new(root, Some(16));
+    let (serialized_fast_trie, (cache_start, cache_end)) = fast_trie.serialize();
     std::fs::write(output_file_name, serialized_fast_trie).unwrap();
 
-    Ok(())
+    Ok(vec![(cache_start, cache_end)])
 }
 
 /*
@@ -111,7 +111,7 @@ pub async fn build_lava_bm25(
     tokenizer_file: Option<String>,
     k1: Option<f32>,
     b: Option<f32>,
-) -> Result<(), LavaError> {
+) -> Result<Vec<(usize, usize)>, LavaError> {
     // if k1 and b are not provided, set them to default value
     let k1: f32 = k1.unwrap_or(1.2);
     let b: f32 = b.unwrap_or(0.75);
@@ -244,7 +244,9 @@ pub async fn build_lava_bm25(
     file.write_all(&(compressed_plist_offsets_offset as u64).to_le_bytes())?;
     file.write_all(&(encodings.len() as u64).to_le_bytes())?;
 
-    Ok(())
+    let cache_end = file.seek(SeekFrom::Current(0))? as usize;
+
+    Ok(vec![(compressed_term_dict_offset as usize, cache_end)])
 }
 
 #[tokio::main]
@@ -430,7 +432,7 @@ pub async fn build_lava_substring(
     uid: ArrayData,
     tokenizer_file: Option<String>,
     token_skip_factor: Option<u32>,
-) -> Result<(), LavaError> {
+) -> Result<Vec<(usize, usize)>, LavaError> {
     let array = make_array(array);
     // let uid = make_array(ArrayData::from_pyarrow(uid)?);
     let uid = make_array(uid);
@@ -657,6 +659,8 @@ pub async fn build_lava_substring(
         posting_list_offsets.push(file.seek(SeekFrom::Current(0))? as usize);
     }
 
+    let cache_start = file.seek(SeekFrom::Current(0))? as usize;
+
     let fm_chunk_offsets_offset = file.seek(SeekFrom::Current(0))? as usize;
     let serialized_fm_chunk_offsets = bincode::serialize(&fm_chunk_offsets)?;
     let compressed_fm_chunk_offsets =
@@ -680,7 +684,9 @@ pub async fn build_lava_substring(
     file.write_all(&(total_counts_offset as u64).to_le_bytes())?;
     file.write_all(&(bwt.len() as u64).to_le_bytes())?;
 
-    Ok(())
+    let cache_end = file.seek(SeekFrom::Current(0))? as usize;
+
+    Ok(vec![(cache_start, cache_end)])
 }
 
 #[tokio::main]
