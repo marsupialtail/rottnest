@@ -443,6 +443,7 @@ pub async fn read_indexed_pages_async(
 
     let metadatas = match file_metadatas {
         Some(file_metadatas) => {
+            println!("Using provided file metadatas");
             let mut metadatas: HashMap<String, ParquetMetaData> = HashMap::new();
             for (key, value) in file_metadatas.into_iter() {
                 metadatas.insert(key, decode_metadata(value.to_byte_slice()).map_err(LavaError::from).unwrap());

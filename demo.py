@@ -14,7 +14,7 @@ import rottnest
 
 # rottnest.index_file_uuid("a.parquet", "hashes", "index0")
 # rottnest.index_file_uuid("b.parquet", "hashes", "index1")
-rottnest.merge_index_uuid("merged_index", ["index0", "index1"])
+# rottnest.merge_index_uuid("merged_index", ["index0", "index1"])
 result = rottnest.search_index_uuid(["index1"], "93b9f88dd22cb168cbc45000fcb05042cd1fc4b5602a56e70383fa26d33d21b08d004d78a7c97a463331da2da64e88f5546367e16e5fd2539bb9b8796ffffc7f", K = 10)
 print(result)
 result = rottnest.search_index_uuid(["merged_index"], "650243a9024fe6595fa953e309c722c225cb2fae1f70c74364917eb901bcdce1f9a878d22345a8576a201646b6da815ebd6397cfd313447ee3a548259f63825a", K = 10)

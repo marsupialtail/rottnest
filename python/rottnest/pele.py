@@ -30,21 +30,18 @@ def get_fs_from_file_path(filepath):
 
 def read_metadata_file(file_path: str):
 
-    fs = get_fs_from_file_path(file_path)
-    return polars.from_arrow(pq.read_table(file_path, filesystem=fs))
+    return polars.from_arrow(pq.read_table(file_path, filesystem = get_fs_from_file_path(file_path)))
 
 def read_columns(file_path: str, ):
 
-    try:
-        s3fs = S3FileSystem(endpoint_override = os.getenv('AWS_VIRTUAL_HOST_STYLE'), force_virtual_addressing = True if os.getenv('AWS_VIRTUAL_HOST_STYLE') else False)
-    except:
-        raise ValueError("Requires pyarrow >= 16.0.0.")
+    fs = get_fs_from_file_path(file_path)
+    return pq.read_table(file_path, filesystem=fs)
 
 def get_physical_layout(file_path: str, column_name: str, type = "str"):
 
     assert type in {"str", "binary"}
     arrs, layout = rottnest.get_parquet_layout(column_name, file_path)
-    arr = pyarrow.concat_arrays([i.cast(pyarrow.large_string()) for i in arrs])
+    arr = pyarrow.concat_arrays([i.cast(pyarrow.large_string() if type == 'str' else pyarrow.large_binary()) for i in arrs])
     data_page_num_rows = np.array(layout.data_page_num_rows)
     uid = np.repeat(np.arange(len(data_page_num_rows)), data_page_num_rows) + 1
 
@@ -59,6 +56,10 @@ def get_physical_layout(file_path: str, column_name: str, type = "str"):
             "uid": np.arange(len(data_page_num_rows) + 1),
             "file_path": [file_path] * (len(data_page_num_rows) + 1),
             "column_name": [column_name] * (len(data_page_num_rows) + 1),
+            # TODO: figure out a better way to handle this. Currently this is definitely not a bottleneck. Write ampl factor is almost 10x
+            # writing just one row followed by a bunch of Nones don't help, likely because it's already smart enough to do dict encoding.
+            # but we should probably still do this to save memory once loaded in!
+            "metadata_bytes": [layout.metadata_bytes]  + [None] * (len(data_page_num_rows)),
             "data_page_offsets": [-1] + layout.data_page_offsets,
             "data_page_sizes": [-1] + layout.data_page_sizes,
             "dictionary_page_sizes": [-1] + layout.dictionary_page_sizes,
@@ -69,25 +70,37 @@ def get_physical_layout(file_path: str, column_name: str, type = "str"):
 
     return arr, pyarrow.array(uid.astype(np.uint64)), file_data
 
-def index_file_bm25(file_path: str, column_name: str, name = None, tokenizer_file = None):
+def get_virtual_layout(file_path: str, column_name: str, key_column_name: str, type = "str", stride = 500):
 
-    arr, uid, file_data = get_physical_layout(file_path, column_name)
+    fs = get_fs_from_file_path(file_path)
+    table = pq.read_table(file_path, filesystem=fs, columns = [key_column_name, column_name])
+    table = table.with_row_count('__row_count__').with_columns((polars.col('__row_count__') // stride).alias('__uid__'))
+
+    arr = table[column_name].to_arrow().cast(pyarrow.large_string() if type == 'str' else pyarrow.large_binary())
+    uid = table['__uid__'].to_arrow().cast(pyarrow.uint64())
+
+    metadata = table.groupby("__uid__").agg([polars.col(key_column_name).min().alias("min"), polars.col(key_column_name).max().alias("max")]).sort("__uid__")
+    return arr, uid, metadata
+
+def index_file_bm25(file_path: str, column_name: str, name = None, index_mode = "physical", tokenizer_file = None):
+
+    arr, uid, file_data = get_physical_layout(file_path, column_name) if index_mode == "physical" else get_virtual_layout(file_path, column_name, "uid")
 
     name = uuid.uuid4().hex if name is None else name
     file_data.write_parquet(f"{name}.meta")
     rottnest.build_lava_bm25(f"{name}.lava", arr, uid, tokenizer_file)
 
-def index_file_substring(file_path: str, column_name: str, name = None, tokenizer_file = None, token_skip_factor = None):
+def index_file_substring(file_path: str, column_name: str, name = None, index_mode = "physical", tokenizer_file = None, token_skip_factor = None):
 
-    arr, uid, file_data = get_physical_layout(file_path, column_name)
+    arr, uid, file_data = get_physical_layout(file_path, column_name) if index_mode == "physical" else get_virtual_layout(file_path, column_name, "uid")
 
     name = uuid.uuid4().hex if name is None else name
     file_data.write_parquet(f"{name}.meta")
     rottnest.build_lava_substring(f"{name}.lava", arr, pyarrow.array(uid.astype(np.uint64)), tokenizer_file, token_skip_factor)
 
-def index_file_uuid(file_path: str, column_name: str, name = None):
+def index_file_uuid(file_path: str, column_name: str, name = None, index_mode = "physical"):
 
-    arr, uid, file_data = get_physical_layout(file_path, column_name)
+    arr, uid, file_data = get_physical_layout(file_path, column_name) if index_mode == "physical" else get_virtual_layout(file_path, column_name, "uid")
 
     idx = pac.sort_indices(arr)
     arr = arr.take(idx)
@@ -96,33 +109,6 @@ def index_file_uuid(file_path: str, column_name: str, name = None):
     name = uuid.uuid4().hex if name is None else name
     file_data.write_parquet(f"{name}.meta")
     rottnest.build_lava_uuid(f"{name}.lava", arr, uid)
-
-def index_file_kmer(file_path: str, column_name: str, name = None, tokenizer_file = None):
-
-    arrs, layout = rottnest.get_parquet_layout(column_name, file_path)
-    arr = pyarrow.concat_arrays([i.cast(pyarrow.large_string()) for i in arrs])
-    data_page_num_rows = np.array(layout.data_page_num_rows)
-    uid = np.repeat(np.arange(len(data_page_num_rows)), data_page_num_rows) + 1
-
-    x = np.cumsum(np.hstack([[0],layout.data_page_num_rows[:-1]]))
-    y = np.repeat(x[np.cumsum(np.hstack([[0],layout.row_group_data_pages[:-1]])).astype(np.uint64)], layout.row_group_data_pages)
-    page_row_offsets_in_row_group = x - y
-
-    file_data = polars.from_dict({
-            "uid": np.arange(len(data_page_num_rows) + 1),
-            "file_path": [file_path] * (len(data_page_num_rows) + 1),
-            "column_name": [column_name] * (len(data_page_num_rows) + 1),
-            "data_page_offsets": [-1] + layout.data_page_offsets,
-            "data_page_sizes": [-1] + layout.data_page_sizes,
-            "dictionary_page_sizes": [-1] + layout.dictionary_page_sizes,
-            "row_groups": np.hstack([[-1] , np.repeat(np.arange(layout.num_row_groups), layout.row_group_data_pages)]),
-            "page_row_offset_in_row_group": np.hstack([[-1], page_row_offsets_in_row_group])
-        }
-    )
-    name = uuid.uuid4().hex if name is None else name
-
-    file_data.write_parquet(f"{name}.meta")
-    print(rottnest.build_lava_kmer(f"{name}.lava", arr, pyarrow.array(uid.astype(np.uint64)), tokenizer_file))
 
 def index_file_vector(file_path: str, column_name: str, name = None, gpu = False):
 
@@ -246,6 +232,24 @@ def search_index_vector(indices: List[str], query: np.array, K: int):
     
     # return polars.from_arrow(result).filter(polars.col("text").str.to_lowercase().str.contains(query.lower()))
 
+def get_result_from_index_result(indices: List[str], index_search_results: list):
+    uids = polars.from_dict({"file_id": [i[0] for i in index_search_results], "uid": [i[1] for i in index_search_results]})
+    metadatas = [read_metadata_file(f"{index_name}.meta").with_columns(polars.lit(i).alias("file_id").cast(polars.Int64)) for i, index_name in enumerate(indices)]
+    metadata = polars.concat(metadatas)
+    file_metadatas = metadata.filter(polars.col("metadata_bytes").is_not_null()).group_by("file_path").first().select(["file_path", "metadata_bytes"])
+    metadata = metadata.join(uids, on = ["file_id", "uid"])
+    
+    assert len(metadata["column_name"].unique()) == 1, "index is not allowed to span multiple column names"
+    column_name = metadata["column_name"].unique()[0]
+
+    file_metadatas = {d["file_path"]: d["metadata_bytes"] for d in file_metadatas.to_dicts()}
+
+    result = pyarrow.chunked_array(rottnest.read_indexed_pages(column_name, metadata["file_path"].to_list(), metadata["row_groups"].to_list(),
+                                     metadata["data_page_offsets"].to_list(), metadata["data_page_sizes"].to_list(), metadata["dictionary_page_sizes"].to_list(),
+                                     "aws", file_metadatas))
+    result = pyarrow.table([result], names = [column_name])
+    return result, column_name
+
 def search_index_uuid(indices: List[str], query: str, K: int):
     
     index_search_results = rottnest.search_lava_uuid([f"{index_name}.lava" for index_name in indices], query, K)
@@ -254,19 +258,7 @@ def search_index_uuid(indices: List[str], query: str, K: int):
     if len(index_search_results) == 0:
         return None
 
-    uids = polars.from_dict({"file_id": [i[0] for i in index_search_results], "uid": [i[1] for i in index_search_results]})
-
-    metadatas = [read_metadata_file(f"{index_name}.meta").with_columns(polars.lit(i).alias("file_id").cast(polars.Int64)) for i, index_name in enumerate(indices)]
-    metadata = polars.concat(metadatas)
-    metadata = metadata.join(uids, on = ["file_id", "uid"])
-    
-    assert len(metadata["column_name"].unique()) == 1, "index is not allowed to span multiple column names"
-    column_name = metadata["column_name"].unique()[0]
-
-    result = pyarrow.chunked_array(rottnest.read_indexed_pages(column_name, metadata["file_path"].to_list(), metadata["row_groups"].to_list(),
-                                     metadata["data_page_offsets"].to_list(), metadata["data_page_sizes"].to_list(), metadata["dictionary_page_sizes"].to_list()))
-    result = pyarrow.table([result], names = [column_name])
-    
+    result, column_name = get_result_from_index_result(indices, index_search_results)
     result =  polars.from_arrow(result).filter(polars.col(column_name) == query)
 
     return result
@@ -280,22 +272,9 @@ def search_index_substring(indices: List[str], query: str, K: int):
     if len(index_search_results) == 0:
         return None
 
-    uids = polars.from_dict({"file_id": [i[0] for i in index_search_results], "uid": [i[1] for i in index_search_results]})
+    result, column_name = get_result_from_index_result(indices, index_search_results)
+    result =  polars.from_arrow(result).filter(polars.col(column_name).str.to_lowercase().str.contains(query.lower()))
 
-    metadatas = [read_metadata_file(f"{index_name}.meta").with_columns(polars.lit(i).alias("file_id").cast(polars.Int64)) for i, index_name in enumerate(indices)]
-    metadata = polars.concat(metadatas)
-    metadata = metadata.join(uids, on = ["file_id", "uid"])
-    
-    assert len(metadata["column_name"].unique()) == 1, "index is not allowed to span multiple column names"
-    column_name = metadata["column_name"].unique()[0]
-
-    result = pyarrow.chunked_array(rottnest.read_indexed_pages(column_name, metadata["file_path"].to_list(), metadata["row_groups"].to_list(),
-                                     metadata["data_page_offsets"].to_list(), metadata["data_page_sizes"].to_list(), metadata["dictionary_page_sizes"].to_list()))
-    result = pyarrow.table([result], names = ["text"])
-    
-    result =  polars.from_arrow(result).filter(polars.col("text").str.to_lowercase().str.contains(query.lower()))
-
-    import pdb; pdb.set_trace()
     return result
 
 def search_index_bm25(indices: List[str], query: str, K: int, query_expansion = "bge", quality_factor = 0.2, expansion_tokens = 20, cache_dir = None, reader_type = None):

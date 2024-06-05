@@ -386,7 +386,7 @@ impl<T: Clone + AddAssign> BinaryTrieNode<T> {
         let mut node = self;
         let mut results = Vec::new();
         for i in 0..query.len() * 8 {
-            println!("{}", i);
+            // println!("{}", i);
             if !get_bit(i) {
                 if node.left.is_none() {
                     break;
