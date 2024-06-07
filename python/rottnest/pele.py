@@ -31,7 +31,7 @@ def get_fs_from_file_path(filepath):
 
 def read_metadata_file(file_path: str):
 
-    table = pq.read_table(file_path, filesystem = get_fs_from_file_path(file_path))
+    table = pq.read_table(file_path.lstrip("s3://"), filesystem = get_fs_from_file_path(file_path))
 
     try:
         cache_ranges = json.loads(table.schema.metadata[b'cache_ranges'].decode())
@@ -124,43 +124,102 @@ def index_file_uuid(file_path: str, column_name: str, name = uuid.uuid4().hex, i
     file_data = file_data.replace_schema_metadata({"cache_ranges": json.dumps(cache_ranges)})
     pq.write_table(file_data, f"{name}.meta", write_statistics = False, compression = 'zstd')
 
-def index_file_vector(file_path: str, column_name: str, name = None, gpu = False):
+def index_file_vector(file_path: str, column_name: str, name = uuid.uuid4().hex, dtype = 'f32', index_mode = "physical", gpu = False):
 
     try:
         import faiss
+        from tqdm import tqdm
+        import zstandard as zstd
     except:
-        print("Please install faiss")
+        print("Please pip install faiss zstandard tqdm")
         return
-
-    arrs, layout = rottnest.get_parquet_layout(column_name, file_path)
-    arr = pyarrow.concat_arrays([i.cast(pyarrow.large_binary()) for i in arrs])
-    # convert arr into numpy
-    arr = np.vstack([np.frombuffer(i, dtype = np.float32) for i in arr.to_pylist()])
-
-    data_page_num_rows = np.array(layout.data_page_num_rows)
-    uid = np.repeat(np.arange(len(data_page_num_rows)), data_page_num_rows) 
-
-    x = np.cumsum(np.hstack([[0],layout.data_page_num_rows[:-1]]))
-    y = np.repeat(x[np.cumsum(np.hstack([[0],layout.row_group_data_pages[:-1]])).astype(np.uint64)], layout.row_group_data_pages)
-    page_row_offsets_in_row_group = x - y
-
-    file_data = polars.from_dict({
-            "uid": np.arange(len(data_page_num_rows)),
-            "file_path": [file_path] * (len(data_page_num_rows)),
-            "column_name": [column_name] * (len(data_page_num_rows)),
-            "data_page_offsets": layout.data_page_offsets,
-            "data_page_sizes":  layout.data_page_sizes,
-            "dictionary_page_sizes": layout.dictionary_page_sizes,
-            "row_groups": np.repeat(np.arange(layout.num_row_groups), layout.row_group_data_pages),
-            "page_row_offset_in_row_group": page_row_offsets_in_row_group,
-            "data_page_rows": data_page_num_rows
-        }
-    )
-    name = uuid.uuid4().hex if name is None else name
-    file_data.write_parquet(f"{name}.meta", statistics=False)
-
     
-    print(rottnest.build_lava_vector(f"{name}.lava", arr, pyarrow.array(uid.astype(np.uint64))))
+    assert dtype == 'f32'
+    dtype_size = 4
+
+    arr, uid, file_data = get_physical_layout(file_path, column_name, type = "binary") if index_mode == "physical" else get_virtual_layout(file_path, column_name, "uid", type = "binary")
+    uid = uid.to_numpy()
+
+    # arr will be a array of largebinary, we need to convert it into numpy, time for some arrow ninja
+    buffers = arr.buffers()
+    offsets = np.frombuffer(buffers[1], dtype = np.uint64)
+    diffs = np.unique(offsets[1:] - offsets[:-1])
+    assert len(diffs) == 1, "vectors have different length!"
+    dim = diffs.item() // dtype_size
+    x = np.frombuffer(buffers[2], dtype = np.float32).reshape(len(arr), dim)
+
+    kmeans = faiss.Kmeans(128, len(arr) // 10_000, niter=30, verbose=True, gpu = gpu)
+    kmeans.train(x)
+    centroids = kmeans.centroids
+
+    pqer = faiss.ProductQuantizer(dim, 32, 8)
+    pqer.train(x)
+    codes = pqer.compute_codes(x)
+
+    batch_size = 10_000
+
+    posting_lists = [[] for _ in range(len(arr) // 10_000)]
+    codes_lists = [[] for _ in range(len(arr) // 10_000)]
+
+    for i in tqdm(range(len(arr) // batch_size)):
+        batch = x[i * batch_size:(i + 1) * batch_size]
+
+        distances = -np.sum(centroids ** 2, axis=1, keepdims=True).T + 2 * np.dot(batch, centroids.T)
+        indices = np.argpartition(-distances, kth=20, axis=1)[:, :20]
+        sorted_indices = np.argsort(-distances[np.arange(distances.shape[0])[:, None], indices], axis=1)
+        indices = indices[np.arange(indices.shape[0])[:, None], sorted_indices]     
+
+        closest_centroids = list(indices[:,0])
+        # closest2_centroids = list(indices[:,1])
+
+        for k in range(batch_size):
+            # TODO: this uses UID! Just a warning. because gemv is fast even on lowly CPUs for final reranking.
+            posting_lists[closest_centroids[k]].append(uid[i * batch_size + k])
+            codes_lists[closest_centroids[k]].append(codes[i * batch_size + k])
+    
+    f = open(f"{name}.lava", "wb")
+    centroid_offsets = [0]
+
+    compressor = zstd.ZstdCompressor(level = 10)
+    for i in range(len(posting_lists)):
+        posting_lists[i] = np.array(posting_lists[i]).astype(np.uint32)
+        codes_lists[i] = np.vstack(codes_lists[i]).reshape((-1))
+        my_bytes = np.array([len(posting_lists[i])]).astype(np.uint32).tobytes()
+        my_bytes += posting_lists[i].tobytes()
+        my_bytes += codes_lists[i].tobytes()
+        # compressed = compressor.compress(my_bytes)
+        f.write(my_bytes)
+        centroid_offsets.append(f.tell())
+
+    # now time for the cacheable metadata page
+    # pq_index, centroids, centroid_offsets
+
+    cache_start = f.tell()
+
+    offsets = [cache_start]
+    faiss.write_ProductQuantizer(pqer, f"tmp.pq")
+    # read the bytes back in 
+    pq_index_bytes = open("tmp.pq", "rb").read()
+    os.remove("tmp.pq")
+    f.write(pq_index_bytes)
+    offsets.append(f.tell())
+
+    centroid_offset_bytes = compressor.compress(np.array(centroid_offsets).astype(np.uint64).tobytes())
+    f.write(centroid_offset_bytes)
+    offsets.append(f.tell())
+
+    centroid_vectors_bytes = compressor.compress(centroids.astype(np.float32).tobytes())
+    f.write(centroid_vectors_bytes)
+    offsets.append(f.tell())
+
+    f.write(np.array(offsets).astype(np.uint64).tobytes())
+
+    cache_end = f.tell()
+
+    file_data = file_data.to_arrow()
+    file_data = file_data.replace_schema_metadata({"cache_ranges": json.dumps([(cache_start, cache_end)])})
+    pq.write_table(file_data, f"{name}.meta", write_statistics = False, compression = 'zstd')
+
 
 def merge_metadatas(new_index_name: str, index_names: List[str]):
     assert len(index_names) > 1
@@ -190,62 +249,7 @@ def merge_index_substring(new_index_name: str, index_names: List[str]):
 
 def merge_index_vector(new_index_name: str, index_names: List[str]):
 
-    assert len(index_names) > 1
-
-    # first read the metadata files and merge those
-    metadatas = [read_metadata_file(f"{index_name}.meta").with_columns(polars.lit(i).alias("file_id").cast(polars.Int64))[0] for i, index_name in enumerate(index_names)]
-    column_names = set(metadata["column_name"].unique()[0] for metadata in metadatas)
-    assert len(column_names) == 1, "index is not allowed to span multiple column names"
-    column_name = column_names.pop()
-
-    vectors = [pyarrow.chunked_array(rottnest.read_indexed_pages(column_name, metadata["file_path"].to_list(), metadata["row_groups"].to_list(),
-                                     metadata["data_page_offsets"].to_list(), metadata["data_page_sizes"].to_list(), metadata["dictionary_page_sizes"].to_list()))
-                for metadata in metadatas]
-    
-
-    vectors = [np.vstack([np.frombuffer(i, dtype = np.float32) for i in arr.to_pylist()]) for arr in vectors]
-
-    import pdb;pdb.set_trace()
-
-    rottnest.merge_lava_vector(f"{new_index_name}.lava", [f"{name}.lava" for name in index_names], vectors)
-    polars.concat(metadatas).write_parquet(f"{new_index_name}.meta", statistics=False)
-
-def search_index_vector_mem(indices: List[str], arr: np.array, queries: List[np.array], K: int):
-    
-    index_search_results = rottnest.search_lava_vector_mem([f"{index_name}.lava" for index_name in indices], arr, queries, K)
-    # print(index_search_results)
-    return index_search_results
-
-def search_index_vector(indices: List[str], query: np.array, K: int):
-    
-    metadatas = [read_metadata_file(f"{index_name}.meta").with_columns(polars.lit(i).alias("file_id").cast(polars.Int64)) for i, index_name in enumerate(indices)]
-    data_page_rows = [np.cumsum(np.hstack([[0] , np.array(metadata["data_page_rows"])])) for metadata in metadatas]
-    uid_to_metadata = [[(a,b,c,d,e) for a,b,c,d,e in zip(metadata["file_path"], metadata["row_groups"], metadata["data_page_offsets"], 
-                                                        metadata["data_page_sizes"], metadata["dictionary_page_sizes"])] for metadata in metadatas]
-    
-    metadata = polars.concat(metadatas)
-    assert len(metadata["column_name"].unique()) == 1, "index is not allowed to span multiple column names"
-    column_name = metadata["column_name"].unique()[0]
-
-    index_search_results, vectors = rottnest.search_lava_vector([f"{index_name}.lava" for index_name in indices], column_name, data_page_rows, uid_to_metadata, query, K)
-    
-    # import pdb; pdb.set_trace()
-    return index_search_results
-    # print(index_search_results)
-    # print(vectors)
-    
-    # if len(index_search_results) == 0:
-    #     return None
-
-    # uids = polars.from_dict({"file_id": [i[0] for i in index_search_results], "uid": [i[1] for i in index_search_results]})
-
-    # metadata = metadata.join(uids, on = ["file_id", "uid"])
-
-    # result = pyarrow.chunked_array(rottnest.read_indexed_pages(column_name, metadata["file_path"].to_list(), metadata["row_groups"].to_list(),
-    #                                  metadata["data_page_offsets"].to_list(), metadata["data_page_sizes"].to_list(), metadata["dictionary_page_sizes"].to_list()))
-    # result = pyarrow.table([result], names = ["text"])
-    
-    # return polars.from_arrow(result).filter(polars.col("text").str.to_lowercase().str.contains(query.lower()))
+    offsets = merge_metadatas(new_index_name, index_names)
 
 def get_result_from_index_result(metadata: polars.DataFrame, index_search_results: list):
     uids = polars.from_dict({"file_id": [i[0] for i in index_search_results], "uid": [i[1] for i in index_search_results]})
@@ -264,8 +268,7 @@ def get_result_from_index_result(metadata: polars.DataFrame, index_search_result
     result = pyarrow.table([result], names = [column_name])
     return result, column_name
 
-def search_index_uuid(indices: List[str], query: str, K: int):
-
+def get_metadata_and_populate_cache(indices: List[str]):
     metadatas = [read_metadata_file(f"{index_name}.meta") for i, index_name in enumerate(indices)]
     metadata = polars.concat([f[0].with_columns(polars.lit(i).alias("file_id").cast(polars.Int64)) for i, f in enumerate(metadatas)])
     cache_dir = os.getenv("ROTTNEST_CACHE_DIR")
@@ -274,6 +277,12 @@ def search_index_uuid(indices: List[str], query: str, K: int):
         cached_files = list(cache_ranges.keys())
         ranges = [[tuple(k) for k in cache_ranges[f]] for f in cached_files]
         rottnest.populate_cache(cached_files, ranges, cache_dir, "aws")
+
+    return metadata
+
+def search_index_uuid(indices: List[str], query: str, K: int):
+
+    metadata = get_metadata_and_populate_cache(indices)
     
     index_search_results = rottnest.search_lava_uuid([f"{index_name}.lava" for index_name in indices], query, K)
     print(index_search_results)
@@ -289,14 +298,7 @@ def search_index_uuid(indices: List[str], query: str, K: int):
 
 def search_index_substring(indices: List[str], query: str, K: int):
 
-    metadatas = [read_metadata_file(f"{index_name}.meta") for i, index_name in enumerate(indices)]
-    metadata = polars.concat([f[0].with_columns(polars.lit(i).alias("file_id").cast(polars.Int64)) for i, f in enumerate(metadatas)])
-    cache_dir = os.getenv("ROTTNEST_CACHE_DIR")
-    if cache_dir:
-        cache_ranges = {f"{indices[i]}.lava": f[1] for i, f in enumerate(metadatas) if len(f[1]) > 0}
-        cached_files = list(cache_ranges.keys())
-        ranges = [[tuple(k) for k in cache_ranges[f]] for f in cached_files]
-        rottnest.populate_cache(cached_files, ranges, cache_dir, "aws")
+    metadata = get_metadata_and_populate_cache(indices)
     
     index_search_results = rottnest.search_lava_substring([f"{index_name}.lava" for index_name in indices], query, K)
     print(index_search_results)
@@ -308,6 +310,10 @@ def search_index_substring(indices: List[str], query: str, K: int):
     result =  polars.from_arrow(result).filter(polars.col(column_name).str.to_lowercase().str.contains(query.lower()))
 
     return result
+
+def search_index_vector(indices: List[str], query: np.array, K: int):
+
+    pass
 
 def search_index_bm25(indices: List[str], query: str, K: int, query_expansion = "bge", quality_factor = 0.2, expansion_tokens = 20, cache_dir = None, reader_type = None):
 

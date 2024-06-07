@@ -194,7 +194,7 @@ async fn merge_lava_uuid(
     lava_files: Vec<String>,
     uid_offsets: Vec<u64>,
     reader_type: ReaderType,
-) -> Result<(), LavaError> 
+) -> Result<Vec<(usize, usize)>, LavaError> 
 {
     // currently only support merging two files, but can support more in the future.
     assert_eq!(lava_files.len(), 2);
@@ -210,11 +210,11 @@ async fn merge_lava_uuid(
 
     fast_trie1.extend(&mut fast_trie2, uid_offsets[0] as usize, uid_offsets[1] as usize);
 
-    let (serialized, _) = fast_trie1.serialize();
+    let (serialized, (cache_start, cache_end)) = fast_trie1.serialize();
     let mut output_file = File::create(condensed_lava_file)?;
     output_file.write(&serialized)?;
 
-    Ok(())
+    Ok(vec![(cache_start, cache_end)])
 }
 
 async fn merge_lava_bm25(
@@ -222,7 +222,7 @@ async fn merge_lava_bm25(
     lava_files: Vec<String>,
     uid_offsets: Vec<u64>,
     reader_type: ReaderType,
-) -> Result<(), LavaError> 
+) -> Result<Vec<(usize, usize)>, LavaError> 
 {
     // let mut builder = Fs::default();
     // let current_path = env::current_dir()?;
@@ -375,7 +375,8 @@ async fn merge_lava_bm25(
     output_file.write(&(compressed_term_dict_offset as u64).to_le_bytes())?;
     output_file.write(&(compressed_plist_offsets_offset as u64).to_le_bytes())?;
     output_file.write(&(total_num_documents as u64).to_le_bytes())?;
-    Ok(())
+    
+    Ok(vec![(compressed_term_dict_offset as usize, output_file.seek(SeekFrom::Current(0))? as usize)])
 }
 
 async fn compute_interleave(
@@ -454,7 +455,7 @@ async fn merge_lava_substring(
     lava_files: Vec<String>,
     uid_offsets: Vec<u64>,
     reader_type: ReaderType,
-) -> Result<(), LavaError> {
+) -> Result<Vec<(usize, usize)>, LavaError> {
     // first merge the tokenizer, then merge the fm indices then merge the posting lists.
     // let mut builder = Fs::default();
     // let current_path = env::current_dir()?;
@@ -642,6 +643,8 @@ async fn merge_lava_substring(
         posting_list_offsets.push(output_file.seek(SeekFrom::Current(0))? as usize);
     }
 
+    let cache_start = output_file.seek(SeekFrom::Current(0))? as usize;
+
     let fm_chunk_offsets_offset = output_file.seek(SeekFrom::Current(0))? as usize;
     let serialized_fm_chunk_offsets = bincode::serialize(&fm_chunk_offsets)?;
     let compressed_fm_chunk_offsets =
@@ -665,7 +668,7 @@ async fn merge_lava_substring(
     output_file.write_all(&(total_counts_offset as u64).to_le_bytes())?;
     output_file.write_all(&(bwt_output.len() as u64).to_le_bytes())?;
 
-    Ok(())
+    Ok(vec![(cache_start, output_file.seek(SeekFrom::Current(0))? as usize)])
 }
 
 async fn merge_lava_vector(
@@ -800,13 +803,13 @@ async fn async_parallel_merge_files(
                 let do_not_delete_clone = do_not_delete.clone();
                 let reader_type = reader_type.clone();
 
-                let task = tokio::spawn(async move {
+                let task: tokio::task::JoinHandle<Vec<(usize, usize)>> = tokio::spawn(async move {
                     let my_uuid = uuid::Uuid::new_v4();
                     let merged_filename = my_uuid.to_string(); // Define this function based on your requirements
 
                     println!("mergin {:?}", file_chunk);
 
-                    let _ = match mode {
+                    let cache_ranges: Vec<(usize, usize)> = match mode {
                         0 =>  merge_lava_bm25(
                             &merged_filename,
                             file_chunk.to_vec(),
@@ -829,7 +832,7 @@ async fn async_parallel_merge_files(
                         )
                         .await,
                         _ => unreachable!(),
-                    }?;
+                    }.unwrap();
 
                     // now go delete the input files
 
@@ -843,17 +846,17 @@ async fn async_parallel_merge_files(
                     // no race condition since everybody pushes the same value to new_uid_offsets_clone
                     merged_files_clone.lock().unwrap().push(merged_filename);
                     new_uid_offsets_clone.lock().unwrap().push(0);
-                    Result::<(), LavaError>::Ok(())
+                    cache_ranges
                 });
 
                 tasks.push(task);
             }
 
             // Wait for all tasks to complete
-            let _: Vec<_> = futures::future::join_all(tasks)
+            let cache_ranges: Vec<Vec<(usize, usize)>> = futures::future::join_all(tasks)
                 .await
                 .into_iter()
-                .collect::<Result<_, _>>()
+                .collect::<Result<Vec<_>, _>>()
                 .unwrap();
 
             // Extract the merged files for the next level of merging
