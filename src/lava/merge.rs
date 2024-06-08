@@ -1,3 +1,4 @@
+use arrow::datatypes::ToByteSlice;
 use async_recursion::async_recursion;
 use bincode;
 use bit_vec::BitVec;
@@ -188,6 +189,7 @@ impl PListChunkIterator {
         Ok(())
     }
 }
+
 
 async fn merge_lava_uuid(
     condensed_lava_file: &str,
@@ -431,13 +433,8 @@ async fn compute_interleave(
 
         // interleave_iterations += 1;
         // println!(
-        //     "{} {} ",
+        //     "{}  ",
         //     interleave_iterations,
-        //     interleave
-        //         .iter()
-        //         .zip(new_interleave.iter())
-        //         .filter(|&(a_bit, b_bit)| a_bit != b_bit)
-        //         .count()
         // );
 
         if new_interleave == interleave {
