@@ -13,6 +13,9 @@ import pyarrow.compute as pac
 from pyarrow.fs import S3FileSystem, LocalFileSystem
 from .nlp import query_expansion_keyword, query_expansion_llm
 import json
+import time
+import daft
+from concurrent.futures import ThreadPoolExecutor
 
 def get_fs_from_file_path(filepath):
 
@@ -29,6 +32,15 @@ def get_fs_from_file_path(filepath):
 
     return s3fs
 
+def get_daft_io_config_from_file_path(filepath):
+    
+    if filepath.startswith("s3://"):
+        fs = daft.io.IOConfig(s3 = daft.io.S3Config(force_virtual_addressing = (True if os.getenv('AWS_VIRTUAL_HOST_STYLE') else False), endpoint_override = os.getenv('AWS_ENDPOINT_URL')))
+    else:
+        fs = daft.io.IOConfig()
+
+    return fs
+
 def read_metadata_file(file_path: str):
 
     table = pq.read_table(file_path.lstrip("s3://"), filesystem = get_fs_from_file_path(file_path))
@@ -40,10 +52,17 @@ def read_metadata_file(file_path: str):
 
     return polars.from_arrow(table), cache_ranges
 
-def read_columns(file_path: str, ):
+def read_columns(file_paths: list, row_groups: list, row_nr: list[list]):
 
-    fs = get_fs_from_file_path(file_path)
-    return pq.read_table(file_path, filesystem=fs)
+    def read_parquet_file(file, row_group, row_nr):
+        f = pq.ParquetFile(file.lstrip("s3://"), filesystem=get_fs_from_file_path(file))
+        return f.read_row_group(row_group, columns=['id']).take(row_nr)
+
+    with ThreadPoolExecutor(max_workers=os.cpu_count()) as executor:  # Control the number of parallel threads
+        results = list(executor.map(read_parquet_file, file_paths, row_groups, row_nr))
+    
+    return pyarrow.concat_tables(results)
+
 
 def get_physical_layout(file_path: str, column_name: str, type = "str"):
 
@@ -252,8 +271,8 @@ def merge_index_vector(new_index_name: str, index_names: List[str]):
     offsets = merge_metadatas(new_index_name, index_names)
 
 def get_result_from_index_result(metadata: polars.DataFrame, index_search_results: list):
+    
     uids = polars.from_dict({"file_id": [i[0] for i in index_search_results], "uid": [i[1] for i in index_search_results]})
-
     file_metadatas = metadata.filter(polars.col("metadata_bytes").is_not_null()).group_by("file_path").first().select(["file_path", "metadata_bytes"])
     metadata = metadata.join(uids, on = ["file_id", "uid"])
     
@@ -262,11 +281,18 @@ def get_result_from_index_result(metadata: polars.DataFrame, index_search_result
 
     file_metadatas = {d["file_path"]: d["metadata_bytes"] for d in file_metadatas.to_dicts()}
 
-    result = pyarrow.chunked_array(rottnest.read_indexed_pages(column_name, metadata["file_path"].to_list(), metadata["row_groups"].to_list(),
+    result = rottnest.read_indexed_pages(column_name, metadata["file_path"].to_list(), metadata["row_groups"].to_list(),
                                      metadata["data_page_offsets"].to_list(), metadata["data_page_sizes"].to_list(), metadata["dictionary_page_sizes"].to_list(),
-                                     "aws", file_metadatas))
-    result = pyarrow.table([result], names = [column_name])
-    return result, column_name
+                                     "aws", file_metadatas)
+
+    row_group_rownr = [pyarrow.array(np.arange(metadata['page_row_offset_in_row_group'][i], metadata['page_row_offset_in_row_group'][i] + len(arr))) for i, arr in enumerate(result)]
+    
+    metadata_key = [pyarrow.array(np.ones(len(arr)).astype(np.uint32) * i) for i, arr in enumerate(result)]
+    
+    result = pyarrow.table([pyarrow.chunked_array(result), pyarrow.chunked_array(row_group_rownr), 
+                            pyarrow.chunked_array(metadata_key)], names = [column_name, '__row_group_rownr__', '__metadata_key__'])
+    
+    return result, column_name, metadata.with_row_count('__metadata_key__')
 
 def get_metadata_and_populate_cache(indices: List[str]):
     metadatas = [read_metadata_file(f"{index_name}.meta") for i, index_name in enumerate(indices)]
@@ -290,7 +316,7 @@ def search_index_uuid(indices: List[str], query: str, K: int):
     if len(index_search_results) == 0:
         return None
 
-    result, column_name = get_result_from_index_result(metadata, index_search_results)
+    result, column_name, metadata = get_result_from_index_result(metadata, index_search_results)
     result =  polars.from_arrow(result).filter(polars.col(column_name) == query)
 
     return result
@@ -306,15 +332,94 @@ def search_index_substring(indices: List[str], query: str, K: int):
     if len(index_search_results) == 0:
         return None
 
-    result, column_name = get_result_from_index_result(metadata, index_search_results)
+    result, column_name, metadata = get_result_from_index_result(metadata, index_search_results)
     result =  polars.from_arrow(result).filter(polars.col(column_name).str.to_lowercase().str.contains(query.lower()))
 
     return result
 
-def search_index_vector(indices: List[str], query: np.array, K: int):
+def search_index_vector(indices: List[str], query: np.array, K: int, columns = [], nprobes = 500, refine = 500):
 
-    pass
+    import time
+    try:
+        import faiss
+    except:
+        print("Please pip install faiss")
+        return
 
+    metadata = get_metadata_and_populate_cache(indices)
+    
+    # uids and codes are list of lists, where each sublist corresponds to an index. pq is a list of bytes
+    # length is the same as the list of indices
+    start = time.time()
+    results = rottnest.search_lava_vector([f"{index_name}.lava" for index_name in indices], query, nprobes)
+    print("INDEX SEARCH TIME", time.time() - start)
+
+    file_ids = []
+    uids = []
+    codes = []
+
+    start = time.time()
+    for i, result in enumerate(results):
+        if result is None:
+            continue
+        else:
+            f = open("tmp.pq", "wb")
+            f.write(result[1].tobytes())
+            pq = faiss.read_ProductQuantizer("tmp.pq")
+            # os.remove("tmp.pq")
+
+            for arr in result[0]:
+                plist_length = np.frombuffer(arr[:4], dtype = np.uint32).item()
+                plist = np.frombuffer(arr[4: plist_length * 4 + 4], dtype = np.uint32)
+                this_codes = np.frombuffer(arr[plist_length * 4 + 4:], dtype = np.uint8).reshape((plist_length, -1))
+                
+                decoded = pq.decode(this_codes)
+                this_norms = np.linalg.norm(decoded - query, axis = 1).argsort()[:refine]
+                codes.append(decoded[this_norms])
+                uids.append(plist[this_norms])
+                file_ids.append(np.ones(len(this_norms)) * i)
+    
+    file_ids = np.hstack(file_ids).astype(np.int64)
+    uids = np.hstack(uids).astype(np.int64)
+    codes = np.vstack(codes)
+    fp_rerank = np.linalg.norm(query - codes, axis = 1).argsort()[:refine]
+    print("PQ COMPUTE TIME", time.time() - start)
+
+    file_ids = file_ids[fp_rerank]
+    uids = uids[fp_rerank]
+
+    # there could be redundancies here, since the uid is pointed to the page. two high ranked codes could be in the same page
+
+    index_search_results = list(set([(file_id, uid) for file_id, uid in zip(file_ids, uids)]))
+
+    start = time.time()
+    result, column_name, metadata = get_result_from_index_result(metadata, index_search_results)
+    print("RESULT TIME", time.time() - start)
+
+    buffers = result[column_name].combine_chunks().buffers()
+
+    if type(result[column_name][0]) == pyarrow.lib.BinaryScalar:
+        offsets = np.frombuffer(buffers[1], dtype = np.uint32)
+    elif type(result[column_name][0]) == pyarrow.lib.LargeBinaryScalar:
+        offsets = np.frombuffer(buffers[1], dtype = np.uint64)
+    diffs = np.unique(offsets[1:] - offsets[:-1])
+    assert len(diffs) == 1, "vectors have different length!"
+    dim = diffs.item() // 4
+    vecs = np.frombuffer(buffers[2], dtype = np.float32).reshape(len(result), dim)
+    results = np.linalg.norm(query - vecs, axis = 1).argsort()[:K]
+    result = polars.from_arrow(result)[results].join(metadata.select(["__metadata_key__", "file_path", "row_groups"]), on = "__metadata_key__", how = "left")
+
+    if columns != []:
+        grouped = result.groupby(["file_path", "row_groups"]).agg([polars.col('__metadata_key__'), polars.col('__row_group_rownr__')])
+        collected_results = polars.from_arrow(read_columns(grouped["file_path"].to_list(), grouped["row_groups"].to_list(), grouped["__row_group_rownr__"].to_list()))
+        unnested_metadata_key = grouped['__metadata_key__'].explode()
+        unnested_row_group_rownr = grouped['__row_group_rownr__'].explode()
+        collected_results = collected_results.with_columns([unnested_metadata_key, unnested_row_group_rownr])
+        result = result.join(collected_results, on = ["__metadata_key__", "__row_group_rownr__"], how = "left")
+
+    return result.select(columns + [column_name])
+
+    
 def search_index_bm25(indices: List[str], query: str, K: int, query_expansion = "bge", quality_factor = 0.2, expansion_tokens = 20, cache_dir = None, reader_type = None):
 
     assert query_expansion in {"bge", "openai", "keyword", "none"}

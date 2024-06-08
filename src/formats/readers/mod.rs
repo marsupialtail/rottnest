@@ -252,7 +252,6 @@ pub async fn get_file_size_and_reader(
     Ok((file_size, reader))
 }
 
-
 pub async fn get_reader(
     file: String,
     reader_type: ReaderType,

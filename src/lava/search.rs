@@ -1,5 +1,5 @@
 use itertools::Itertools;
-use ndarray::Array2;
+use ndarray::{concatenate, stack, Array1, Array2, Axis};
 use rayon::result;
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -23,12 +23,16 @@ use std::time::Instant;
 use tokenizers::tokenizer::Tokenizer;
 
 use ordered_float::OrderedFloat;
+use byteorder::{ByteOrder, LittleEndian, ReadBytesExt};
 
 use super::trie::FastTrie;
+use std::cmp::Ordering;
+use std::io::{self, Cursor};
 
 enum QueryParam {
     Substring(Vec<u32>),
-    Uuid(String)
+    Uuid(String),
+    Vector(Vec<f32>)
 }
 
 async fn get_tokenizer_async(
@@ -401,171 +405,6 @@ async fn search_bm25_async(
     Ok(plist_result)
 }
 
-
-
-async fn search_vector_mem_async(
-    file_sizes: Vec<usize>,
-    mut readers: Vec<AsyncReader>,
-    array: Array2<f32>,
-    queries: &Vec<Vec<f32>>,
-    k: usize,
-    reader_type: ReaderType,
-) -> Result<Vec<Vec<usize>>, LavaError> {
-    
-    let mut reader_access_methods: Vec<InMemoryAccessMethodF32> = vec![];
-
-    let mut indices: Vec<VamanaIndex<f32, EuclideanF32, _>> = vec![];
-
-    for i in 0..readers.len() {
-        let bytes = readers[i].read_range(0, file_sizes[i] as u64).await?;
-        // let num_points = u64::from_le_bytes(bytes[0..8].try_into().unwrap());
-        // let dim = u64::from_le_bytes(bytes[8..16].try_into().unwrap());
-        let start = u64::from_le_bytes(bytes[16..24].try_into().unwrap());
-        let compressed_nlist = &bytes[24..];
-
-        let mut decompressor = Decoder::new(&compressed_nlist[..])?;
-        let mut serialized_nlist: Vec<u8> = Vec::with_capacity(compressed_nlist.len() as usize);
-        decompressor.read_to_end(&mut serialized_nlist)?;
-        let nlist: Array2<usize> = bincode::deserialize(&serialized_nlist).unwrap();
-
-        let reader_access_method = InMemoryAccessMethodF32 { data: array.clone() };
-        reader_access_methods.push(InMemoryAccessMethodF32 { data: array.clone() });
-
-        // we probably want to serialize and deserialize the indexparams too
-        // upon merging if they are not the same throw an error
-
-        let index: VamanaIndex<f32, EuclideanF32, _> = VamanaIndex::hydrate(
-            reader_access_method,
-            IndexParams {
-                num_neighbors: 32,
-                search_frontier_size: 32,
-                pruning_threshold: 2.0,
-            },
-            nlist,
-            start as usize,
-        );
-
-        indices.push(index);
-    }
-
-
-    let mut all_results: Vec<Vec<usize>> = vec![];
-        
-
-    for query in queries.iter() {
-
-        let mut results: BTreeSet<(OrderedFloat<f32>, usize, usize)> = BTreeSet::new();
-
-        for (i, index) in indices.iter().enumerate() {
-            let mut ctx: crate::vamana::vamana::SearchContext = index.get_search_context();
-            let _ = index
-                .search(&mut ctx, query.as_slice(), reader_type.clone())
-                .await;
-            let local_results: Vec<(OrderedFloat<f32>, usize, usize)> = ctx
-                .frontier
-                .iter()
-                .map(|(v, d)| (OrderedFloat(*d as f32), i, *v))
-                .sorted_by_key(|k| k.0)
-                .collect();
-            results.extend(local_results);
-        }
-        let results: Vec<usize> = results
-            .iter()
-            .take(k)
-            .cloned()
-            .map(|(_v, _i, d)| d)
-            .collect();
-
-        all_results.push(results);
-            
-    }
-
-    Ok(all_results)
-}
-
-async fn search_vector_async(
-    column_name: &str,
-    file_sizes: Vec<usize>,
-    mut readers: Vec<AsyncReader>,
-    uid_nrows: &Vec<Vec<usize>>,
-    uid_to_metadatas: &Vec<Vec<(String, usize, usize, usize, usize)>>,
-    query: &Vec<f32>,
-    k: usize,
-    reader_type: ReaderType,
-) -> Result<(Vec<(usize, usize)>, Array2<f32>), LavaError> {
-    let mut results: BTreeSet<(OrderedFloat<f32>, usize, usize)> = BTreeSet::new();
-    let mut reader_access_methods: Vec<ReaderAccessMethodF32> = vec![];
-
-    for i in 0..readers.len() {
-        let bytes = readers[i].read_range(0, file_sizes[i] as u64).await?;
-        let num_points = u64::from_le_bytes(bytes[0..8].try_into().unwrap());
-        let dim = u64::from_le_bytes(bytes[8..16].try_into().unwrap());
-        let start = u64::from_le_bytes(bytes[16..24].try_into().unwrap());
-        let compressed_nlist = &bytes[24..];
-
-        let mut decompressor = Decoder::new(&compressed_nlist[..])?;
-        let mut serialized_nlist: Vec<u8> = Vec::with_capacity(compressed_nlist.len() as usize);
-        decompressor.read_to_end(&mut serialized_nlist)?;
-        let nlist: Array2<usize> = bincode::deserialize(&serialized_nlist).unwrap();
-
-        let reader_access_method = ReaderAccessMethodF32 {
-            dim: dim as usize,
-            num_points: num_points as usize,
-            column_name: column_name.to_string(),
-            uid_nrows: &uid_nrows[i],
-            // uid to (file_path, row_group, page_offset, page_size, dict_page_size)
-            uid_to_metadata: &uid_to_metadatas[i],
-        };
-        reader_access_methods.push(reader_access_method.clone());
-
-        // we probably want to serialize and deserialize the indexparams too
-        // upon merging if they are not the same throw an error
-
-        let index: VamanaIndex<f32, EuclideanF32, _> = VamanaIndex::hydrate(
-            reader_access_method,
-            IndexParams {
-                num_neighbors: 32,
-                search_frontier_size: 32,
-                pruning_threshold: 2.0,
-            },
-            nlist,
-            start as usize,
-        );
-
-        let mut ctx = index.get_search_context();
-        let _ = index
-            .search(&mut ctx, query.as_slice(), reader_type.clone())
-            .await;
-        let local_results: Vec<(OrderedFloat<f32>, usize, usize)> = ctx
-            .frontier
-            .iter()
-            .map(|(v, d)| (OrderedFloat(*d as f32), i, *v))
-            .collect();
-
-        results.extend(local_results);
-    }
-
-    let results: Vec<(usize, usize)> = results
-        .iter()
-        .take(k)
-        .cloned()
-        .map(|(_v, i, d)| (i, d))
-        .collect();
-
-    let futures: Vec<_> = results
-        .iter()
-        .map(|(file_id, n)| reader_access_methods[*file_id].get_vec(*n, reader_type.clone()))
-        .collect();
-
-    let vectors: Vec<Vec<f32>> = futures::future::join_all(futures).await;
-    let rows = vectors.len();
-    let cols = vectors[0].len();
-    let vectors: Vec<f32> = vectors.into_iter().flatten().collect();
-    let vectors = Array2::from_shape_vec((rows, cols), vectors).unwrap();
-
-    Ok((results, vectors))
-}
-
 #[tokio::main]
 pub async fn search_lava_bm25(
     files: Vec<String>,
@@ -640,49 +479,140 @@ pub async fn search_lava_substring(
     search_generic_async(file_sizes, readers, QueryParam::Substring(result), k).await
 }
 
-#[tokio::main]
-pub async fn search_lava_vector(
-    files: Vec<String>,
-    column_name: &str,
-    uid_nrows: &Vec<Vec<usize>>,
-    uid_to_metadatas: &Vec<Vec<(String, usize, usize, usize, usize)>>,
-    query: &Vec<f32>,
-    k: usize,
-    reader_type: ReaderType,
-) -> Result<(Vec<(usize, usize)>, Array2<f32>), LavaError> {
-    let (file_sizes, readers) = get_file_sizes_and_readers(&files, reader_type.clone()).await?;
-    search_vector_async(
-        column_name,
-        file_sizes,
-        readers,
-        uid_nrows,
-        uid_to_metadatas,
-        query,
-        k,
-        reader_type,
-    )
-    .await
+fn bytes_to_f32_vec(bytes: &[u8]) -> Vec<f32> {
+    let mut vec = Vec::with_capacity(bytes.len() / 4);
+    let mut i = 0;
+    while i < bytes.len() {
+        let value = LittleEndian::read_f32(&bytes[i..i + 4]);
+        vec.push(value);
+        i += 4;
+    }
+    vec
 }
 
 #[tokio::main]
-pub async fn search_lava_vector_mem(
+pub async fn search_lava_vector(
     files: Vec<String>,
-    array: Array2<f32>,
-    queries: &Vec<Vec<f32>>,
-    k: usize,
+    query: &Vec<f32>,
+    nprobes: usize,
     reader_type: ReaderType,
-) -> Result<Vec<Vec<usize>>, LavaError> {
-    let (file_sizes, readers) = get_file_sizes_and_readers(&files, reader_type.clone()).await?;
+) -> Result<Vec<Option<(Vec<Array1<u8>>, Array1<u8>)>>, LavaError> {
+    let (_,  mut readers) = get_file_sizes_and_readers(&files, reader_type.clone()).await?;
+    
+    let mut join_set = JoinSet::new();
 
-    search_vector_mem_async(
-        file_sizes,
-        readers,
-        array,
-        queries,
-        k,
-        reader_type
-    )
-    .await
+    for file_id in 0..readers.len() {
+        let mut reader = readers.remove(0);
+
+        join_set.spawn(async move {
+            let results = reader.read_usize_from_end(4).await.unwrap();
+
+            println!("results {:?}", results);
+
+            let centroid_vectors_compressed_bytes = reader
+                .read_range(results[2], results[3])
+                .await
+                .unwrap();
+
+            // decompress them
+            let mut decompressor = Decoder::new(centroid_vectors_compressed_bytes.as_ref()).unwrap();
+            let mut centroid_vectors: Vec<u8> = Vec::with_capacity(centroid_vectors_compressed_bytes.len() as usize);
+            decompressor.read_to_end(&mut centroid_vectors).unwrap();
+
+            let centroid_vectors = bytes_to_f32_vec(&centroid_vectors);
+            let array2 = Array2::<f32>::from_shape_vec((1000,128), centroid_vectors).unwrap();
+
+            (results, array2)
+        });
+    }
+
+    let mut result: Vec<(Vec<u64>, Array2<f32>)> = vec![];
+    while let Some(res) = join_set.join_next().await {
+        let res = res.unwrap();
+        result.push(res);
+    }
+
+    join_set.shutdown().await;
+
+    let arrays: Vec<Array2<f32>> = result.into_iter().map(|(_, array)| array).collect();
+    let centroids = concatenate(Axis(0), arrays.iter().map(|array| array.view()).collect::<Vec<_>>().as_slice()).unwrap();
+    let query = Array1::<f32>::from_vec(query.clone());
+    let query_broadcast = query.broadcast(centroids.dim()).unwrap();
+
+    let difference = &centroids - &query_broadcast;
+    let norms = difference.map_axis(Axis(1), |row| row.dot(&row).sqrt());
+    let mut indices_and_values: Vec<(usize, f32)> = norms.iter().enumerate().map(|(idx, &val)| (idx, val)).collect();
+
+    indices_and_values.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(Ordering::Equal));
+    let smallest_indices: Vec<usize> = indices_and_values.iter().map(|&(idx, _)| idx).take(nprobes).collect();
+
+    let mut file_indices: Vec<Vec<usize>> = vec![vec![]; files.len()];
+    for idx in smallest_indices.iter() {
+        file_indices[*idx / 1000].push(*idx % 1000 as usize);
+    }
+
+    let (_,  mut readers) = get_file_sizes_and_readers(&files, reader_type.clone()).await?;
+    let mut join_set = JoinSet::new();
+
+    for file_id in 0..readers.len() {
+
+        let mut reader = readers.remove(0);
+        let my_idx: Vec<usize> = file_indices[file_id].clone();
+
+        join_set.spawn(async move {
+
+            if my_idx.len() == 0 {
+                return None;
+            }
+
+            let results = reader.read_usize_from_end(4).await.unwrap();
+
+            let pq_bytes = reader
+                .read_range(results[0], results[1])
+                .await
+                .unwrap();
+        
+            let compressed_centroid_offset_bytes = reader
+                .read_range(results[1], results[2])
+                .await
+                .unwrap();
+            let mut decompressor = Decoder::new(compressed_centroid_offset_bytes.as_ref()).unwrap();
+            let mut centroid_offsets_bytes: Vec<u8> = Vec::with_capacity(compressed_centroid_offset_bytes.len() as usize);
+            decompressor.read_to_end(&mut centroid_offsets_bytes).unwrap();
+
+            // now reinterpret centroid_offsets_bytes as a Vec<u64>
+
+            let mut centroid_offsets = Vec::with_capacity(centroid_offsets_bytes.len() / 8);
+            let mut cursor = Cursor::new(centroid_offsets_bytes);
+
+            while cursor.position() < cursor.get_ref().len() as u64 {
+                let value = cursor.read_u64::<LittleEndian>().unwrap();
+                centroid_offsets.push(value);
+            }
+
+            let mut this_result: Vec<Array1<u8>> = vec![];
+
+            for idx in my_idx.iter() {
+                let codes_and_plist = reader
+                    .read_range(centroid_offsets[*idx], centroid_offsets[*idx + 1])
+                    .await
+                    .unwrap();
+                let arr = Array1::<u8>::from_vec(codes_and_plist.to_vec());
+                this_result.push(arr);
+            }
+            Some((this_result, Array1::<u8>::from_vec(pq_bytes.to_vec())))
+        });
+    }
+
+    let mut result: Vec<Option<(Vec<Array1<u8>>, Array1<u8>)>> = vec![];
+    while let Some(res) = join_set.join_next().await {
+        let res = res.unwrap();
+        result.push(res);
+    }
+
+    join_set.shutdown().await;
+
+    Ok(result)
 }
 
 #[tokio::main]

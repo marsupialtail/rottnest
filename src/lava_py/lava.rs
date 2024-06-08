@@ -5,8 +5,8 @@ use pyo3::{pyfunction, types::PyString, PyAny};
 
 use crate::lava;
 use crate::lava::error::LavaError;
-use ndarray::{Array2, Ix2};
-use numpy::{IntoPyArray, PyArray2, PyReadonlyArrayDyn};
+use ndarray::{Array1, Array2, Ix2};
+use numpy::{IntoPyArray, PyArray2, PyArray1, PyReadonlyArrayDyn};
 use pyo3::Py;
 
 
@@ -56,55 +56,33 @@ pub fn search_lava_uuid(
 pub fn search_lava_vector(
     py: Python,
     files: Vec<String>,
-    column_name: &str,
-    uid_nrows: Vec<Vec<usize>>,
-    uid_to_metadatas: Vec<Vec<(String, usize, usize, usize, usize)>>,
     query: Vec<f32>,
-    k: usize,
+    nprobes: usize,
     reader_type: Option<&PyString>,
-) -> Result<(Vec<(usize, usize)>, Py<PyArray2<f32>>), LavaError> {
+) -> Result<Vec<Option<(Vec<Py<PyArray1<u8>>>, Py<PyArray1<u8>>)>>, LavaError> {
     let reader_type = reader_type.map(|x| x.to_string()).unwrap_or_default();
 
-    let (metadata, array) = py.allow_threads(|| {
+    let result: Vec<Option<(Vec<Array1<u8>>, Array1<u8>)>> = py.allow_threads(|| {
         lava::search_lava_vector(
             files,
-            column_name,
-            &uid_nrows,
-            &uid_to_metadatas,
             &query,
-            k,
+            nprobes,
             reader_type.into(),
         )
     })?;
 
-    Ok((metadata, array.into_pyarray(py).to_owned()))
+    let result = result
+        .into_iter()
+        .map(|x| match x {
+            Some((x, y)) => Some((x.into_iter().map(|x| x.into_pyarray(py).to_owned()).collect(), y.into_pyarray(py).to_owned())),
+            None => None,
+        })
+        .collect();
+    
+
+    Ok(result)
 }
 
-#[pyfunction]
-pub fn search_lava_vector_mem(
-    py: Python,
-    files: Vec<String>,
-    array: PyReadonlyArrayDyn<f32>,
-    query: Vec<Vec<f32>>,
-    k: usize,
-    reader_type: Option<&PyString>,
-) -> Result<Vec<Vec<usize>>, LavaError> {
-    let reader_type = reader_type.map(|x| x.to_string()).unwrap_or_default();
-    let array = array.as_array();
-    let owned_array: Array2<f32> = array.into_dimensionality::<Ix2>().unwrap().to_owned();
-
-    let metadata = py.allow_threads(|| {
-        lava::search_lava_vector_mem(
-            files,
-            owned_array,
-            &query,
-            k,
-            reader_type.into(),
-        )
-    })?;
-
-    Ok(metadata.to_owned())
-}
 
 #[pyfunction]
 pub fn get_tokenizer_vocab(
@@ -178,34 +156,6 @@ pub fn merge_lava_uuid(
             uid_offsets,
             2,
             2,
-            reader_type.into(),
-        )
-    })
-}
-
-#[pyfunction]
-pub fn merge_lava_vector(
-    py: Python,
-    condensed_lava_file: String,
-    lava_files: Vec<String>,
-    vectors: Vec<PyReadonlyArrayDyn<f32>>,
-    reader_type: Option<&PyString>,
-) -> Result<(), LavaError> {
-    let vectors = vectors
-        .iter()
-        .map(|x| {
-            let array = x.as_array();
-            let owned_array: Array2<f32> = array.into_dimensionality::<Ix2>().unwrap().to_owned();
-            owned_array
-        })
-        .collect();
-    let reader_type = reader_type.map(|x| x.to_string()).unwrap_or_default();
-
-    py.allow_threads(|| {
-        lava::parallel_merge_vector_files(
-            condensed_lava_file,
-            lava_files,
-            vectors,
             reader_type.into(),
         )
     })
@@ -295,19 +245,4 @@ pub fn build_lava_substring(
             token_skip_factor,
         )
     })
-}
-
-#[pyfunction]
-pub fn build_lava_vector(
-    py: Python,
-    output_file_name: &PyString,
-    array: PyReadonlyArrayDyn<f32>,
-    uid: &PyAny,
-) -> Result<(), LavaError> {
-    let output_file_name = output_file_name.to_string();
-    let array = array.as_array();
-    let owned_array: Array2<f32> = array.into_dimensionality::<Ix2>().unwrap().to_owned();
-    let uid = ArrayData::from_pyarrow(uid)?;
-
-    py.allow_threads(|| lava::build_lava_vector(output_file_name, owned_array, uid))
 }
