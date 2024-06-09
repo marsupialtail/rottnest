@@ -28,6 +28,7 @@ use byteorder::{ByteOrder, LittleEndian, ReadBytesExt};
 use super::trie::FastTrie;
 use std::cmp::Ordering;
 use std::io::{self, Cursor};
+use futures::stream::{FuturesUnordered, StreamExt};
 
 enum QueryParam {
     Substring(Vec<u32>),
@@ -626,7 +627,7 @@ pub async fn search_lava_vector(
         readers_map.insert(*file_id, reader);
     }
 
-    let mut futures = Vec::new();
+    let mut futures = FuturesUnordered::new();
     for i in 0 .. result.len() {
         let to_read = result[i].0.clone();
         for (file_id, start, end) in to_read.into_iter() {
@@ -646,9 +647,11 @@ pub async fn search_lava_vector(
         }
     }
 
-    let ranges: Vec<Result<(usize, Array1<u8>), tokio::task::JoinError>> = futures::future::join_all(futures).await;
-    let ranges: Vec<(usize, Array1<u8>)> = ranges.into_iter().map(|x| x.unwrap()).collect();
+    let mut ranges: Vec<(usize, Array1<u8>)> = vec![];
 
+    while let Some(x) = futures.next().await {
+        ranges.push(x.unwrap());
+    }
 
     let end = Instant::now();
     println!("Time stage 3 read: {:?}", end - start);

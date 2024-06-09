@@ -8,7 +8,7 @@ use crate::lava::error::LavaError;
 use ndarray::{Array1, Array2, Ix2};
 use numpy::{IntoPyArray, PyArray2, PyArray1, PyReadonlyArrayDyn};
 use pyo3::Py;
-
+use std::time::Instant;
 
 #[pyfunction]
 pub fn search_lava_bm25(
@@ -62,6 +62,8 @@ pub fn search_lava_vector(
 ) -> Result<(Vec<usize>, Vec<Py<PyArray1<u8>>>, Vec<(usize, Py<PyArray1<u8>>)>), LavaError> {
     let reader_type = reader_type.map(|x| x.to_string()).unwrap_or_default();
 
+    let start = Instant::now();
+
     let result: (Vec<usize>, Vec<Array1<u8>>, Vec<(usize, Array1<u8>)>) = py.allow_threads(|| {
         lava::search_lava_vector(
             files,
@@ -70,6 +72,11 @@ pub fn search_lava_vector(
             reader_type.into(),
         )
     })?;
+
+    let end = Instant::now();
+    println!("rust func call: {:?}", end - start);
+
+    let start = Instant::now();
 
     let x = result.1
         .into_iter()
@@ -80,6 +87,9 @@ pub fn search_lava_vector(
         .into_iter()
         .map(|(x, y)| (x, y.into_pyarray(py).to_owned()))
         .collect();
+
+    let end = Instant::now();
+    println!("conversion: {:?}", end - start);
     
 
     Ok((result.0, x, y))
