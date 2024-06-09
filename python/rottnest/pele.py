@@ -35,7 +35,7 @@ def get_fs_from_file_path(filepath):
 def get_daft_io_config_from_file_path(filepath):
     
     if filepath.startswith("s3://"):
-        fs = daft.io.IOConfig(s3 = daft.io.S3Config(force_virtual_addressing = (True if os.getenv('AWS_VIRTUAL_HOST_STYLE') else False), endpoint_override = os.getenv('AWS_ENDPOINT_URL')))
+        fs = daft.io.IOConfig(s3 = daft.io.S3Config(force_virtual_addressing = (True if os.getenv('AWS_VIRTUAL_HOST_STYLE') else False), endpoint_url = os.getenv('AWS_ENDPOINT_URL')))
     else:
         fs = daft.io.IOConfig()
 
@@ -43,7 +43,7 @@ def get_daft_io_config_from_file_path(filepath):
 
 def read_metadata_file(file_path: str):
 
-    table = pq.read_table(file_path.lstrip("s3://"), filesystem = get_fs_from_file_path(file_path))
+    table = pq.read_table(file_path.replace("s3://",''), filesystem = get_fs_from_file_path(file_path))
 
     try:
         cache_ranges = json.loads(table.schema.metadata[b'cache_ranges'].decode())
@@ -55,7 +55,7 @@ def read_metadata_file(file_path: str):
 def read_columns(file_paths: list, row_groups: list, row_nr: list[list]):
 
     def read_parquet_file(file, row_group, row_nr):
-        f = pq.ParquetFile(file.lstrip("s3://"), filesystem=get_fs_from_file_path(file))
+        f = pq.ParquetFile(file.replace("s3://",''), filesystem=get_fs_from_file_path(file))
         return f.read_row_group(row_group, columns=['id']).take(row_nr)
 
     with ThreadPoolExecutor(max_workers=os.cpu_count()) as executor:  # Control the number of parallel threads
@@ -115,6 +115,7 @@ def index_file_bm25(file_path: str, column_name: str, name = uuid.uuid4().hex, i
 
     cache_ranges = rottnest.build_lava_bm25(f"{name}.lava", arr, uid, tokenizer_file)
 
+    # do not attempt to manually edit the metadata. It is Parquet, but it is Varsity Parquet to ensure performance.
     file_data = file_data.to_arrow()
     file_data = file_data.replace_schema_metadata({"cache_ranges": json.dumps(cache_ranges)})
     pq.write_table(file_data, f"{name}.meta", write_statistics = False, compression = 'zstd')
@@ -331,7 +332,12 @@ def get_result_from_index_result(metadata: polars.DataFrame, index_search_result
     return result, column_name, metadata.with_row_count('__metadata_key__')
 
 def get_metadata_and_populate_cache(indices: List[str]):
-    metadatas = [read_metadata_file(f"{index_name}.meta") for i, index_name in enumerate(indices)]
+    
+    # metadatas = [read_metadata_file(f"{index_name}.meta") for i, index_name in enumerate(indices)]
+
+    metadatas = daft.table.read_parquet_into_pyarrow_bulk([f"{index_name}.meta" for index_name in indices], io_config = get_daft_io_config_from_file_path(indices[0]))
+    metadatas = [(polars.from_arrow(i), json.loads(i.schema.metadata[b'cache_ranges'].decode())) for i in metadatas]
+
     metadata = polars.concat([f[0].with_columns(polars.lit(i).alias("file_id").cast(polars.Int64)) for i, f in enumerate(metadatas)])
     cache_dir = os.getenv("ROTTNEST_CACHE_DIR")
     if cache_dir:
@@ -346,7 +352,7 @@ def search_index_uuid(indices: List[str], query: str, K: int):
 
     metadata = get_metadata_and_populate_cache(indices)
     
-    index_search_results = rottnest.search_lava_uuid([f"{index_name}.lava" for index_name in indices], query, K)
+    index_search_results = rottnest.search_lava_uuid([f"{index_name}.lava" for index_name in indices], query, K, "aws")
     print(index_search_results)
 
     if len(index_search_results) == 0:
@@ -362,7 +368,7 @@ def search_index_substring(indices: List[str], query: str, K: int):
 
     metadata = get_metadata_and_populate_cache(indices)
     
-    index_search_results = rottnest.search_lava_substring([f"{index_name}.lava" for index_name in indices], query, K)
+    index_search_results = rottnest.search_lava_substring([f"{index_name}.lava" for index_name in indices], query, K, "aws")
     print(index_search_results)
 
     if len(index_search_results) == 0:
@@ -387,38 +393,40 @@ def search_index_vector(indices: List[str], query: np.array, K: int, columns = [
     # uids and codes are list of lists, where each sublist corresponds to an index. pq is a list of bytes
     # length is the same as the list of indices
     start = time.time()
-    results = rottnest.search_lava_vector([f"{index_name}.lava" for index_name in indices], query, nprobes)
+    valid_file_ids, pq_bytes, arrs = rottnest.search_lava_vector([f"{index_name}.lava" for index_name in indices], query, nprobes, "aws")
+    
+    # print(results)
     print("INDEX SEARCH TIME", time.time() - start)
 
     file_ids = []
     uids = []
     codes = []
 
-    start = time.time()
-    for i, result in enumerate(results):
-        if result is None:
-            continue
-        else:
-            f = open("tmp.pq", "wb")
-            f.write(result[1].tobytes())
-            pq = faiss.read_ProductQuantizer("tmp.pq")
-            # os.remove("tmp.pq")
+    pqs = {}
 
-            for arr in result[0]:
-                plist_length = np.frombuffer(arr[:4], dtype = np.uint32).item()
-                plist = np.frombuffer(arr[4: plist_length * 4 + 4], dtype = np.uint32)
-                this_codes = np.frombuffer(arr[plist_length * 4 + 4:], dtype = np.uint8).reshape((plist_length, -1))
-                
-                decoded = pq.decode(this_codes)
-                this_norms = np.linalg.norm(decoded - query, axis = 1).argsort()[:refine]
-                codes.append(decoded[this_norms])
-                uids.append(plist[this_norms])
-                file_ids.append(np.ones(len(this_norms)) * i)
+    start = time.time()
+    for i, pq_bytes in zip(valid_file_ids, pq_bytes):
+        f = open("tmp.pq", "wb")
+        f.write(pq_bytes.tobytes())
+        pqs[i] = faiss.read_ProductQuantizer("tmp.pq")
+        os.remove("tmp.pq")
+
+    for (file_id, arr) in arrs:
+        plist_length = np.frombuffer(arr[:4], dtype = np.uint32).item()
+        plist = np.frombuffer(arr[4: plist_length * 4 + 4], dtype = np.uint32)
+        this_codes = np.frombuffer(arr[plist_length * 4 + 4:], dtype = np.uint8).reshape((plist_length, -1))
+        
+        decoded = pqs[file_id].decode(this_codes)
+        this_norms = np.linalg.norm(decoded - query, axis = 1).argsort()[:refine]
+        codes.append(decoded[this_norms])
+        uids.append(plist[this_norms])
+        file_ids.append(np.ones(len(this_norms)) * file_id)
     
     file_ids = np.hstack(file_ids).astype(np.int64)
     uids = np.hstack(uids).astype(np.int64)
     codes = np.vstack(codes)
     fp_rerank = np.linalg.norm(query - codes, axis = 1).argsort()[:refine]
+
     print("PQ COMPUTE TIME", time.time() - start)
 
     file_ids = file_ids[fp_rerank]
@@ -427,6 +435,8 @@ def search_index_vector(indices: List[str], query: np.array, K: int, columns = [
     # there could be redundancies here, since the uid is pointed to the page. two high ranked codes could be in the same page
 
     index_search_results = list(set([(file_id, uid) for file_id, uid in zip(file_ids, uids)]))
+
+    print(index_search_results)
 
     start = time.time()
     result, column_name, metadata = get_result_from_index_result(metadata, index_search_results)

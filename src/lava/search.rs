@@ -16,12 +16,12 @@ use crate::lava::plist::PListChunk;
 use crate::vamana::vamana::VectorAccessMethod;
 use crate::vamana::{access::ReaderAccessMethodF32, access::InMemoryAccessMethodF32, EuclideanF32, IndexParams, VamanaIndex};
 use crate::{
-    formats::readers::{get_file_size_and_reader, get_file_sizes_and_readers, AsyncReader, ClonableAsyncReader, ReaderType},
+    formats::readers::{get_file_size_and_reader, get_file_sizes_and_readers, get_readers, get_reader, AsyncReader, ClonableAsyncReader, ReaderType},
     lava::error::LavaError,
 };
 use std::time::Instant;
 use tokenizers::tokenizer::Tokenizer;
-
+use std::collections::BTreeMap;
 use ordered_float::OrderedFloat;
 use byteorder::{ByteOrder, LittleEndian, ReadBytesExt};
 
@@ -496,18 +496,19 @@ pub async fn search_lava_vector(
     query: &Vec<f32>,
     nprobes: usize,
     reader_type: ReaderType,
-) -> Result<Vec<Option<(Vec<Array1<u8>>, Array1<u8>)>>, LavaError> {
-    let (_,  mut readers) = get_file_sizes_and_readers(&files, reader_type.clone()).await?;
-    
-    let mut join_set = JoinSet::new();
+) -> Result<(Vec<usize>, Vec<Array1<u8>>, Vec<(usize, Array1<u8>)>), LavaError> {
 
-    for file_id in 0..readers.len() {
+    let start = Instant::now();
+
+    let (_,  mut readers) = get_file_sizes_and_readers(&files, reader_type.clone()).await?;
+
+    let mut futures = Vec::new();
+
+    for _ in 0..readers.len() {
         let mut reader = readers.remove(0);
 
-        join_set.spawn(async move {
+        futures.push(tokio::spawn(async move {
             let results = reader.read_usize_from_end(4).await.unwrap();
-
-            println!("results {:?}", results);
 
             let centroid_vectors_compressed_bytes = reader
                 .read_range(results[2], results[3])
@@ -523,18 +524,17 @@ pub async fn search_lava_vector(
             let array2 = Array2::<f32>::from_shape_vec((1000,128), centroid_vectors).unwrap();
 
             (results, array2)
-        });
+        }));
     }
 
-    let mut result: Vec<(Vec<u64>, Array2<f32>)> = vec![];
-    while let Some(res) = join_set.join_next().await {
-        let res = res.unwrap();
-        result.push(res);
-    }
+    let result: Vec<Result<(Vec<u64>, Array2<f32>), tokio::task::JoinError>> = futures::future::join_all(futures).await;
 
-    join_set.shutdown().await;
+    let end = Instant::now();
+    println!("Time stage 1 read: {:?}", end - start);
 
-    let arrays: Vec<Array2<f32>> = result.into_iter().map(|(_, array)| array).collect();
+    let start = Instant::now();
+
+    let arrays: Vec<Array2<f32>> = result.into_iter().map(|x| x.unwrap().1).collect();
     let centroids = concatenate(Axis(0), arrays.iter().map(|array| array.view()).collect::<Vec<_>>().as_slice()).unwrap();
     let query = Array1::<f32>::from_vec(query.clone());
     let query_broadcast = query.broadcast(centroids.dim()).unwrap();
@@ -551,19 +551,27 @@ pub async fn search_lava_vector(
         file_indices[*idx / 1000].push(*idx % 1000 as usize);
     }
 
+    let end = Instant::now();
+    println!("Time math: {:?}", end - start);
+
+
+    let start = Instant::now();
+
     let (_,  mut readers) = get_file_sizes_and_readers(&files, reader_type.clone()).await?;
-    let mut join_set = JoinSet::new();
+
+    let mut file_ids = vec![];
+    let mut futures = Vec::new();
 
     for file_id in 0..readers.len() {
 
         let mut reader = readers.remove(0);
+        if file_indices[file_id].len() == 0 {
+            continue;
+        }
         let my_idx: Vec<usize> = file_indices[file_id].clone();
+        file_ids.push(file_id);
 
-        join_set.spawn(async move {
-
-            if my_idx.len() == 0 {
-                return None;
-            }
+        futures.push(tokio::spawn(async move {
 
             let results = reader.read_usize_from_end(4).await.unwrap();
 
@@ -590,29 +598,62 @@ pub async fn search_lava_vector(
                 centroid_offsets.push(value);
             }
 
-            let mut this_result: Vec<Array1<u8>> = vec![];
+            let mut this_result: Vec<(usize, u64, u64)> = vec![];
 
             for idx in my_idx.iter() {
-                let codes_and_plist = reader
-                    .read_range(centroid_offsets[*idx], centroid_offsets[*idx + 1])
-                    .await
-                    .unwrap();
-                let arr = Array1::<u8>::from_vec(codes_and_plist.to_vec());
-                this_result.push(arr);
+                this_result.push((file_id, centroid_offsets[*idx], centroid_offsets[*idx + 1]));
             }
-            Some((this_result, Array1::<u8>::from_vec(pq_bytes.to_vec())))
-        });
+            (this_result, Array1::<u8>::from_vec(pq_bytes.to_vec()))
+        }));
     }
 
-    let mut result: Vec<Option<(Vec<Array1<u8>>, Array1<u8>)>> = vec![];
-    while let Some(res) = join_set.join_next().await {
-        let res = res.unwrap();
-        result.push(res);
+    let result: Vec<Result<(Vec<(usize, u64, u64)>, Array1<u8>),tokio::task::JoinError>> = futures::future::join_all(futures).await;
+    let result: Vec<(Vec<(usize, u64, u64)>, Array1<u8>)> = result.into_iter().map(|x| x.unwrap()).collect();
+
+    let pq_bytes: Vec<Array1<u8>> = result
+        .iter()
+        .map(|x| x.1.clone())
+        .collect::<Vec<_>>();
+
+    let end = Instant::now();
+    println!("Time stage 2 read: {:?}", end - start);   
+
+    let start = Instant::now();
+
+    let mut readers_map: BTreeMap<usize, AsyncReader> = BTreeMap::new();
+    for file_id in file_ids.iter() {
+        let reader = get_reader(files[*file_id].clone(), reader_type.clone()).await.unwrap();
+        readers_map.insert(*file_id, reader);
     }
 
-    join_set.shutdown().await;
+    let mut futures = Vec::new();
+    for i in 0 .. result.len() {
+        let to_read = result[i].0.clone();
+        for (file_id, start, end) in to_read.into_iter() {
+            // let file_name = files[file_id].clone();
+            // let my_reader_type = reader_type.clone();
+            // let mut reader = get_reader(file_name, my_reader_type).await.unwrap();
+            let start_time = Instant::now();
+            let mut reader = readers_map.get_mut(&file_id).unwrap().clone();
+            println!("Time to get reader {:?}", Instant::now() - start_time);
+            futures.push(tokio::spawn(async move {
+                
+                let start_time = Instant::now();
+                let codes_and_plist = reader.read_range(start, end).await.unwrap();
+                println!("Time to read {:?}", Instant::now() - start_time);
+                (file_id, Array1::<u8>::from_vec(codes_and_plist.to_vec()))
+            }));
+        }
+    }
 
-    Ok(result)
+    let ranges: Vec<Result<(usize, Array1<u8>), tokio::task::JoinError>> = futures::future::join_all(futures).await;
+    let ranges: Vec<(usize, Array1<u8>)> = ranges.into_iter().map(|x| x.unwrap()).collect();
+
+
+    let end = Instant::now();
+    println!("Time stage 3 read: {:?}", end - start);
+
+    Ok((file_ids, pq_bytes, ranges))
 }
 
 #[tokio::main]

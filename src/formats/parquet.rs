@@ -211,7 +211,7 @@ async fn parse_metadatas(
         })
         .collect::<Vec<_>>()
         .await;
-    let res = futures::future::join_all(handles).await;
+    let res: Vec<Result<(String, ParquetMetaData), tokio::task::JoinError>> = futures::future::join_all(handles).await;
 
     let mut metadatas = HashMap::new();
 

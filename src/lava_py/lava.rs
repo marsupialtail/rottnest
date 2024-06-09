@@ -59,10 +59,10 @@ pub fn search_lava_vector(
     query: Vec<f32>,
     nprobes: usize,
     reader_type: Option<&PyString>,
-) -> Result<Vec<Option<(Vec<Py<PyArray1<u8>>>, Py<PyArray1<u8>>)>>, LavaError> {
+) -> Result<(Vec<usize>, Vec<Py<PyArray1<u8>>>, Vec<(usize, Py<PyArray1<u8>>)>), LavaError> {
     let reader_type = reader_type.map(|x| x.to_string()).unwrap_or_default();
 
-    let result: Vec<Option<(Vec<Array1<u8>>, Array1<u8>)>> = py.allow_threads(|| {
+    let result: (Vec<usize>, Vec<Array1<u8>>, Vec<(usize, Array1<u8>)>) = py.allow_threads(|| {
         lava::search_lava_vector(
             files,
             &query,
@@ -71,16 +71,18 @@ pub fn search_lava_vector(
         )
     })?;
 
-    let result = result
+    let x = result.1
         .into_iter()
-        .map(|x| match x {
-            Some((x, y)) => Some((x.into_iter().map(|x| x.into_pyarray(py).to_owned()).collect(), y.into_pyarray(py).to_owned())),
-            None => None,
-        })
+        .map(|x| x.into_pyarray(py).to_owned())
+        .collect();
+
+    let y = result.2
+        .into_iter()
+        .map(|(x, y)| (x, y.into_pyarray(py).to_owned()))
         .collect();
     
 
-    Ok(result)
+    Ok((result.0, x, y))
 }
 
 

@@ -213,6 +213,43 @@ pub async fn get_file_sizes_and_readers(
     Ok((file_sizes, readers))
 }
 
+pub async fn get_readers(
+    files: &[String],
+    reader_type: ReaderType,
+) -> Result<Vec<AsyncReader>, LavaError> {
+    let tasks: Vec<_> = files
+        .iter()
+        .map(|file| {
+            let file = file.clone();
+            let reader_type = reader_type.clone();
+            tokio::spawn(async move { get_reader(file, reader_type).await })
+        })
+        .collect();
+
+    // Wait for all tasks to complete
+    let results = futures::future::join_all(tasks).await;
+
+    // Process results, separating out file sizes and readers
+    let mut readers = Vec::new();
+
+    for result in results {
+        match result {
+            Ok(Ok(reader)) => {
+                readers.push(reader);
+            }
+            Ok(Err(e)) => return Err(e), // Handle error from inner task
+            Err(e) => {
+                return Err(LavaError::Parse(format!(
+                    "Task join error: {}",
+                    e.to_string()
+                )))
+            } // Handle join error
+        }
+    }
+
+    Ok(readers)
+}
+
 pub async fn get_file_size_and_reader(
     file: String,
     reader_type: ReaderType,
