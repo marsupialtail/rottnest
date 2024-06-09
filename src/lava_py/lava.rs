@@ -64,10 +64,10 @@ pub fn search_lava_vector(
 
     let start = Instant::now();
 
-    let result: (Vec<usize>, Vec<Array1<u8>>, Vec<(usize, Array1<u8>)>) = py.allow_threads(|| {
+    let result: (Vec<usize>, Vec<Array1<u8>>, Vec<(usize, Array1<u8>)>) = py.allow_threads(move || {
         lava::search_lava_vector(
             files,
-            &query,
+            query,
             nprobes,
             reader_type.into(),
         )

@@ -588,8 +588,7 @@ pub async fn read_indexed_pages_async(
     })
 }
 
-#[tokio::main]
-pub async fn read_indexed_pages(
+pub fn read_indexed_pages(
     column_name: String,
     file_paths: Vec<String>,
     row_groups: Vec<usize>,
@@ -599,15 +598,21 @@ pub async fn read_indexed_pages(
     reader_type: ReaderType,
     file_metadatas: Option<HashMap<String, Bytes>>
 ) -> Result<Vec<ArrayData>, LavaError> {
-    read_indexed_pages_async(
-        column_name,
-        file_paths,
-        row_groups,
-        page_offsets,
-        page_sizes,
-        dict_page_sizes,
-        reader_type,
-        file_metadatas
-    )
-    .await
+    let rt = tokio::runtime::Builder::new_multi_thread()
+    .enable_all()
+    .build()
+    .unwrap();
+
+    let res = rt.block_on(read_indexed_pages_async(
+                column_name,
+                file_paths,
+                row_groups,
+                page_offsets,
+                page_sizes,
+                dict_page_sizes,
+                reader_type,
+                file_metadatas
+            ));
+    rt.shutdown_background();
+    res
 }

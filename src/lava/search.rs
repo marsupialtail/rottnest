@@ -491,10 +491,26 @@ fn bytes_to_f32_vec(bytes: &[u8]) -> Vec<f32> {
     vec
 }
 
-#[tokio::main]
-pub async fn search_lava_vector(
+pub fn search_lava_vector(
     files: Vec<String>,
-    query: &Vec<f32>,
+    query: Vec<f32>,
+    nprobes: usize,
+    reader_type: ReaderType,
+) -> Result<(Vec<usize>, Vec<Array1<u8>>, Vec<(usize, Array1<u8>)>), LavaError> {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+
+    let res = rt.block_on(
+            search_lava_vector_async(files, query, nprobes, reader_type));
+    rt.shutdown_background();
+    res
+}
+
+pub async fn search_lava_vector_async(
+    files: Vec<String>,
+    query: Vec<f32>,
     nprobes: usize,
     reader_type: ReaderType,
 ) -> Result<(Vec<usize>, Vec<Array1<u8>>, Vec<(usize, Array1<u8>)>), LavaError> {
@@ -537,7 +553,7 @@ pub async fn search_lava_vector(
 
     let arrays: Vec<Array2<f32>> = result.into_iter().map(|x| x.unwrap().1).collect();
     let centroids = concatenate(Axis(0), arrays.iter().map(|array| array.view()).collect::<Vec<_>>().as_slice()).unwrap();
-    let query = Array1::<f32>::from_vec(query.clone());
+    let query = Array1::<f32>::from_vec(query);
     let query_broadcast = query.broadcast(centroids.dim()).unwrap();
 
     let difference = &centroids - &query_broadcast;
@@ -641,7 +657,7 @@ pub async fn search_lava_vector(
                 
                 let start_time = Instant::now();
                 let codes_and_plist = reader.read_range(start, end).await.unwrap();
-                println!("Time to read {:?}", Instant::now() - start_time);
+                println!("Time to read {:?}, {:?}", Instant::now() - start_time, codes_and_plist.len());
                 (file_id, Array1::<u8>::from_vec(codes_and_plist.to_vec()))
             }));
         }
