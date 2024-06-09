@@ -394,8 +394,6 @@ def search_index_vector(indices: List[str], query: np.array, K: int, columns = [
     # length is the same as the list of indices
     start = time.time()
     valid_file_ids, pq_bytes, arrs = rottnest.search_lava_vector([f"{index_name}.lava" for index_name in indices], query, nprobes, "aws")
-    
-    # print(results)
     print("INDEX SEARCH TIME", time.time() - start)
 
     file_ids = []
