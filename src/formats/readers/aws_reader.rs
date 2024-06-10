@@ -55,6 +55,21 @@ impl AsyncAwsReader {
 
 #[async_trait]
 impl super::Reader for AsyncAwsReader {
+
+    fn update_filename(&mut self, file: String) -> Result<(), LavaError> {
+        if !file.starts_with("s3://") {
+            return Err(LavaError::Parse("File scheme not supported".to_string()));
+        }
+    
+        let tokens = file[5..].split('/').collect::<Vec<_>>();
+        let bucket = tokens[0].to_string();
+        let filename = tokens[1..].join("/");
+        self.bucket = bucket;
+        self.filename = filename;
+
+        Ok(())
+    }
+
     async fn read_range(&mut self, from: u64, to: u64) -> Result<Bytes, LavaError> {
         if from >= to {
             return Err(LavaError::Io(std::io::ErrorKind::InvalidData.into()));
@@ -146,23 +161,9 @@ impl Operator {
 
 pub(crate) async fn get_file_size_and_reader(file: String) -> Result<(usize, AsyncAwsReader), LavaError> {
     // Extract filename
-    if !file.starts_with("s3://") {
-        return Err(LavaError::Parse("File scheme not supported".to_string()));
-    }
-
-    let config = Config::from_env().await;
-    let operator = Operator::from(config);
-
-    let tokens = file[5..].split('/').collect::<Vec<_>>();
-    let bucket = tokens[0].to_string();
-    let filename = tokens[1..].join("/");
-
-    // Create the reader
-    let mut reader = AsyncAwsReader::new(operator.into_inner(), bucket.clone(), filename.clone());
-
+    let mut reader = get_reader(file.clone()).await?;
     // Get the file size
     let file_size = reader.stat().await?;
-
     if file_size == 0 {
         return Err(LavaError::Parse("File size is zero".to_string()));
     }

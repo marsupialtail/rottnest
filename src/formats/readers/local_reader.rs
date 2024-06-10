@@ -50,6 +50,15 @@ impl AsyncLocalReader {
 
 #[async_trait]
 impl super::Reader for AsyncLocalReader {
+
+    fn update_filename(&mut self, filename: String) -> Result<(), LavaError> {
+        let std_fs = std::fs::File::open(filename.clone()).map_err(|e| LavaError::Io(e))?;
+        self.file_size = std_fs.metadata().map_err(|e| LavaError::Io(e))?.len();
+        self.reader = File::from_std(std_fs);
+        self.filename = filename;
+        Ok(())
+    }
+
     async fn read_range(&mut self, from: u64, to: u64) -> Result<Bytes, LavaError> {
         if from >= to {
             return Err(LavaError::Io(std::io::ErrorKind::InvalidData.into()));

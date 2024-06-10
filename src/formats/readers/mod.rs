@@ -19,6 +19,7 @@ mod local_reader;
 
 #[async_trait]
 pub trait Reader: Send + Sync {
+    fn update_filename(&mut self, filename: String) -> Result<(), LavaError>;
     async fn read_range(&mut self, from: u64, to: u64) -> Result<Bytes, LavaError>;
     async fn read_usize_from_end(&mut self, offset: i64, n: u64) -> Result<Vec<u64>, LavaError>;
     async fn read_usize_from_start(&mut self, offset: u64, n: u64) -> Result<Vec<u64>, LavaError>;
@@ -92,6 +93,10 @@ impl DerefMut for ClonableAsyncReader {
 impl AsyncReader {
     pub fn new(reader: ClonableAsyncReader, filename: String) -> Self {
         Self { reader, filename }
+    }
+
+    pub fn update_filename(&mut self, filename: String) -> Result<(), LavaError> {
+        self.deref_mut().update_filename(filename)
     }
 
     pub async fn read_range(&mut self, from: u64, to: u64) -> Result<Bytes, LavaError> {

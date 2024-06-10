@@ -56,6 +56,12 @@ impl AsyncHttpReader {
 
 #[async_trait]
 impl super::Reader for AsyncHttpReader {
+
+    fn update_filename(&mut self, filename: String) -> Result<(), LavaError> {
+        self.url = filename;
+        Ok(())
+    }
+
     async fn read_range(&mut self, from: u64, to: u64) -> Result<Bytes, LavaError> {
         if from >= to {
             return Err(LavaError::Io(std::io::ErrorKind::InvalidData.into()));
