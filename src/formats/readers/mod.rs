@@ -1,20 +1,21 @@
+use crate::lava::error::LavaError;
 use async_trait::async_trait;
 use bytes::Bytes;
+use local_reader::AsyncLocalReader;
+use std::collections::BTreeMap;
+use std::env;
 use std::{
     io::Read,
     ops::{Deref, DerefMut},
 };
 use zstd::stream::read::Decoder;
-use std::env;
-use std::collections::BTreeMap;
-use crate::lava::error::LavaError;
 
 use self::{
-    aws_reader::AsyncAwsReader, http_reader::AsyncHttpReader, opendal_reader::AsyncOpendalReader,
+    aws_reader::AsyncAwsReader, http_reader::AsyncHttpReader,
 };
 mod aws_reader;
 mod http_reader;
-mod opendal_reader;
+mod local_reader;
 
 #[async_trait]
 pub trait Reader: Send + Sync {
@@ -49,8 +50,8 @@ impl Clone for AsyncReader {
     fn clone(&self) -> Self {
         Self {
             reader: match &self.reader {
-                ClonableAsyncReader::Opendal(_) => {
-                    panic!("Clone is not allowed with Opendal reader.")
+                ClonableAsyncReader::Local(_) => {
+                    panic!("Clone is not allowed with local reader.")
                 }
                 ClonableAsyncReader::AwsSdk(reader) => ClonableAsyncReader::AwsSdk(reader.clone()),
                 ClonableAsyncReader::Http(reader) => ClonableAsyncReader::Http(reader.clone()),
@@ -61,7 +62,7 @@ impl Clone for AsyncReader {
 }
 
 pub enum ClonableAsyncReader {
-    Opendal(AsyncOpendalReader),
+    Local(AsyncLocalReader),
     AwsSdk(AsyncAwsReader),
     Http(AsyncHttpReader),
 }
@@ -71,7 +72,7 @@ impl Deref for ClonableAsyncReader {
 
     fn deref(&self) -> &Self::Target {
         match self {
-            ClonableAsyncReader::Opendal(reader) => reader,
+            ClonableAsyncReader::Local(reader) => reader,
             ClonableAsyncReader::AwsSdk(reader) => reader,
             ClonableAsyncReader::Http(reader) => reader,
         }
@@ -81,7 +82,7 @@ impl Deref for ClonableAsyncReader {
 impl DerefMut for ClonableAsyncReader {
     fn deref_mut(&mut self) -> &mut Self::Target {
         match self {
-            ClonableAsyncReader::Opendal(reader) => reader,
+            ClonableAsyncReader::Local(reader) => reader,
             ClonableAsyncReader::AwsSdk(reader) => reader,
             ClonableAsyncReader::Http(reader) => reader,
         }
@@ -97,7 +98,7 @@ impl AsyncReader {
         if from >= to {
             return Err(LavaError::Io(std::io::ErrorKind::InvalidData.into()));
         }
-        
+
         // only check the cache if self.filename has extension .lava
         if self.filename.ends_with(".lava") {
             match env::var_os("ROTTNEST_CACHE_DIR") {
@@ -114,22 +115,25 @@ impl AsyncReader {
                         let mut file = std::fs::File::open(path)?;
                         let mut bytes = Vec::new();
                         file.read_to_end(&mut bytes)?;
-                        let regions: BTreeMap<(usize, usize), Vec<u8>> = bincode::deserialize(&bytes)?;
+                        let regions: BTreeMap<(usize, usize), Vec<u8>> =
+                            bincode::deserialize(&bytes)?;
 
                         // see if any of the regions encompass the range
                         for ((start, end), bytes) in regions {
                             if from >= start as u64 && to <= end as u64 {
                                 println!("cache hit");
-                                let bytes = bytes[(from - start as u64) as usize .. (to - start as u64) as usize].to_vec();
+                                let bytes = bytes
+                                    [(from - start as u64) as usize..(to - start as u64) as usize]
+                                    .to_vec();
                                 return Ok(Bytes::from(bytes));
                             }
                         }
                     }
-                },
-                None => {},
+                }
+                None => {}
             }
         }
-        
+
         self.deref_mut().read_range(from, to).await
     }
 
@@ -158,7 +162,7 @@ impl AsyncReader {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum ReaderType {
     #[default]
-    Opendal,
+    Local,
     AwsSdk,
     Http,
 }
@@ -166,7 +170,7 @@ pub enum ReaderType {
 impl From<String> for ReaderType {
     fn from(value: String) -> Self {
         match value.to_lowercase().as_str() {
-            "opendal" => ReaderType::Opendal,
+            "local" => ReaderType::Local,
             "aws" => ReaderType::AwsSdk,
             "http" => ReaderType::Http,
             _ => Default::default(),
@@ -257,19 +261,17 @@ pub async fn get_file_size_and_reader(
     // always choose opendal for none s3 file
     let reader_type = if file.starts_with("http://") || file.starts_with("https://") {
         ReaderType::Http
+    } else if file.starts_with("s3://") {
+        ReaderType::AwsSdk
     } else {
-        if file.starts_with("s3://") {
-            reader_type
-        } else {
-            Default::default()
-        }
+        Default::default()
     };
 
     let (file_size, reader) = match reader_type {
-        ReaderType::Opendal => {
-            let (file_size, reader) = opendal_reader::get_reader(file).await?;
+        ReaderType::Local => {
+            let (file_size, reader) = local_reader::get_reader(file).await?;
             let filename = reader.filename.clone();
-            let reader = AsyncReader::new(ClonableAsyncReader::Opendal(reader), filename);
+            let reader = AsyncReader::new(ClonableAsyncReader::Local(reader), filename);
             (file_size, reader)
         }
         ReaderType::AwsSdk => {
@@ -289,26 +291,21 @@ pub async fn get_file_size_and_reader(
     Ok((file_size, reader))
 }
 
-pub async fn get_reader(
-    file: String,
-    reader_type: ReaderType,
-) -> Result<AsyncReader, LavaError> {
+pub async fn get_reader(file: String, reader_type: ReaderType) -> Result<AsyncReader, LavaError> {
     // always choose opendal for none s3 file
     let reader_type = if file.starts_with("http://") || file.starts_with("https://") {
         ReaderType::Http
+    } else if file.starts_with("s3://") {
+        ReaderType::AwsSdk
     } else {
-        if file.starts_with("s3://") {
-            reader_type
-        } else {
-            Default::default()
-        }
+        Default::default()
     };
 
     let reader = match reader_type {
-        ReaderType::Opendal => {
-            let (file_size, reader) = opendal_reader::get_reader(file).await?;
+        ReaderType::Local => {
+            let (_file_size, reader) = local_reader::get_reader(file).await?;
             let filename = reader.filename.clone();
-            let reader = AsyncReader::new(ClonableAsyncReader::Opendal(reader), filename);
+            let reader = AsyncReader::new(ClonableAsyncReader::Local(reader), filename);
             reader
         }
         ReaderType::AwsSdk => {
@@ -318,7 +315,7 @@ pub async fn get_reader(
             async_reader
         }
         ReaderType::Http => {
-            let (file_size, reader) = http_reader::get_reader(file).await?;
+            let (_file_size, reader) = http_reader::get_reader(file).await?;
             let filename = reader.url.clone();
             let async_reader = AsyncReader::new(ClonableAsyncReader::Http(reader), filename);
             async_reader
