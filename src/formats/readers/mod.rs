@@ -50,9 +50,7 @@ impl Clone for AsyncReader {
     fn clone(&self) -> Self {
         Self {
             reader: match &self.reader {
-                ClonableAsyncReader::Local(_) => {
-                    panic!("Clone is not allowed with local reader.")
-                }
+                ClonableAsyncReader::Local(reader) => ClonableAsyncReader::Local(reader.clone()),
                 ClonableAsyncReader::AwsSdk(reader) => ClonableAsyncReader::AwsSdk(reader.clone()),
                 ClonableAsyncReader::Http(reader) => ClonableAsyncReader::Http(reader.clone()),
             },
