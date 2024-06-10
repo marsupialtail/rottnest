@@ -637,11 +637,14 @@ pub async fn search_lava_vector_async(
 
     let start = Instant::now();
 
-    let mut readers_map: BTreeMap<usize, AsyncReader> = BTreeMap::new();
-    for file_id in file_ids.iter() {
-        let reader = get_reader(files[*file_id].clone(), reader_type.clone()).await.unwrap();
-        readers_map.insert(*file_id, reader);
-    }
+    // let mut readers_map: BTreeMap<usize, AsyncReader> = BTreeMap::new();
+    // for file_id in file_ids.iter() {
+    //     let reader = get_reader(files[*file_id].clone(), reader_type.clone()).await.unwrap();
+    //     readers_map.insert(*file_id, reader);
+    // }
+
+    let config = aws_config::load_from_env().await;
+    let client = aws_sdk_s3::Client::new(&config);
 
     let mut futures = FuturesUnordered::new();
     for i in 0 .. result.len() {
@@ -651,12 +654,33 @@ pub async fn search_lava_vector_async(
             // let my_reader_type = reader_type.clone();
             // let mut reader = get_reader(file_name, my_reader_type).await.unwrap();
             let start_time = Instant::now();
-            let mut reader = readers_map.get_mut(&file_id).unwrap().clone();
-            println!("Time to get reader {:?}", Instant::now() - start_time);
+            // let mut reader = readers_map.get_mut(&file_id).unwrap().clone();
+            let client_c = client.clone();
+            let filename = files[file_id].clone();
             futures.push(tokio::spawn(async move {
                 
                 let start_time = Instant::now();
-                let codes_and_plist = reader.read_range(start, end).await.unwrap();
+                // let codes_and_plist = reader.read_range(start, end).await.unwrap();
+
+                let tokens = filename[5..].split('/').collect::<Vec<_>>();
+                let bucket = tokens[0].to_string();
+                let filename = tokens[1..].join("/");
+                let start_time = std::time::Instant::now();
+                let mut object = client_c
+                    .get_object()
+                    .bucket(bucket.clone())
+                    .key(filename.clone())
+                    .set_range(Some(format!("bytes={}-{}", start, end - 1).to_string()))
+                    .send()
+                    .await
+                    .unwrap();
+                let mut page_bytes: Vec<u8> = Vec::new();
+                while let Some(bytes) = object.body.try_next().await.unwrap() {
+                    page_bytes.extend(bytes);
+                }
+                let codes_and_plist : bytes::Bytes  = bytes::Bytes::from(page_bytes);
+
+
                 println!("Time to read {:?}, {:?}", Instant::now() - start_time, codes_and_plist.len());
                 (file_id, Array1::<u8>::from_vec(codes_and_plist.to_vec()))
             }));

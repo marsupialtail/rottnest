@@ -453,6 +453,9 @@ pub async fn read_indexed_pages_async(
         None => parse_metadatas(&file_paths, reader_type.clone()).await
     };
 
+    let config = aws_config::load_from_env().await;
+    let client = aws_sdk_s3::Client::new(&config);
+
     let iter = izip!(
         file_paths,
         row_groups,
@@ -460,6 +463,8 @@ pub async fn read_indexed_pages_async(
         page_sizes,
         dict_page_sizes
     );
+
+    let start = std::time::Instant::now();
 
     let iter: Vec<tokio::task::JoinHandle<ArrayData>> = stream::iter(iter)
         .map(
@@ -490,37 +495,36 @@ pub async fn read_indexed_pages_async(
                 let mut codec = create_codec(compression_scheme, &codec_options)
                     .unwrap()
                     .unwrap();
-                let reader_type = reader_type.clone();
+                let client_c = client.clone();
 
                 let handle = tokio::spawn(async move {
                     debug!("tokio spawn thread: {:?}", std::thread::current().id());
-                    let mut reader = get_reader(file_path.clone(), reader_type)
-                            .await
-                            .unwrap();
+                    
                     let mut pages: Vec<parquet::column::page::Page> = Vec::new();
                     if dict_page_size > 0 {
-                        let start = dict_page_offset.unwrap() as u64;
-                        let dict_page_bytes = reader
-                            .read_range(start, start + dict_page_size as u64)
-                            .await
-                            .unwrap();
-                        let dict_page_bytes = Bytes::from(dict_page_bytes);
-                        let (dict_header_len, dict_header) =
-                            read_page_header(&dict_page_bytes, 0).unwrap();
-                        let dict_page = decode_page(
-                            dict_header,
-                            dict_page_bytes.slice(dict_header_len..dict_page_size),
-                            Type::BYTE_ARRAY,
-                            Some(&mut codec),
-                        )
-                        .unwrap();
-                        pages.push(dict_page);
+                        panic!("dict page not supported yet");
                     }
 
-                    let page_bytes = reader
-                        .read_range(page_offset, page_offset + page_size as u64)
+                    let tokens = file_path[5..].split('/').collect::<Vec<_>>();
+                    let bucket = tokens[0].to_string();
+                    let filename = tokens[1..].join("/");
+                    let start_time = std::time::Instant::now();
+                    let mut object = client_c
+                        .get_object()
+                        .bucket(bucket.clone())
+                        .key(filename.clone())
+                        .set_range(Some(format!("bytes={}-{}", page_offset, page_offset + page_size as u64 - 1).to_string()))
+                        .send()
                         .await
                         .unwrap();
+                    let mut page_bytes: Vec<u8> = Vec::new();
+                    while let Some(bytes) = object.body.try_next().await.unwrap() {
+                        page_bytes.extend(bytes);
+                    }
+                    let page_bytes : Bytes  = Bytes::from(page_bytes);
+    
+                    let end_time = std::time::Instant::now();
+                    println!("S3 read time: {:?}, read bytes {:?}", end_time - start_time, page_bytes.len());
                     let (header_len, header) = read_page_header(&page_bytes, 0).unwrap();
                     let page: Page = decode_page(
                         header,
@@ -582,11 +586,183 @@ pub async fn read_indexed_pages_async(
             })
         });
 
+    let end = std::time::Instant::now();
+    println!("read_indexed_pages_async took {:?}", end - start);
+
     result.map_err(|e| {
         // Here, you can convert `e` (a JoinError) into your custom error type.
         LavaError::from(ParquetError::General(e.to_string()))
     })
 }
+
+// pub async fn read_indexed_pages_async(
+//     column_name: String,
+//     file_paths: Vec<String>,
+//     row_groups: Vec<usize>,
+//     page_offsets: Vec<u64>,
+//     page_sizes: Vec<usize>,
+//     dict_page_sizes: Vec<usize>, // 0 means no dict page
+//     reader_type: ReaderType,
+//     file_metadatas: Option<HashMap<String, Bytes>>,
+// ) -> Result<Vec<ArrayData>, LavaError> {
+//     // current implementation might re-read dictionary pages, this should be optimized
+//     // we are assuming that all the files are either on disk or cloud.
+
+//     let codec_options = CodecOptionsBuilder::default()
+//         .set_backward_compatible_lz4(false)
+//         .build();
+
+//     let metadatas = match file_metadatas {
+//         Some(file_metadatas) => {
+//             println!("Using provided file metadatas");
+//             let mut metadatas: HashMap<String, ParquetMetaData> = HashMap::new();
+//             for (key, value) in file_metadatas.into_iter() {
+//                 metadatas.insert(key, decode_metadata(value.to_byte_slice()).map_err(LavaError::from).unwrap());
+//             }
+//             metadatas
+//         },
+//         None => parse_metadatas(&file_paths, reader_type.clone()).await
+//     };
+
+//     let iter = izip!(
+//         file_paths,
+//         row_groups,
+//         page_offsets,
+//         page_sizes,
+//         dict_page_sizes
+//     );
+
+//     let start = std::time::Instant::now();
+
+//     let iter: Vec<tokio::task::JoinHandle<ArrayData>> = stream::iter(iter)
+//         .map(
+//             |(file_path, row_group, page_offset, page_size, dict_page_size)| {
+//                 let column_index = metadatas[&file_path]
+//                     .file_metadata()
+//                     .schema_descr()
+//                     .columns()
+//                     .iter()
+//                     .position(|column| column.name() == column_name)
+//                     .expect(&format!(
+//                         "column {} not found in parquet file {}",
+//                         column_name, file_path
+//                     ));
+//                 let column_descriptor = metadatas[&file_path]
+//                     .row_group(row_group)
+//                     .schema_descr()
+//                     .column(column_index);
+                
+//                 let compression_scheme = metadatas[&file_path]
+//                     .row_group(row_group)
+//                     .column(column_index)
+//                     .compression();
+//                 let dict_page_offset = metadatas[&file_path]
+//                     .row_group(row_group)
+//                     .column(column_index)
+//                     .dictionary_page_offset();
+//                 let mut codec = create_codec(compression_scheme, &codec_options)
+//                     .unwrap()
+//                     .unwrap();
+//                 let reader_type = reader_type.clone();
+
+//                 let handle = tokio::spawn(async move {
+//                     debug!("tokio spawn thread: {:?}", std::thread::current().id());
+//                     let mut reader = get_reader(file_path.clone(), reader_type)
+//                             .await
+//                             .unwrap();
+//                     let mut pages: Vec<parquet::column::page::Page> = Vec::new();
+//                     if dict_page_size > 0 {
+//                         let start = dict_page_offset.unwrap() as u64;
+//                         let dict_page_bytes = reader
+//                             .read_range(start, start + dict_page_size as u64)
+//                             .await
+//                             .unwrap();
+//                         let dict_page_bytes = Bytes::from(dict_page_bytes);
+//                         let (dict_header_len, dict_header) =
+//                             read_page_header(&dict_page_bytes, 0).unwrap();
+//                         let dict_page = decode_page(
+//                             dict_header,
+//                             dict_page_bytes.slice(dict_header_len..dict_page_size),
+//                             Type::BYTE_ARRAY,
+//                             Some(&mut codec),
+//                         )
+//                         .unwrap();
+//                         pages.push(dict_page);
+//                     }
+
+//                     let page_bytes = reader
+//                         .read_range(page_offset, page_offset + page_size as u64)
+//                         .await
+//                         .unwrap();
+//                     let (header_len, header) = read_page_header(&page_bytes, 0).unwrap();
+//                     let page: Page = decode_page(
+//                         header,
+//                         page_bytes.slice(header_len..page_size),
+//                         Type::BYTE_ARRAY,
+//                         Some(&mut codec),
+//                     )
+//                     .unwrap();
+//                     let num_values = page.num_values();
+
+//                     pages.push(page);
+//                     let page_iterator = InMemoryPageIterator::new(vec![pages]);
+//                     let mut array_reader = make_byte_array_reader(
+//                         Box::new(page_iterator),
+//                         column_descriptor.clone(),
+//                         None,
+//                     )
+//                     .unwrap();
+//                     let array = array_reader.next_batch(num_values as usize).unwrap();
+
+//                     let new_array: Result<
+//                         &arrow_array::GenericByteArray<arrow::datatypes::GenericStringType<i32>>,
+//                         ArrowError,
+//                     > = array.as_any().downcast_ref::<StringArray>().ok_or_else(|| {
+//                         ArrowError::ParseError("Expects string array as first argument".to_string())
+//                     });
+
+//                     let data = match new_array {
+//                         Ok(_) => new_array.unwrap().to_data(),
+//                         Err(_) => array
+//                             .as_any()
+//                             .downcast_ref::<BinaryArray>()
+//                             .ok_or_else(|| {
+//                                 ArrowError::ParseError(
+//                                     "Expects string or binary array as first argument".to_string(),
+//                                 )
+//                             })
+//                             .unwrap()
+//                             .to_data(),
+//                     };
+
+//                     data
+//                 });
+
+//                 handle
+//             },
+//         )
+//         .collect::<Vec<_>>()
+//         .await;
+
+//     // it is absolutely crucial to collect results in the same order.
+//     let res: Vec<std::prelude::v1::Result<ArrayData, tokio::task::JoinError>> =
+//         futures::future::join_all(iter).await;
+//     let result: Result<Vec<ArrayData>, tokio::task::JoinError> =
+//         res.into_iter().try_fold(Vec::new(), |mut acc, r| {
+//             r.map(|inner_vec| {
+//                 acc.push(inner_vec);
+//                 acc
+//             })
+//         });
+
+//     let end = std::time::Instant::now();
+//     println!("read_indexed_pages_async took {:?}", end - start);
+
+//     result.map_err(|e| {
+//         // Here, you can convert `e` (a JoinError) into your custom error type.
+//         LavaError::from(ParquetError::General(e.to_string()))
+//     })
+// }
 
 pub fn read_indexed_pages(
     column_name: String,
