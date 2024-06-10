@@ -31,6 +31,18 @@ impl DerefMut for AsyncLocalReader {
     }
 }
 
+impl Clone for AsyncLocalReader {
+    fn clone(&self) -> Self {
+        let file = std::fs::File::open(self.filename.clone()).unwrap();
+        let reader = File::from_std(file);
+        Self {
+            reader,
+            filename: self.filename.clone(),
+            file_size: self.file_size,
+        }
+    }
+}
+
 impl AsyncLocalReader {
     pub fn new(reader: File, filename: String) -> Self {
         Self {
