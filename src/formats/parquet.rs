@@ -609,9 +609,9 @@ pub fn read_indexed_pages(
     file_metadatas: Option<HashMap<String, Bytes>>
 ) -> Result<Vec<ArrayData>, LavaError> {
     let rt = tokio::runtime::Builder::new_multi_thread()
-    .enable_all()
-    .build()
-    .unwrap();
+        .enable_all()
+        .build()
+        .unwrap();
 
     let res = rt.block_on(read_indexed_pages_async(
                 column_name,

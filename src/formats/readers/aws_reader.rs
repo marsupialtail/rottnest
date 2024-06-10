@@ -79,14 +79,19 @@ impl super::Reader for AsyncAwsReader {
         let mut res = BytesMut::with_capacity(total as usize);
         let (bucket, filename) = (&self.bucket, &self.filename);
 
-        let mut object = self
-            .get_object()
-            .bucket(bucket)
-            .key(filename)
-            .set_range(Some(format!("bytes={}-{}", from, to - 1).to_string()))
-            .send()
-            .await
-            .map_err(|e| LavaError::AwsSdk(e.to_string()))?;
+        let mut object = loop {
+            let this_result = self
+                .get_object()
+                .bucket(bucket)
+                .key(filename)
+                .set_range(Some(format!("bytes={}-{}", from, to - 1)))
+                .send()
+                .await;
+            
+            if let Ok(res) = this_result {
+                break res;
+            }
+        };
 
         while let Some(chunk) = object
             .body
