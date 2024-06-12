@@ -107,14 +107,16 @@ pub fn get_tokenizer_vocab(
     py.allow_threads(|| lava::get_tokenizer_vocab(files, reader_type.into()))
 }
 
+
 #[pyfunction]
-pub fn merge_lava_bm25(
+pub fn merge_lava_generic(
     py: Python,
     condensed_lava_file: String,
     lava_files: Vec<String>,
     uid_offsets: Vec<u64>,
+    merge_type: usize,
     reader_type: Option<&PyString>,
-) -> Result<(), LavaError> {
+) -> Result<Vec<(usize, usize)>, LavaError> {
     let reader_type = reader_type.map(|x| x.to_string()).unwrap_or_default();
 
     py.allow_threads(|| {
@@ -123,51 +125,7 @@ pub fn merge_lava_bm25(
             lava_files,
             uid_offsets,
             2,
-            0,
-            reader_type.into(),
-        )
-    })
-}
-
-#[pyfunction]
-pub fn merge_lava_substring(
-    py: Python,
-    condensed_lava_file: String,
-    lava_files: Vec<String>,
-    uid_offsets: Vec<u64>,
-    reader_type: Option<&PyString>,
-) -> Result<(), LavaError> {
-    let reader_type = reader_type.map(|x| x.to_string()).unwrap_or_default();
-
-    py.allow_threads(|| {
-        lava::parallel_merge_files(
-            condensed_lava_file,
-            lava_files,
-            uid_offsets,
-            2,
-            1,
-            reader_type.into(),
-        )
-    })
-}
-
-#[pyfunction]
-pub fn merge_lava_uuid(
-    py: Python,
-    condensed_lava_file: String,
-    lava_files: Vec<String>,
-    uid_offsets: Vec<u64>,
-    reader_type: Option<&PyString>,
-) -> Result<(), LavaError> {
-    let reader_type = reader_type.map(|x| x.to_string()).unwrap_or_default();
-
-    py.allow_threads(|| {
-        lava::parallel_merge_files(
-            condensed_lava_file,
-            lava_files,
-            uid_offsets,
-            2,
-            2,
+            merge_type,
             reader_type.into(),
         )
     })

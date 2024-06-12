@@ -677,7 +677,8 @@ async fn async_parallel_merge_files(
     k: usize,
     mode: usize, // 0 for bm25 1 for substring 2 for uuid
     reader_type: ReaderType,
-) -> Result<(), LavaError> {
+    cache_ranges: Option<Vec<Vec<(usize, usize)>>>
+) -> Result<Vec<(usize, usize)>, LavaError> {
     assert!(mode == 1 || mode == 0 || mode == 2);
     if  mode == 2 || mode == 1 {
         assert_eq!(k, 2);
@@ -688,7 +689,9 @@ async fn async_parallel_merge_files(
         1 => {
             // the recursion will end here in this case. rename the files[0] to the supposed output name
             std::fs::rename(files[0].clone(), condensed_lava_file).unwrap();
-            Ok(())
+            let mut cache_ranges = cache_ranges.unwrap();
+            assert!(cache_ranges.len() == 1);
+            Ok(cache_ranges.remove(0))
         }
         _ => {
             // More than one file, need to merge
@@ -781,7 +784,7 @@ async fn async_parallel_merge_files(
                 tasks.push(task);
             }
 
-            // Wait for all tasks to complete
+            // Wait for all tasks to complete, MUST BE IN ORDER due to cache_ranges!
             let cache_ranges: Vec<Vec<(usize, usize)>> = futures::future::join_all(tasks)
                 .await
                 .into_iter()
@@ -808,6 +811,7 @@ async fn async_parallel_merge_files(
                 k,
                 mode,
                 reader_type.clone(),
+                Some(cache_ranges)
             )
             .await
         }
@@ -822,7 +826,7 @@ pub async fn parallel_merge_files(
     k: usize,
     mode: usize, // 0 for bm25 1 for substring 2 for uuid
     reader_type: ReaderType,
-) -> Result<(), LavaError> {
+) -> Result<Vec<(usize, usize)>, LavaError> {
     let do_not_delete = BTreeSet::from_iter(files.clone().into_iter());
     let result = async_parallel_merge_files(
         condensed_lava_file,
@@ -832,6 +836,7 @@ pub async fn parallel_merge_files(
         k,
         mode,
         reader_type,
+        None
     )
     .await?;
     Ok(result)
