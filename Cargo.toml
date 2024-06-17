@@ -81,6 +81,7 @@ numpy = "0.21.0"
 num-traits = "0.2.18"
 ordered-float = "4.2.0"
 reqwest = "0.12.4"
+redis = {version = "0", features = ["aio", "tokio-comp"] }
 
 [profile.release]
 lto = false
