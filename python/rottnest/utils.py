@@ -109,12 +109,11 @@ def get_metadata_and_populate_cache(indices: List[str]):
     metadatas = [(polars.from_arrow(i), json.loads(i.schema.metadata[b'cache_ranges'].decode())) for i in metadatas]
 
     metadata = polars.concat([f[0].with_columns(polars.lit(i).alias("file_id").cast(polars.Int64)) for i, f in enumerate(metadatas)])
-    cache_dir = os.getenv("ROTTNEST_CACHE_DIR")
-    if cache_dir:
+    if os.getenv("CACHE_ENABLE").lower() == "true":
         cache_ranges = {f"{indices[i]}.lava": f[1] for i, f in enumerate(metadatas) if len(f[1]) > 0}
         cached_files = list(cache_ranges.keys())
         ranges = [[tuple(k) for k in cache_ranges[f]] for f in cached_files]
-        rottnest.populate_cache(cached_files, ranges, cache_dir, "aws")
+        rottnest.populate_cache(cached_files, ranges,  "aws")
 
     return metadata
 

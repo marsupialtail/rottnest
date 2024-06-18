@@ -5,32 +5,28 @@ use crate::{
 use std::collections::BTreeMap;
 use std::io::Write;
 
+use super::redis_client::get_redis_connection;
+
 #[tokio::main]
 pub async fn populate_cache(
     ranges: BTreeMap<String, Vec<(usize, usize)>>,
-    cache_dir: &str,
     reader_type: ReaderType
 ) -> Result<(), LavaError> {
 
-    
+    let mut conn = get_redis_connection().await?;
+
     for (file_path, ranges) in &ranges {
         let (_, mut reader) = get_file_size_and_reader(file_path.to_string(), reader_type.clone()).await?;
-        let path = std::path::Path::new(cache_dir);
-        let cache_file = path.join(&file_path.split("/").last().unwrap());
-        let path = cache_file.with_extension("cache");
-        println!("looking in cache: {}", path.display());
+        let cached_ranges = conn.get_ranges(&file_path).await?;
         // check if exists
-        if ! path.exists() {
-            println!("writing to cache: {}", path.display());
-            let mut regions: BTreeMap<(usize, usize), Vec<u8>> = BTreeMap::new();
+        if cached_ranges.len() == 0 {
+            println!("writing to cache: {}", file_path);
             for (from, to) in ranges {
                 let data = reader.read_range(*from as u64, *to as u64).await?;
-                regions.insert((*from, *to), data.to_vec());
+                conn.set_data(&file_path, *from as u64, *to as u64, data.to_vec()).await?;
             }
 
-            let mut file = std::fs::File::create(path)?;
-            let bytes = bincode::serialize(&regions)?;
-            file.write_all(&bytes)?;
+            conn.set_ranges(&file_path, ranges).await?;
         }
         
     }
