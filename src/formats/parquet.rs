@@ -38,7 +38,8 @@ use crate::{
 };
 
 use super::readers::ReaderType;
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
+use tokio::task::JoinSet;
 
 async fn get_metadata_bytes(
     reader: &mut AsyncReader,
@@ -205,13 +206,16 @@ async fn parse_metadatas(
                     .await
                     .unwrap();
 
-                let metadata = decode_metadata(metadata_bytes.to_byte_slice()).map_err(LavaError::from).unwrap();
+                let metadata = decode_metadata(metadata_bytes.to_byte_slice())
+                    .map_err(LavaError::from)
+                    .unwrap();
                 (file_path, metadata)
             })
         })
         .collect::<Vec<_>>()
         .await;
-    let res: Vec<Result<(String, ParquetMetaData), tokio::task::JoinError>> = futures::future::join_all(handles).await;
+    let res: Vec<Result<(String, ParquetMetaData), tokio::task::JoinError>> =
+        futures::future::join_all(handles).await;
 
     let mut metadatas = HashMap::new();
 
@@ -433,6 +437,7 @@ pub async fn read_indexed_pages_async(
     dict_page_sizes: Vec<usize>, // 0 means no dict page
     reader_type: ReaderType,
     file_metadatas: Option<HashMap<String, Bytes>>,
+    in_order: Option<bool>,
 ) -> Result<Vec<ArrayData>, LavaError> {
     // current implementation might re-read dictionary pages, this should be optimized
     // we are assuming that all the files are either on disk or cloud.
@@ -446,17 +451,23 @@ pub async fn read_indexed_pages_async(
             println!("Using provided file metadatas");
             let mut metadatas: HashMap<String, ParquetMetaData> = HashMap::new();
             for (key, value) in file_metadatas.into_iter() {
-                metadatas.insert(key, decode_metadata(value.to_byte_slice()).map_err(LavaError::from).unwrap());
+                metadatas.insert(
+                    key,
+                    decode_metadata(value.to_byte_slice())
+                        .map_err(LavaError::from)
+                        .unwrap(),
+                );
             }
             metadatas
-        },
-        None => parse_metadatas(&file_paths, reader_type.clone()).await
+        }
+        None => parse_metadatas(&file_paths, reader_type.clone()).await,
     };
 
+    let in_order: bool = in_order.unwrap_or(true);
 
     let mut reader = get_reader(file_paths[0].clone(), reader_type.clone())
-                            .await
-                            .unwrap();
+        .await
+        .unwrap();
 
     let iter = izip!(
         file_paths,
@@ -468,8 +479,10 @@ pub async fn read_indexed_pages_async(
 
     let start = std::time::Instant::now();
 
+    let mut future_handles: Vec<tokio::task::JoinHandle<ArrayData>> = vec![];
+    let mut join_set = JoinSet::new();
 
-    let iter: Vec<tokio::task::JoinHandle<ArrayData>> = stream::iter(iter)
+    let iter: Vec<_> = stream::iter(iter)
         .map(
             |(file_path, row_group, page_offset, page_size, dict_page_size)| {
                 let column_index = metadatas[&file_path]
@@ -486,7 +499,7 @@ pub async fn read_indexed_pages_async(
                     .row_group(row_group)
                     .schema_descr()
                     .column(column_index);
-                
+
                 let compression_scheme = metadatas[&file_path]
                     .row_group(row_group)
                     .column(column_index)
@@ -498,12 +511,11 @@ pub async fn read_indexed_pages_async(
                 let mut codec = create_codec(compression_scheme, &codec_options)
                     .unwrap()
                     .unwrap();
-                
+
                 let mut reader_c = reader.clone();
                 reader_c.update_filename(file_path).unwrap();
 
-                let handle = tokio::spawn(async move {
-                    
+                let future = async move {
                     let mut pages: Vec<parquet::column::page::Page> = Vec::new();
                     if dict_page_size > 0 {
                         let start = dict_page_offset.unwrap() as u64;
@@ -570,32 +582,39 @@ pub async fn read_indexed_pages_async(
                     };
 
                     data
-                });
+                };
 
-                handle
+                if in_order {
+                    let handle = tokio::spawn(future);
+                    future_handles.push(handle);
+                } else {
+                    join_set.spawn(future);
+                }
             },
         )
         .collect::<Vec<_>>()
         .await;
 
     // it is absolutely crucial to collect results in the same order.
-    let res: Vec<std::prelude::v1::Result<ArrayData, tokio::task::JoinError>> =
-        futures::future::join_all(iter).await;
-    let result: Result<Vec<ArrayData>, tokio::task::JoinError> =
-        res.into_iter().try_fold(Vec::new(), |mut acc, r| {
-            r.map(|inner_vec| {
-                acc.push(inner_vec);
-                acc
-            })
-        });
+
+    let result: Vec<ArrayData> = if in_order {
+        let res: Vec<std::prelude::v1::Result<ArrayData, tokio::task::JoinError>> =
+            futures::future::join_all(future_handles).await;
+        res.into_iter().map(|res| res.unwrap()).collect()
+    } else {
+        let mut result_inner: Vec<ArrayData> = vec![];
+        while let Some(res) = join_set.join_next().await {
+            result_inner.push(res.unwrap());
+        }
+        result_inner
+    };
+
+    join_set.shutdown().await;
 
     let end = std::time::Instant::now();
     println!("read_indexed_pages_async took {:?}", end - start);
 
-    result.map_err(|e| {
-        // Here, you can convert `e` (a JoinError) into your custom error type.
-        LavaError::from(ParquetError::General(e.to_string()))
-    })
+    Ok(result)
 }
 
 pub fn read_indexed_pages(
@@ -606,7 +625,8 @@ pub fn read_indexed_pages(
     page_sizes: Vec<usize>,
     dict_page_sizes: Vec<usize>, // 0 means no dict page
     reader_type: ReaderType,
-    file_metadatas: Option<HashMap<String, Bytes>>
+    file_metadatas: Option<HashMap<String, Bytes>>,
+    in_order: Option<bool>,
 ) -> Result<Vec<ArrayData>, LavaError> {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -614,15 +634,16 @@ pub fn read_indexed_pages(
         .unwrap();
 
     let res = rt.block_on(read_indexed_pages_async(
-                column_name,
-                file_paths,
-                row_groups,
-                page_offsets,
-                page_sizes,
-                dict_page_sizes,
-                reader_type,
-                file_metadatas
-            ));
+        column_name,
+        file_paths,
+        row_groups,
+        page_offsets,
+        page_sizes,
+        dict_page_sizes,
+        reader_type,
+        file_metadatas,
+        in_order,
+    ));
     rt.shutdown_background();
     res
 }

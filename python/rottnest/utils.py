@@ -46,7 +46,7 @@ def read_metadata_file(file_path: str):
 
     return polars.from_arrow(table), cache_ranges
 
-def read_columns(file_paths: list, row_groups: list, row_nr: list[list]):
+def read_columns(file_paths: list, row_groups: list, row_nr: list):
 
     def read_parquet_file(file, row_group, row_nr):
         f = pq.ParquetFile(file.replace("s3://",''), filesystem=get_fs_from_file_path(file))
