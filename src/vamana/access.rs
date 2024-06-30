@@ -1,12 +1,9 @@
 use crate::formats::parquet::read_indexed_pages_async;
 use crate::formats::readers::ReaderType;
-use crate::vamana::vamana::{
-    Distance, Indexable, VectorAccessMethod,
-};
+use crate::vamana::vamana::{Distance, Indexable, VectorAccessMethod};
 use arrow::array::BinaryArray;
 use ndarray::parallel::prelude::*;
 use ndarray::{s, Array2};
-
 
 pub struct Euclidean<T: Indexable> {
     t: std::marker::PhantomData<T>,
@@ -74,6 +71,7 @@ impl VectorAccessMethod<f32> for ReaderAccessMethodF32<'_> {
             vec![page_size],
             vec![dict_page_size], // 0 means no dict page
             reader_type,
+            None,
             None,
         )
         .await

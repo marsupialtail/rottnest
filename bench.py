@@ -25,6 +25,7 @@ result = pyarrow.chunked_array(rottnest.rottnest.read_indexed_pages("text", ["s3
                                                                     metadata["page_byte_size"].to_list(), 
                                                                     [0] * len(metadata["filename"]), 
                                                                     "aws",
-                                                                    file_metadata))
+                                                                    file_metadata,
+                                                                    False))
 
 print(len(result))

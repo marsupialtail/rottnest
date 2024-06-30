@@ -1,14 +1,14 @@
-use crate::formats::{parquet, cache, MatchResult, ParquetLayout};
+use crate::formats::{cache, parquet, MatchResult, ParquetLayout};
 use crate::lava::error::LavaError;
-use bytes::Bytes;
 use arrow::array::ArrayData;
 use arrow::pyarrow::{PyArrowType, ToPyArrow};
+use bytes::Bytes;
 use pyo3::prelude::*;
+use pyo3::types::{PyBytes, PyDict, PyList, PyTuple};
 use pyo3::{pyfunction, types::PyString};
 use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
-use pyo3::types::{PyDict, PyBytes, PyTuple, PyList};
 use std::collections::{BTreeMap, HashMap};
+use std::hash::{Hash, Hasher};
 
 #[pyclass]
 pub struct ParquetLayoutWrapper {
@@ -32,7 +32,7 @@ impl ParquetLayoutWrapper {
     fn from_parquet_layout(py: Python, parquet_layout: ParquetLayout) -> Self {
         ParquetLayoutWrapper {
             num_row_groups: parquet_layout.num_row_groups,
-            metadata_bytes: PyBytes::new(py, &parquet_layout.metadata_bytes.slice(..)).into_py(py), 
+            metadata_bytes: PyBytes::new(py, &parquet_layout.metadata_bytes.slice(..)).into_py(py),
             dictionary_page_sizes: parquet_layout.dictionary_page_sizes,
             data_page_sizes: parquet_layout.data_page_sizes,
             data_page_offsets: parquet_layout.data_page_offsets,
@@ -95,27 +95,21 @@ impl From<MatchResult> for MatchResultWrapper {
     }
 }
 
-
 #[pyfunction]
 pub fn populate_cache(
     py: Python,
     filenames: Vec<&PyString>,
     ranges: Vec<Vec<(usize, usize)>>,
-    cache_dir: &PyString,
-    reader_type: Option<&PyString>
-)  -> Result<(), LavaError> {
-
+    reader_type: Option<&PyString>,
+) -> Result<(), LavaError> {
     let reader_type = reader_type.map(|x| x.to_string()).unwrap_or_default();
-    let cache_dir = cache_dir.to_string();
-   
+
     let mut range_dict: BTreeMap<String, Vec<(usize, usize)>> = BTreeMap::new();
     for (i, filename) in filenames.iter().enumerate() {
         range_dict.insert(filename.to_string(), ranges[i].clone());
     }
 
-    py.allow_threads(|| {
-        cache::populate_cache(range_dict, &cache_dir, reader_type.into())
-    })
+    py.allow_threads(|| cache::populate_cache(range_dict, reader_type.into()))
 }
 
 #[pyfunction]
@@ -147,23 +141,25 @@ pub fn read_indexed_pages(
     dict_page_sizes: Vec<usize>,
     reader_type: Option<&PyString>,
     metadata_bytes: Option<&PyDict>,
+    in_order: Option<bool>,
 ) -> Result<Vec<PyArrowType<ArrayData>>, LavaError> {
     let column_name = column_name.to_string();
-    let file_metadata: Option<HashMap<String, Bytes>>  = match metadata_bytes {
+    let file_metadata: Option<HashMap<String, Bytes>> = match metadata_bytes {
         Some(dict) => {
             let mut metadata_map: HashMap<String, Bytes> = HashMap::new();
             if let Some(dict) = metadata_bytes {
                 for (key, value) in dict.iter() {
                     let key_str = key.extract::<&PyString>()?.to_string();
-                    let value_bytes = Bytes::copy_from_slice(value.extract::<&PyBytes>()?.as_bytes());
+                    let value_bytes =
+                        Bytes::copy_from_slice(value.extract::<&PyBytes>()?.as_bytes());
                     metadata_map.insert(key_str, value_bytes);
                 }
             }
             Some(metadata_map)
         }
-        None => None
+        None => None,
     };
-        
+
     let file_paths: Vec<String> = file_paths.iter().map(|x| x.to_string()).collect();
     let page_offsets: Vec<u64> = page_offsets.iter().map(|x| *x as u64).collect();
     let reader_type = reader_type.map(|x| x.to_string()).unwrap_or_default();
@@ -177,6 +173,7 @@ pub fn read_indexed_pages(
             dict_page_sizes, // 0 means no dict page
             reader_type.into(),
             file_metadata,
+            in_order,
         )
     })?;
     Ok(match_result.into_iter().map(|x| PyArrowType(x)).collect())

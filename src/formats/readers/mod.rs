@@ -1,18 +1,17 @@
+use crate::formats::cache;
 use crate::lava::error::LavaError;
 use async_trait::async_trait;
 use bytes::Bytes;
 use local_reader::AsyncLocalReader;
 use std::collections::BTreeMap;
-use std::env;
+use std::{env, os};
 use std::{
     io::Read,
     ops::{Deref, DerefMut},
 };
 use zstd::stream::read::Decoder;
 
-use self::{
-    aws_reader::AsyncAwsReader, http_reader::AsyncHttpReader,
-};
+use self::{aws_reader::AsyncAwsReader, http_reader::AsyncHttpReader};
 mod aws_reader;
 mod http_reader;
 mod local_reader;
@@ -104,36 +103,30 @@ impl AsyncReader {
 
         // only check the cache if self.filename has extension .lava
         if self.filename.ends_with(".lava") {
-            match env::var_os("ROTTNEST_CACHE_DIR") {
-                Some(value) => {
-                    let path = std::path::Path::new(&value);
-                    // find path/filename.cache
-                    let path = path.join(&self.filename.split("/").last().unwrap());
-                    let path = path.with_extension("cache");
-                    println!("looking in cache: {}", path.display());
+            if "true"
+                == env::var_os("CACHE_ENABLE")
+                    .map(|s| s.to_ascii_lowercase())
+                    .unwrap_or_default()
+            {
+                // let path = std::path::Path::new(&value);
+                // find path/filename.cache
+                let mut conn = cache::get_redis_connection().await?;
+                println!("looking in cache: {}", self.filename);
+                let ranges = conn.get_ranges(&self.filename).await?;
 
-                    // see if this exists
-                    if path.exists() {
-                        // read in the entire file into bytes
-                        let mut file = std::fs::File::open(path)?;
-                        let mut bytes = Vec::new();
-                        file.read_to_end(&mut bytes)?;
-                        let regions: BTreeMap<(usize, usize), Vec<u8>> =
-                            bincode::deserialize(&bytes)?;
-
-                        // see if any of the regions encompass the range
-                        for ((start, end), bytes) in regions {
-                            if from >= start as u64 && to <= end as u64 {
-                                println!("cache hit");
-                                let bytes = bytes
-                                    [(from - start as u64) as usize..(to - start as u64) as usize]
-                                    .to_vec();
-                                return Ok(Bytes::from(bytes));
-                            }
+                // see if this exists
+                if ranges.len() > 0 {
+                    for ((start, end)) in ranges {
+                        if from >= start as u64 && to <= end as u64 {
+                            println!("cache hit");
+                            let data = conn.get_data(&self.filename, from, to).await?;
+                            let data = data
+                                [(from - start as u64) as usize..(to - start as u64) as usize]
+                                .to_vec();
+                            return Ok(Bytes::from(data));
                         }
                     }
                 }
-                None => {}
             }
         }
 

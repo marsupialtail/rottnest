@@ -13,6 +13,7 @@ pub enum LavaError {
     Thrift(#[from] thrift::Error),
     Tokenizers(#[from] tokenizers::Error),
     Unsupported(String),
+    Redis(#[from] redis::RedisError),
     Unknown,
     #[cfg(feature = "py")]
     Pyo3(#[from] pyo3::PyErr),
@@ -33,6 +34,7 @@ impl Display for LavaError {
             LavaError::Parquet(err) => write!(f, "Parquet error: {}", err),
             LavaError::Thrift(err) => write!(f, "Thrift error: {}", err),
             LavaError::Tokenizers(err) => write!(f, "Tokenizers error: {}", err),
+            LavaError::Redis(err) => write!(f, "Redis error: {}", err),
             #[cfg(feature = "py")]
             LavaError::Pyo3(err) => write!(f, "Pyo3 error: {}", err),
         }
