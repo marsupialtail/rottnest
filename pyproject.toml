@@ -12,7 +12,7 @@ classifiers = [
     "Programming Language :: Python :: Implementation :: PyPy",
 ]
 dynamic = ["version"]
-dependencies = ["pyarrow", "polars", "tqdm", "boto3"]
+dependencies = ["pyarrow", "polars", "tqdm", "boto3", "getdaft"]
 
 [tool.maturin]
 python-source = "python"

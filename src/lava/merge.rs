@@ -190,31 +190,47 @@ impl PListChunkIterator {
     }
 }
 
-
 async fn merge_lava_uuid(
     condensed_lava_file: &str,
     lava_files: Vec<String>,
     uid_offsets: Vec<u64>,
     reader_type: ReaderType,
-) -> Result<Vec<(usize, usize)>, LavaError> 
-{
+) -> Result<Vec<(usize, usize)>, LavaError> {
     // currently only support merging two files, but can support more in the future.
     assert_eq!(lava_files.len(), 2);
     assert_eq!(uid_offsets.len(), 2);
-    
-    let (file_size, mut reader) = get_file_size_and_reader(lava_files[0].clone(), reader_type.clone()).await?;
-    let buffer: bytes::Bytes = reader.read_range(0, file_size as u64).await?;
-    let mut fast_trie1 = FastTrie::deserialize(buffer.to_vec());
 
-    let (file_size, mut reader) = get_file_size_and_reader(lava_files[1].clone(), reader_type.clone()).await?;
-    let buffer: bytes::Bytes = reader.read_range(0, file_size as u64).await?;
-    let mut fast_trie2 = FastTrie::deserialize(buffer.to_vec());
+    let (file_size1, mut reader1) =
+        get_file_size_and_reader(lava_files[0].clone(), reader_type.clone()).await?;
+    let (file_size2, mut reader2) =
+        get_file_size_and_reader(lava_files[1].clone(), reader_type.clone()).await?;
 
-    fast_trie1.extend(&mut fast_trie2, uid_offsets[0] as usize, uid_offsets[1] as usize);
+    // let buffer: bytes::Bytes = reader1.read_range(0, file_size1 as u64).await?;
+    // let mut fast_trie1 = FastTrie::deserialize(buffer.to_vec());
 
-    let (serialized, (cache_start, cache_end)) = fast_trie1.serialize();
-    let mut output_file = File::create(condensed_lava_file)?;
-    output_file.write(&serialized)?;
+    // let buffer: bytes::Bytes = reader2.read_range(0, file_size2 as u64).await?;
+    // let mut fast_trie2 = FastTrie::deserialize(buffer.to_vec());
+
+    // fast_trie1.extend(
+    //     &mut fast_trie2,
+    //     uid_offsets[0] as usize,
+    //     uid_offsets[1] as usize,
+    // );
+
+    // let (serialized, (cache_start, cache_end)) = fast_trie1.serialize();
+    // let mut output_file = File::create(condensed_lava_file)?;
+    // output_file.write(&serialized)?;
+
+    let (cache_start, cache_end) = FastTrie::extend_with_readers_into_file(
+        file_size1,
+        &mut reader1,
+        file_size2,
+        &mut reader2,
+        condensed_lava_file,
+        uid_offsets[0] as usize,
+        uid_offsets[1] as usize,
+    )
+    .await?;
 
     Ok(vec![(cache_start, cache_end)])
 }
@@ -224,8 +240,7 @@ async fn merge_lava_bm25(
     lava_files: Vec<String>,
     uid_offsets: Vec<u64>,
     reader_type: ReaderType,
-) -> Result<Vec<(usize, usize)>, LavaError> 
-{
+) -> Result<Vec<(usize, usize)>, LavaError> {
     // let mut builder = Fs::default();
     // let current_path = env::current_dir()?;
     // builder.root(current_path.to_str().expect("no path"));
@@ -377,8 +392,11 @@ async fn merge_lava_bm25(
     output_file.write(&(compressed_term_dict_offset as u64).to_le_bytes())?;
     output_file.write(&(compressed_plist_offsets_offset as u64).to_le_bytes())?;
     output_file.write(&(total_num_documents as u64).to_le_bytes())?;
-    
-    Ok(vec![(compressed_term_dict_offset as usize, output_file.seek(SeekFrom::Current(0))? as usize)])
+
+    Ok(vec![(
+        compressed_term_dict_offset as usize,
+        output_file.seek(SeekFrom::Current(0))? as usize,
+    )])
 }
 
 async fn compute_interleave(
@@ -665,7 +683,10 @@ async fn merge_lava_substring(
     output_file.write_all(&(total_counts_offset as u64).to_le_bytes())?;
     output_file.write_all(&(bwt_output.len() as u64).to_le_bytes())?;
 
-    Ok(vec![(cache_start, output_file.seek(SeekFrom::Current(0))? as usize)])
+    Ok(vec![(
+        cache_start,
+        output_file.seek(SeekFrom::Current(0))? as usize,
+    )])
 }
 
 #[async_recursion]
@@ -677,10 +698,10 @@ async fn async_parallel_merge_files(
     k: usize,
     mode: usize, // 0 for bm25 1 for substring 2 for uuid
     reader_type: ReaderType,
-    cache_ranges: Option<Vec<Vec<(usize, usize)>>>
+    cache_ranges: Option<Vec<Vec<(usize, usize)>>>,
 ) -> Result<Vec<(usize, usize)>, LavaError> {
     assert!(mode == 1 || mode == 0 || mode == 2);
-    if  mode == 2 || mode == 1 {
+    if mode == 2 || mode == 1 {
         assert_eq!(k, 2);
     }
 
@@ -742,29 +763,36 @@ async fn async_parallel_merge_files(
                     println!("mergin {:?}", file_chunk);
 
                     let cache_ranges: Vec<(usize, usize)> = match mode {
-                        0 =>  merge_lava_bm25(
-                            &merged_filename,
-                            file_chunk.to_vec(),
-                            uid_chunk.to_vec(),
-                            reader_type.clone(),
-                        )
-                        .await, 
-                        1 => merge_lava_substring(
-                            &merged_filename,
-                            file_chunk.to_vec(),
-                            uid_chunk.to_vec(),
-                            reader_type.clone(),
-                        )
-                        .await, 
-                        2 => merge_lava_uuid(
-                            &merged_filename,
-                            file_chunk.to_vec(),
-                            uid_chunk.to_vec(),
-                            reader_type.clone(),
-                        )
-                        .await,
+                        0 => {
+                            merge_lava_bm25(
+                                &merged_filename,
+                                file_chunk.to_vec(),
+                                uid_chunk.to_vec(),
+                                reader_type.clone(),
+                            )
+                            .await
+                        }
+                        1 => {
+                            merge_lava_substring(
+                                &merged_filename,
+                                file_chunk.to_vec(),
+                                uid_chunk.to_vec(),
+                                reader_type.clone(),
+                            )
+                            .await
+                        }
+                        2 => {
+                            merge_lava_uuid(
+                                &merged_filename,
+                                file_chunk.to_vec(),
+                                uid_chunk.to_vec(),
+                                reader_type.clone(),
+                            )
+                            .await
+                        }
                         _ => unreachable!(),
-                    }.unwrap();
+                    }
+                    .unwrap();
 
                     // now go delete the input files
 
@@ -811,7 +839,7 @@ async fn async_parallel_merge_files(
                 k,
                 mode,
                 reader_type.clone(),
-                Some(cache_ranges)
+                Some(cache_ranges),
             )
             .await
         }
@@ -836,7 +864,7 @@ pub async fn parallel_merge_files(
         k,
         mode,
         reader_type,
-        None
+        None,
     )
     .await?;
     Ok(result)

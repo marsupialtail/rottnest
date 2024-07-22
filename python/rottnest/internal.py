@@ -16,9 +16,9 @@ from .utils import get_daft_io_config_from_file_path, get_fs_from_file_path, get
     get_metadata_and_populate_cache, get_result_from_index_result, return_full_result
 
 
-def index_file_bm25(file_path: str, column_name: str, name = uuid.uuid4().hex, index_mode = "physical", tokenizer_file = None):
+def index_files_bm25(file_paths: list[str], column_name: str, name = uuid.uuid4().hex, index_mode = "physical", tokenizer_file = None):
 
-    arr, uid, file_data = get_physical_layout(file_path, column_name) if index_mode == "physical" else get_virtual_layout(file_path, column_name, "uid")
+    arr, uid, file_data = get_physical_layout(file_paths, column_name) if index_mode == "physical" else get_virtual_layout(file_paths, column_name, "uid")
 
     cache_ranges = rottnest.build_lava_bm25(f"{name}.lava", arr, uid, tokenizer_file)
 
@@ -27,9 +27,9 @@ def index_file_bm25(file_path: str, column_name: str, name = uuid.uuid4().hex, i
     file_data = file_data.replace_schema_metadata({"cache_ranges": json.dumps(cache_ranges)})
     pq.write_table(file_data, f"{name}.meta", write_statistics = False, compression = 'zstd')
 
-def index_file_substring(file_path: str, column_name: str, name = uuid.uuid4().hex, index_mode = "physical", tokenizer_file = None, token_skip_factor = None):
+def index_files_substring(file_paths: list[str], column_name: str, name = uuid.uuid4().hex, index_mode = "physical", tokenizer_file = None, token_skip_factor = None):
 
-    arr, uid, file_data = get_physical_layout(file_path, column_name) if index_mode == "physical" else get_virtual_layout(file_path, column_name, "uid")
+    arr, uid, file_data = get_physical_layout(file_paths, column_name) if index_mode == "physical" else get_virtual_layout(file_paths, column_name, "uid")
 
     cache_ranges = rottnest.build_lava_substring(f"{name}.lava", arr, uid, tokenizer_file, token_skip_factor)
 
@@ -37,9 +37,9 @@ def index_file_substring(file_path: str, column_name: str, name = uuid.uuid4().h
     file_data = file_data.replace_schema_metadata({"cache_ranges": json.dumps(cache_ranges)})
     pq.write_table(file_data, f"{name}.meta", write_statistics = False, compression = 'zstd')
 
-def index_file_uuid(file_path: str, column_name: str, name = uuid.uuid4().hex, index_mode = "physical"):
+def index_files_uuid(file_paths: list[str], column_name: str, name = uuid.uuid4().hex, index_mode = "physical"):
 
-    arr, uid, file_data = get_physical_layout(file_path, column_name) if index_mode == "physical" else get_virtual_layout(file_path, column_name, "uid")
+    arr, uid, file_data = get_physical_layout(file_paths, column_name) if index_mode == "physical" else get_virtual_layout(file_paths, column_name, "uid")
 
     idx = pac.sort_indices(arr)
     arr = arr.take(idx)
@@ -51,7 +51,7 @@ def index_file_uuid(file_path: str, column_name: str, name = uuid.uuid4().hex, i
     file_data = file_data.replace_schema_metadata({"cache_ranges": json.dumps(cache_ranges)})
     pq.write_table(file_data, f"{name}.meta", write_statistics = False, compression = 'zstd')
 
-def index_file_vector(file_path: str, column_name: str, name = uuid.uuid4().hex, dtype = 'f32', index_mode = "physical", gpu = False):
+def index_files_vector(file_paths: list[str], column_name: str, name = uuid.uuid4().hex, dtype = 'f32', index_mode = "physical", gpu = False):
 
     try:
         import faiss
@@ -64,7 +64,7 @@ def index_file_vector(file_path: str, column_name: str, name = uuid.uuid4().hex,
     assert dtype == 'f32'
     dtype_size = 4
 
-    arr, uid, file_data = get_physical_layout(file_path, column_name, type = "binary") if index_mode == "physical" else get_virtual_layout(file_path, column_name, "uid", type = "binary")
+    arr, uid, file_data = get_physical_layout(file_paths, column_name, type = "binary") if index_mode == "physical" else get_virtual_layout(file_paths, column_name, "uid", type = "binary")
     uid = uid.to_numpy()
 
     # arr will be a array of largebinary, we need to convert it into numpy, time for some arrow ninja
@@ -150,7 +150,7 @@ def index_file_vector(file_path: str, column_name: str, name = uuid.uuid4().hex,
     pq.write_table(file_data, f"{name}.meta", write_statistics = False, compression = 'zstd')
 
 
-def merge_metadatas(new_index_name: str, index_names: List[str]):
+def merge_metadatas(index_names: List[str]):
     assert len(index_names) > 1
     metadatas = daft.table.read_parquet_into_pyarrow_bulk([f"{index_name}.meta" for index_name in index_names], io_config = get_daft_io_config_from_file_path(index_names[0]))
     # discard cache ranges in metadata, don't need them
@@ -162,7 +162,7 @@ def merge_metadatas(new_index_name: str, index_names: List[str]):
 
 def merge_index_bm25(new_index_name: str, index_names: List[str]):
     
-    offsets, file_data = merge_metadatas(new_index_name, index_names)
+    offsets, file_data = merge_metadatas(index_names)
     
     cache_ranges = rottnest.merge_lava_generic(f"{new_index_name}.lava", [f"{name}.lava" for name in index_names], offsets, 0)
     
@@ -171,7 +171,7 @@ def merge_index_bm25(new_index_name: str, index_names: List[str]):
 
 def merge_index_substring(new_index_name: str, index_names: List[str]):
     
-    offsets, file_data = merge_metadatas(new_index_name, index_names)
+    offsets, file_data = merge_metadatas(index_names)
     
     cache_ranges = rottnest.merge_lava_generic(f"{new_index_name}.lava", [f"{name}.lava" for name in index_names], offsets, 1)
     
@@ -180,7 +180,7 @@ def merge_index_substring(new_index_name: str, index_names: List[str]):
 
 def merge_index_uuid(new_index_name: str, index_names: List[str]):
     
-    offsets, file_data = merge_metadatas(new_index_name, index_names)
+    offsets, file_data = merge_metadatas(index_names)
     
     cache_ranges = rottnest.merge_lava_generic(f"{new_index_name}.lava", [f"{name}.lava" for name in index_names], offsets, 2)
     

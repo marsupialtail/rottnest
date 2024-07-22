@@ -58,49 +58,69 @@ def read_columns(file_paths: list, row_groups: list, row_nr: list):
     return pyarrow.concat_tables(results)
 
 
-def get_physical_layout(file_path: str, column_name: str, type = "str"):
+def get_physical_layout(file_paths: list[str], column_name: str, type = "str"):
 
     assert type in {"str", "binary"}
-    arrs, layout = rottnest.get_parquet_layout(column_name, file_path)
-    arr = pyarrow.concat_arrays([i.cast(pyarrow.large_string() if type == 'str' else pyarrow.large_binary()) for i in arrs])
-    data_page_num_rows = np.array(layout.data_page_num_rows)
-    uid = np.repeat(np.arange(len(data_page_num_rows)), data_page_num_rows) + 1
 
-    # Code tries to compute the starting row offset of each page in its row group.
-    # The following three lines are definitely easier to read than to write.
+    metadatas = []
+    all_arrs = []
+    all_uids = []
+    for file_path in file_paths:
+        arrs, layout = rottnest.get_parquet_layout(column_name, file_path)
+        arr = pyarrow.concat_arrays([i.cast(pyarrow.large_string() if type == 'str' else pyarrow.large_binary()) for i in arrs])
+        data_page_num_rows = np.array(layout.data_page_num_rows)
+        uid = np.repeat(np.arange(len(data_page_num_rows)), data_page_num_rows) + 1
 
-    x = np.cumsum(np.hstack([[0],layout.data_page_num_rows[:-1]]))
-    y = np.repeat(x[np.cumsum(np.hstack([[0],layout.row_group_data_pages[:-1]])).astype(np.uint64)], layout.row_group_data_pages)
-    page_row_offsets_in_row_group = x - y
+        # Code tries to compute the starting row offset of each page in its row group.
+        # The following three lines are definitely easier to read than to write.
 
-    file_data = polars.from_dict({
-            "uid": np.arange(len(data_page_num_rows) + 1),
-            "file_path": [file_path] * (len(data_page_num_rows) + 1),
-            "column_name": [column_name] * (len(data_page_num_rows) + 1),
-            # TODO: figure out a better way to handle this. Currently this is definitely not a bottleneck. Write ampl factor is almost 10x
-            # writing just one row followed by a bunch of Nones don't help, likely because it's already smart enough to do dict encoding.
-            # but we should probably still do this to save memory once loaded in!
-            "metadata_bytes": [layout.metadata_bytes]  + [None] * (len(data_page_num_rows)),
-            "data_page_offsets": [-1] + layout.data_page_offsets,
-            "data_page_sizes": [-1] + layout.data_page_sizes,
-            "dictionary_page_sizes": [-1] + layout.dictionary_page_sizes,
-            "row_groups": np.hstack([[-1] , np.repeat(np.arange(layout.num_row_groups), layout.row_group_data_pages)]),
-            "page_row_offset_in_row_group": np.hstack([[-1], page_row_offsets_in_row_group])
-        }
-    )
+        x = np.cumsum(np.hstack([[0],layout.data_page_num_rows[:-1]]))
+        y = np.repeat(x[np.cumsum(np.hstack([[0],layout.row_group_data_pages[:-1]])).astype(np.uint64)], layout.row_group_data_pages)
+        page_row_offsets_in_row_group = x - y
 
-    return arr, pyarrow.array(uid.astype(np.uint64)), file_data
+        metadata = polars.from_dict({
+                "uid": np.arange(len(data_page_num_rows) + 1),
+                "file_path": [file_path] * (len(data_page_num_rows) + 1),
+                "column_name": [column_name] * (len(data_page_num_rows) + 1),
+                # TODO: figure out a better way to handle this. Currently this is definitely not a bottleneck. Write ampl factor is almost 10x
+                # writing just one row followed by a bunch of Nones don't help, likely because it's already smart enough to do dict encoding.
+                # but we should probably still do this to save memory once loaded in!
+                "metadata_bytes": [layout.metadata_bytes]  + [None] * (len(data_page_num_rows)),
+                "data_page_offsets": [-1] + layout.data_page_offsets,
+                "data_page_sizes": [-1] + layout.data_page_sizes,
+                "dictionary_page_sizes": [-1] + layout.dictionary_page_sizes,
+                "row_groups": np.hstack([[-1] , np.repeat(np.arange(layout.num_row_groups), layout.row_group_data_pages)]),
+                "page_row_offset_in_row_group": np.hstack([[-1], page_row_offsets_in_row_group])
+            }
+        )
 
-def get_virtual_layout(file_path: str, column_name: str, key_column_name: str, type = "str", stride = 500):
+        metadatas.append(metadata)
+        all_arrs.append(arr)
+        all_uids.append(uid)
+    
+    metadata_lens = [len(metadata) for metadata in metadatas]
+    offsets = np.cumsum([0] + metadata_lens)[:-1]
+    metadatas = [metadata.with_columns(polars.col("uid") + offsets[i]) for i, metadata in enumerate(metadatas)]
+    all_uids = np.hstack([uid + offsets[i] for i, uid in enumerate(all_uids)])
 
-    fs = get_fs_from_file_path(file_path)
-    table = pq.read_table(file_path, filesystem=fs, columns = [key_column_name, column_name])
-    table = table.with_row_count('__row_count__').with_columns((polars.col('__row_count__') // stride).alias('__uid__'))
+    return pyarrow.concat_arrays(all_arrs), pyarrow.array(all_uids.astype(np.uint64)), polars.concat(metadatas)
 
-    arr = table[column_name].to_arrow().cast(pyarrow.large_string() if type == 'str' else pyarrow.large_binary())
-    uid = table['__uid__'].to_arrow().cast(pyarrow.uint64())
+def get_virtual_layout(file_paths: list[str], column_name: str, key_column_name: str, type = "str", stride = 500):
 
-    metadata = table.groupby("__uid__").agg([polars.col(key_column_name).min().alias("min"), polars.col(key_column_name).max().alias("max")]).sort("__uid__")
+    fs = get_fs_from_file_path(file_paths[0])
+    metadatas = []
+    all_arrs = []
+    all_uids = []
+
+    for file_path in file_paths:
+        table = pq.read_table(file_path, filesystem=fs, columns = [key_column_name, column_name])
+        table = table.with_row_count('__row_count__').with_columns((polars.col('__row_count__') // stride).alias('__uid__'))
+
+        arr = table[column_name].to_arrow().cast(pyarrow.large_string() if type == 'str' else pyarrow.large_binary())
+        uid = table['__uid__'].to_arrow().cast(pyarrow.uint64())
+
+        metadata = table.groupby("__uid__").agg([polars.col(key_column_name).min().alias("min"), polars.col(key_column_name).max().alias("max")]).sort("__uid__")
+        
     return arr, uid, metadata
 
 def get_metadata_and_populate_cache(indices: List[str]):
@@ -109,7 +129,7 @@ def get_metadata_and_populate_cache(indices: List[str]):
     metadatas = [(polars.from_arrow(i), json.loads(i.schema.metadata[b'cache_ranges'].decode())) for i in metadatas]
 
     metadata = polars.concat([f[0].with_columns(polars.lit(i).alias("file_id").cast(polars.Int64)) for i, f in enumerate(metadatas)])
-    if os.getenv("CACHE_ENABLE").lower() == "true":
+    if os.getenv("CACHE_ENABLE") and os.getenv("CACHE_ENABLE").lower() == "true":
         cache_ranges = {f"{indices[i]}.lava": f[1] for i, f in enumerate(metadatas) if len(f[1]) > 0}
         cached_files = list(cache_ranges.keys())
         ranges = [[tuple(k) for k in cache_ranges[f]] for f in cached_files]

@@ -1,16 +1,26 @@
 use std::{
-    cmp::{max, min}, collections::{BTreeMap, BTreeSet}, num::ParseIntError, ops::AddAssign
+    cmp::{max, min},
+    collections::{BTreeMap, BTreeSet},
+    fs::File,
+    io::{Seek, SeekFrom},
+    num::ParseIntError,
+    ops::AddAssign,
 };
 
-use serde::{Deserialize, Serialize};
-use std::collections::VecDeque;
-use bitvec::prelude::*;
 use crate::{
-    formats::readers::{get_file_size_and_reader, get_file_sizes_and_readers, AsyncReader, ClonableAsyncReader, ReaderType},
+    formats::readers::{
+        get_file_size_and_reader, get_file_sizes_and_readers, AsyncReader, ClonableAsyncReader,
+        ReaderType,
+    },
     lava::error::LavaError,
 };
-use zstd::stream::{encode_all, read::Decoder};
+use bitvec::prelude::*;
+use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
 use std::io::Read;
+use zstd::stream::{encode_all, read::Decoder};
+
+use std::io::Write;
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct BinaryTrieNode<T: Clone + AddAssign> {
@@ -19,17 +29,23 @@ pub struct BinaryTrieNode<T: Clone + AddAssign> {
     pub data: Vec<T>,
 }
 
-pub struct FastTrie{
+pub struct FastTrie {
     pub root_lut: BTreeMap<BitVec, (Vec<usize>, Option<usize>)>,
     pub leaf_tree_roots: Vec<Box<BinaryTrieNode<usize>>>,
-    pub root_levels: usize
+    pub root_levels: usize,
 }
 
 // Helper function to take a node and replace it with None
 fn take_leaf_node(node: &mut Box<BinaryTrieNode<usize>>) -> Box<BinaryTrieNode<usize>> {
-    std::mem::replace(node, Box::new(BinaryTrieNode { data: Vec::new(), left: None, right: None }))
+    std::mem::replace(
+        node,
+        Box::new(BinaryTrieNode {
+            data: Vec::new(),
+            left: None,
+            right: None,
+        }),
+    )
 }
-
 
 impl FastTrie {
     pub fn new(node: BinaryTrieNode<usize>, root_levels: Option<usize>) -> Self {
@@ -41,32 +57,30 @@ impl FastTrie {
         let mut root_lut: BTreeMap<BitVec, (Vec<usize>, Option<usize>)> = BTreeMap::new();
 
         // walk the tree up to levels
-        let mut leaf_tree_roots= Vec::new();
+        let mut leaf_tree_roots = Vec::new();
         let mut queue: VecDeque<(&mut Box<BinaryTrieNode<usize>>, usize, BitVec)> = VecDeque::new();
         let mut current = Box::new(node);
         queue.push_back((&mut current, 0, BitVec::new()));
 
         while let Some((current, level, path)) = queue.pop_front() {
-
-            if level == root_levels { // Check if next level is within the limit
+            if level == root_levels {
+                // Check if next level is within the limit
                 let idx = leaf_tree_roots.len();
                 root_lut.insert(path.clone(), (current.data.clone(), Some(idx)));
                 leaf_tree_roots.push(take_leaf_node(current));
-                
             } else {
                 root_lut.insert(path.clone(), (current.data.clone(), None));
-                if ! current.left.is_none() {
+                if !current.left.is_none() {
                     let mut new_path = path.clone();
                     new_path.push(false);
                     queue.push_back((current.left.as_mut().unwrap(), level + 1, new_path));
                 }
-                if ! current.right.is_none() {
+                if !current.right.is_none() {
                     let mut new_path = path.clone();
                     new_path.push(true);
                     queue.push_back((current.right.as_mut().unwrap(), level + 1, new_path));
                 }
             }
-            
         }
 
         // print the length of all the bitvectors
@@ -78,7 +92,7 @@ impl FastTrie {
         FastTrie {
             root_lut,
             leaf_tree_roots,
-            root_levels
+            root_levels,
         }
     }
 
@@ -98,33 +112,51 @@ impl FastTrie {
 
         let metadata_page_offset = offsets[offsets.len() - 1];
 
-        let metadata: (&BTreeMap<BitVec, (Vec<usize>, Option<usize>)>, &Vec<usize>, usize) = (&self.root_lut, &offsets, self.root_levels);
+        let metadata: (
+            &BTreeMap<BitVec, (Vec<usize>, Option<usize>)>,
+            &Vec<usize>,
+            usize,
+        ) = (&self.root_lut, &offsets, self.root_levels);
 
         let serialized_metadata = bincode::serialize(&metadata).unwrap();
         let compressed = encode_all(&serialized_metadata[..], 10).unwrap();
 
-        let rehydrate_metadata: (BTreeMap<BitVec, (Vec<usize>, Option<usize>)>, Vec<usize>, usize) = bincode::deserialize(&serialized_metadata[..]).unwrap();
-        println!("{} {}", rehydrate_metadata.0.len(), rehydrate_metadata.1.len());
+        // let rehydrate_metadata: (
+        //     BTreeMap<BitVec, (Vec<usize>, Option<usize>)>,
+        //     Vec<usize>,
+        //     usize,
+        // ) = bincode::deserialize(&serialized_metadata[..]).unwrap();
+        // println!(
+        //     "{} {}",
+        //     rehydrate_metadata.0.len(),
+        //     rehydrate_metadata.1.len()
+        // );
 
         let cache_start = bytes.len();
-        
+
         bytes.extend(compressed);
         bytes.extend(&(metadata_page_offset as u64).to_le_bytes());
 
         let cache_end = bytes.len();
-        
+
         (bytes, (cache_start, cache_end))
     }
 
-    pub fn deserialize(bytes:Vec<u8>) -> Self {
-        let metadata_page_offset = u64::from_le_bytes(bytes[(bytes.len() - 8)..].try_into().unwrap());
-        
-        let metadata_page_bytes = &bytes[(metadata_page_offset as usize) .. bytes.len() -8];
+    pub fn deserialize(bytes: Vec<u8>) -> Self {
+        let metadata_page_offset =
+            u64::from_le_bytes(bytes[(bytes.len() - 8)..].try_into().unwrap());
+
+        let metadata_page_bytes = &bytes[(metadata_page_offset as usize)..bytes.len() - 8];
         let mut decompressor = Decoder::new(&metadata_page_bytes[..]).unwrap();
-        let mut serialized_metadata: Vec<u8> = Vec::with_capacity(metadata_page_bytes.len() as usize);
+        let mut serialized_metadata: Vec<u8> =
+            Vec::with_capacity(metadata_page_bytes.len() as usize);
         decompressor.read_to_end(&mut serialized_metadata).unwrap();
 
-        let metadata: (BTreeMap<BitVec, (Vec<usize>, Option<usize>)>, Vec<usize>, usize) = bincode::deserialize(&serialized_metadata[..]).unwrap();
+        let metadata: (
+            BTreeMap<BitVec, (Vec<usize>, Option<usize>)>,
+            Vec<usize>,
+            usize,
+        ) = bincode::deserialize(&serialized_metadata[..]).unwrap();
 
         let lut: BTreeMap<BitVec, (Vec<usize>, Option<usize>)> = metadata.0;
         let offsets: Vec<usize> = metadata.1;
@@ -145,12 +177,15 @@ impl FastTrie {
         FastTrie {
             root_lut: lut,
             leaf_tree_roots: leaf_tree_roots,
-            root_levels: metadata.2
+            root_levels: metadata.2,
         }
     }
 
-    pub async fn query_with_reader(file_size: usize, reader: &mut AsyncReader, query: &str) -> Result<Vec<usize>, LavaError> {
-
+    pub async fn query_with_reader(
+        file_size: usize,
+        reader: &mut AsyncReader,
+        query: &str,
+    ) -> Result<Vec<usize>, LavaError> {
         let query = query.as_bytes();
 
         let get_bit = |i: usize| -> bool {
@@ -160,46 +195,279 @@ impl FastTrie {
         };
 
         let metadata_page_offset = reader.read_usize_from_end(1).await?[0];
-        let metadata_page_bytes = reader.read_range(metadata_page_offset, file_size as u64 - 8).await?;
+        let metadata_page_bytes = reader
+            .read_range(metadata_page_offset, file_size as u64 - 8)
+            .await?;
         let mut decompressor = Decoder::new(&metadata_page_bytes[..]).unwrap();
-        let mut serialized_metadata: Vec<u8> = Vec::with_capacity(metadata_page_bytes.len() as usize);
+        let mut serialized_metadata: Vec<u8> =
+            Vec::with_capacity(metadata_page_bytes.len() as usize);
         decompressor.read_to_end(&mut serialized_metadata).unwrap();
 
-        let metadata: (BTreeMap<BitVec, (Vec<usize>, Option<usize>)>, Vec<usize>, usize) = bincode::deserialize(&serialized_metadata[..]).unwrap();
+        let metadata: (
+            BTreeMap<BitVec, (Vec<usize>, Option<usize>)>,
+            Vec<usize>,
+            usize,
+        ) = bincode::deserialize(&serialized_metadata[..]).unwrap();
         let lut: BTreeMap<BitVec, (Vec<usize>, Option<usize>)> = metadata.0;
         let offsets: Vec<usize> = metadata.1;
         let root_levels = metadata.2;
 
-        // take a short cut here and assume you have more bits than 
+        // take a short cut here and assume you have more bits than
         let mut bitvec: BitVec<usize, Lsb0> = BitVec::new();
         for i in 0..root_levels {
             bitvec.push(get_bit(i));
         }
 
-        match lut.get(&bitvec) { 
+        match lut.get(&bitvec) {
             Some((values, offset)) => {
-
                 let offset = offset.as_ref().unwrap();
+
                 let start = offsets[*offset];
                 let end = offsets[*offset + 1];
                 let compressed_trie_bytes = reader.read_range(start as u64, end as u64).await?;
-                
+
                 let mut decompressor = Decoder::new(&compressed_trie_bytes[..]).unwrap();
-                let mut serialized_trie: Vec<u8> = Vec::with_capacity(compressed_trie_bytes.len() as usize);
+                let mut serialized_trie: Vec<u8> =
+                    Vec::with_capacity(compressed_trie_bytes.len() as usize);
                 decompressor.read_to_end(&mut serialized_trie).unwrap();
-                let trie: Box<BinaryTrieNode<usize>> = bincode::deserialize(&serialized_trie[..]).unwrap();
-                let result = trie.query(&query[root_levels / 8 ..]);
+                let trie: Box<BinaryTrieNode<usize>> =
+                    bincode::deserialize(&serialized_trie[..]).unwrap();
+                let result = trie.query(&query[root_levels / 8..]);
                 return Ok(result);
+            }
+            None => {
+                return Ok(Vec::new());
+            }
+        };
+    }
 
-            }, 
-            None => {return Ok(Vec::new());}
-        }; 
+    async fn read_metadata(
+        file_size: usize,
+        reader: &mut AsyncReader,
+    ) -> Result<
+        (
+            BTreeMap<BitVec, (Vec<usize>, Option<usize>)>,
+            Vec<usize>,
+            usize,
+        ),
+        LavaError,
+    > {
+        let metadata_page_offset = reader.read_usize_from_end(1).await?[0];
+        let metadata_page_bytes = reader
+            .read_range(metadata_page_offset, file_size as u64 - 8)
+            .await?;
+        let mut decompressor = Decoder::new(&metadata_page_bytes[..]).unwrap();
+        let mut serialized_metadata: Vec<u8> =
+            Vec::with_capacity(metadata_page_bytes.len() as usize);
+        decompressor.read_to_end(&mut serialized_metadata).unwrap();
 
+        let metadata: (
+            BTreeMap<BitVec, (Vec<usize>, Option<usize>)>,
+            Vec<usize>,
+            usize,
+        ) = bincode::deserialize(&serialized_metadata[..]).unwrap();
+        Ok(metadata)
+    }
+
+    async fn read_and_adjust_node(
+        reader: &mut AsyncReader,
+        start: usize,
+        end: usize,
+        uid_offset: usize,
+    ) -> Result<Box<BinaryTrieNode<usize>>, LavaError> {
+        let compressed_node = reader.read_range(start as u64, end as u64).await?;
+        let mut decompressor = Decoder::new(&compressed_node[..]).unwrap();
+        let mut serialized_node = Vec::with_capacity(compressed_node.len());
+        decompressor.read_to_end(&mut serialized_node).unwrap();
+
+        let mut node: Box<BinaryTrieNode<usize>> = bincode::deserialize(&serialized_node).unwrap();
+        node.increment_values(uid_offset);
+        Ok(node)
+    }
+
+    pub async fn extend_with_readers_into_file(
+        file_size1: usize,
+        reader1: &mut AsyncReader,
+        file_size2: usize,
+        reader2: &mut AsyncReader,
+        output_file: &str,
+        uid_offset_0: usize,
+        uid_offset_1: usize,
+    ) -> Result<(usize, usize), LavaError> {
+        // Read metadata from both tries
+        let (mut lut1, offsets1, root_levels1) = Self::read_metadata(file_size1, reader1).await?;
+        let (mut lut2, offsets2, root_levels2) = Self::read_metadata(file_size2, reader2).await?;
+
+        assert_eq!(
+            root_levels1, root_levels2,
+            "Root levels must be the same for both tries"
+        );
+
+        for (_, v) in lut1.iter_mut() {
+            v.0.iter_mut().for_each(|x| *x += uid_offset_0);
+        }
+        for (_, v) in lut2.iter_mut() {
+            v.0.iter_mut().for_each(|x| *x += uid_offset_1);
+        }
+
+        let keys1: BTreeSet<BitVec> = lut1.keys().cloned().collect();
+        let keys2: BTreeSet<BitVec> = lut2.keys().cloned().collect();
+
+        let mut root_lut: BTreeMap<BitVec, (Vec<usize>, Option<usize>)> = BTreeMap::new();
+        let mut offsets: Vec<usize> = vec![0];
+
+        let mut output_file = File::create(output_file).unwrap();
+
+        for key in keys1.difference(&keys2) {
+            let (values, offset) = lut1.remove(key).unwrap();
+            // read the thing from lut1
+            match offset {
+                Some(x) => {
+                    let node = Self::read_and_adjust_node(
+                        reader1,
+                        offsets1[x],
+                        offsets1[x + 1],
+                        uid_offset_0,
+                    )
+                    .await?;
+                    let serialized_node = bincode::serialize(&node).unwrap();
+                    let _ = output_file.write(&encode_all(&serialized_node[..], 10).unwrap());
+                    offsets.push(output_file.seek(SeekFrom::Current(0))? as usize);
+
+                    root_lut.insert(key.clone(), (values, Some(offsets.len() - 2)));
+                }
+
+                None => {
+                    root_lut.insert(key.clone(), (values, None));
+                }
+            }
+        }
+
+        // Keys only in map2
+        for key in keys2.difference(&keys1) {
+            let (values, offset) = lut2.remove(key).unwrap();
+            // read the thing from lut1
+            match offset {
+                Some(x) => {
+                    let node = Self::read_and_adjust_node(
+                        reader2,
+                        offsets2[x],
+                        offsets2[x + 1],
+                        uid_offset_1,
+                    )
+                    .await?;
+                    let serialized_node = bincode::serialize(&node).unwrap();
+                    output_file.write(&encode_all(&serialized_node[..], 10).unwrap());
+                    offsets.push(output_file.seek(SeekFrom::Current(0))? as usize);
+
+                    root_lut.insert(key.clone(), (values, Some(offsets.len() - 2)));
+                }
+
+                None => {
+                    root_lut.insert(key.clone(), (values, None));
+                }
+            }
+        }
+
+        // Keys in both maps
+        for key in keys1.intersection(&keys2) {
+            let (values1, offset1) = lut1.get(key).unwrap();
+            let (values2, offset2) = lut2.get(key).unwrap();
+            match (*offset1, *offset2) {
+                (Some(x1), Some(x2)) => {
+                    let node1 = Self::read_and_adjust_node(
+                        reader1,
+                        offsets1[x1],
+                        offsets1[x1 + 1],
+                        uid_offset_0,
+                    )
+                    .await?;
+                    let node2 = Self::read_and_adjust_node(
+                        reader2,
+                        offsets2[x2],
+                        offsets2[x2 + 1],
+                        uid_offset_1,
+                    )
+                    .await?;
+
+                    let mut node = node1;
+                    node.extend(*node2);
+                    let serialized_node = bincode::serialize(&node).unwrap();
+                    output_file.write(&encode_all(&serialized_node[..], 10).unwrap());
+                    offsets.push(output_file.seek(SeekFrom::Current(0))? as usize);
+
+                    let mut values = values1.clone();
+                    values.extend(values2.clone());
+                    root_lut.insert(key.clone(), (values, Some(offsets.len() - 2)));
+                }
+
+                (Some(x1), None) => {
+                    let node = Self::read_and_adjust_node(
+                        reader1,
+                        offsets1[x1],
+                        offsets1[x1 + 1],
+                        uid_offset_0,
+                    )
+                    .await?;
+                    let serialized_node = bincode::serialize(&node).unwrap();
+                    let _ = output_file.write(&encode_all(&serialized_node[..], 10).unwrap());
+                    offsets.push(output_file.seek(SeekFrom::Current(0))? as usize);
+
+                    let mut values = values1.clone();
+                    values.extend(values2.clone());
+                    root_lut.insert(key.clone(), (values, Some(offsets.len() - 2)));
+                }
+
+                (None, Some(x2)) => {
+                    let node = Self::read_and_adjust_node(
+                        reader2,
+                        offsets2[x2],
+                        offsets2[x2 + 1],
+                        uid_offset_1,
+                    )
+                    .await?;
+                    let serialized_node = bincode::serialize(&node).unwrap();
+                    let _ = output_file.write(&encode_all(&serialized_node[..], 10).unwrap());
+                    offsets.push(output_file.seek(SeekFrom::Current(0))? as usize);
+
+                    let mut values = values1.clone();
+                    values.extend(values2.clone());
+                    root_lut.insert(key.clone(), (values, Some(offsets.len() - 2)));
+                }
+
+                (None, None) => {
+                    let mut values = values1.clone();
+                    values.extend(values2.clone());
+                    root_lut.insert(key.clone(), (values, None));
+                }
+            }
+        }
+
+        let metadata_page_offset = output_file.seek(SeekFrom::Current(0))? as usize;
+
+        println!("{:?}", root_lut);
+
+        let metadata: (
+            &BTreeMap<BitVec, (Vec<usize>, Option<usize>)>,
+            &Vec<usize>,
+            usize,
+        ) = (&root_lut, &offsets, root_levels1);
+
+        let serialized_metadata = bincode::serialize(&metadata).unwrap();
+        let compressed = encode_all(&serialized_metadata[..], 10).unwrap();
+
+        let cache_start = output_file.seek(SeekFrom::Current(0))? as usize;
+
+        output_file.write(&compressed)?;
+        output_file.write(&(metadata_page_offset as u64).to_le_bytes())?;
+
+        let cache_end = output_file.seek(SeekFrom::Current(0))? as usize;
+
+        Ok((cache_start, cache_end))
     }
 
     // extend and consume the second FastTrie
     pub fn extend(&mut self, t2: &mut FastTrie, uid_offset_0: usize, uid_offset_1: usize) {
-
         assert_eq!(self.root_levels, t2.root_levels);
 
         // first increment all the values by uid_offsets in the lut as well as the leaf_tree_roots
@@ -218,21 +486,19 @@ impl FastTrie {
         }
 
         // first insert keys in t2.root_lut into self.root_lut if key doesn't exist in self.root_lut
-        
+
         let mut t2_to_remove: BTreeSet<BitVec> = BTreeSet::new();
         for (k, v) in t2.root_lut.iter() {
             if !self.root_lut.contains_key(k) {
-
                 let (data, offset) = v;
                 let new_offset = match offset {
                     Some(x) => {
                         let idx = self.leaf_tree_roots.len();
-                        self.leaf_tree_roots.push(take_leaf_node(&mut t2.leaf_tree_roots[*x]));
+                        self.leaf_tree_roots
+                            .push(take_leaf_node(&mut t2.leaf_tree_roots[*x]));
                         Some(idx)
                     }
-                    None => {
-                        None
-                    }
+                    None => None,
                 };
                 self.root_lut.insert(k.clone(), (data.clone(), new_offset));
                 t2_to_remove.insert(k.clone());
@@ -252,30 +518,31 @@ impl FastTrie {
                     v.1 = match (v.1, v2.1) {
                         (Some(x), Some(y)) => {
                             println!("merging leaf tree roots {:?} {:?}", x, y);
-                            let owned_t2_leaf_tree_root = take_leaf_node(&mut t2.leaf_tree_roots[y]);
+                            let owned_t2_leaf_tree_root =
+                                take_leaf_node(&mut t2.leaf_tree_roots[y]);
                             self.leaf_tree_roots[x].extend(*owned_t2_leaf_tree_root);
                             Some(x)
-                        },
-                        (Some(x), None) => {Some(x)},
+                        }
+                        (Some(x), None) => Some(x),
                         (None, Some(y)) => {
                             let idx = self.leaf_tree_roots.len();
-                            self.leaf_tree_roots.push(take_leaf_node(&mut t2.leaf_tree_roots[y]));
+                            self.leaf_tree_roots
+                                .push(take_leaf_node(&mut t2.leaf_tree_roots[y]));
                             Some(idx)
-                        },
-                        (None, None) => {None}
+                        }
+                        (None, None) => None,
                     }
-                },
-                None => {println!("{:?} not found in t2", k);},
+                }
+                None => {
+                    println!("{:?} not found in t2", k);
+                }
             }
         }
 
         // assert!(t2.leaf_tree_roots.is_empty());
         // assert!(t2.root_lut.is_empty());
-        
     }
-
 }
-
 
 impl<T: Clone + AddAssign> BinaryTrieNode<T> {
     pub fn new() -> BinaryTrieNode<T> {
@@ -423,7 +690,10 @@ impl<T: Clone + AddAssign> Default for BinaryTrieNode<T> {
 
 /// Merges two tries into a new trie.
 /// Indices are kept as-is.
-pub fn merge_tries<T: Clone + AddAssign>(t1: &BinaryTrieNode<T>, t2: &BinaryTrieNode<T>) -> BinaryTrieNode<T> {
+pub fn merge_tries<T: Clone + AddAssign>(
+    t1: &BinaryTrieNode<T>,
+    t2: &BinaryTrieNode<T>,
+) -> BinaryTrieNode<T> {
     let mut output = BinaryTrieNode::new();
     output.data.extend(t1.data.clone());
     output.data.extend(t2.data.clone());
