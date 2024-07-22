@@ -142,45 +142,6 @@ impl FastTrie {
         (bytes, (cache_start, cache_end))
     }
 
-    pub fn deserialize(bytes: Vec<u8>) -> Self {
-        let metadata_page_offset =
-            u64::from_le_bytes(bytes[(bytes.len() - 8)..].try_into().unwrap());
-
-        let metadata_page_bytes = &bytes[(metadata_page_offset as usize)..bytes.len() - 8];
-        let mut decompressor = Decoder::new(&metadata_page_bytes[..]).unwrap();
-        let mut serialized_metadata: Vec<u8> =
-            Vec::with_capacity(metadata_page_bytes.len() as usize);
-        decompressor.read_to_end(&mut serialized_metadata).unwrap();
-
-        let metadata: (
-            BTreeMap<BitVec, (Vec<usize>, Option<usize>)>,
-            Vec<usize>,
-            usize,
-        ) = bincode::deserialize(&serialized_metadata[..]).unwrap();
-
-        let lut: BTreeMap<BitVec, (Vec<usize>, Option<usize>)> = metadata.0;
-        let offsets: Vec<usize> = metadata.1;
-
-        let mut leaf_tree_roots = Vec::new();
-
-        for i in 0..offsets.len() - 1 {
-            let start = offsets[i];
-            let end = offsets[i + 1];
-            let compressed_node = &bytes[start..end];
-            let mut decompressor = Decoder::new(&compressed_node[..]).unwrap();
-            let mut serialized_node: Vec<u8> = Vec::with_capacity(compressed_node.len() as usize);
-            decompressor.read_to_end(&mut serialized_node).unwrap();
-            let node: Box<BinaryTrieNode<usize>> = bincode::deserialize(&serialized_node).unwrap();
-            leaf_tree_roots.push(node);
-        }
-
-        FastTrie {
-            root_lut: lut,
-            leaf_tree_roots: leaf_tree_roots,
-            root_levels: metadata.2,
-        }
-    }
-
     pub async fn query_with_reader(
         file_size: usize,
         reader: &mut AsyncReader,
@@ -357,7 +318,7 @@ impl FastTrie {
                     )
                     .await?;
                     let serialized_node = bincode::serialize(&node).unwrap();
-                    output_file.write(&encode_all(&serialized_node[..], 10).unwrap());
+                    let _ = output_file.write(&encode_all(&serialized_node[..], 10).unwrap());
                     offsets.push(output_file.seek(SeekFrom::Current(0))? as usize);
 
                     root_lut.insert(key.clone(), (values, Some(offsets.len() - 2)));
@@ -393,7 +354,7 @@ impl FastTrie {
                     let mut node = node1;
                     node.extend(*node2);
                     let serialized_node = bincode::serialize(&node).unwrap();
-                    output_file.write(&encode_all(&serialized_node[..], 10).unwrap());
+                    let _ = output_file.write(&encode_all(&serialized_node[..], 10).unwrap());
                     offsets.push(output_file.seek(SeekFrom::Current(0))? as usize);
 
                     let mut values = values1.clone();
@@ -466,7 +427,47 @@ impl FastTrie {
         Ok((cache_start, cache_end))
     }
 
-    // extend and consume the second FastTrie
+    pub fn deserialize(bytes: Vec<u8>) -> Self {
+        let metadata_page_offset =
+            u64::from_le_bytes(bytes[(bytes.len() - 8)..].try_into().unwrap());
+
+        let metadata_page_bytes = &bytes[(metadata_page_offset as usize)..bytes.len() - 8];
+        let mut decompressor = Decoder::new(&metadata_page_bytes[..]).unwrap();
+        let mut serialized_metadata: Vec<u8> =
+            Vec::with_capacity(metadata_page_bytes.len() as usize);
+        decompressor.read_to_end(&mut serialized_metadata).unwrap();
+
+        let metadata: (
+            BTreeMap<BitVec, (Vec<usize>, Option<usize>)>,
+            Vec<usize>,
+            usize,
+        ) = bincode::deserialize(&serialized_metadata[..]).unwrap();
+
+        let lut: BTreeMap<BitVec, (Vec<usize>, Option<usize>)> = metadata.0;
+        let offsets: Vec<usize> = metadata.1;
+
+        let mut leaf_tree_roots = Vec::new();
+
+        for i in 0..offsets.len() - 1 {
+            let start = offsets[i];
+            let end = offsets[i + 1];
+            let compressed_node = &bytes[start..end];
+            let mut decompressor = Decoder::new(&compressed_node[..]).unwrap();
+            let mut serialized_node: Vec<u8> = Vec::with_capacity(compressed_node.len() as usize);
+            decompressor.read_to_end(&mut serialized_node).unwrap();
+            let node: Box<BinaryTrieNode<usize>> = bincode::deserialize(&serialized_node).unwrap();
+            leaf_tree_roots.push(node);
+        }
+
+        FastTrie {
+            root_lut: lut,
+            leaf_tree_roots: leaf_tree_roots,
+            root_levels: metadata.2,
+        }
+    }
+
+    // extend and consume the second FastTrie. In memory method.
+    // Deprecated in favor of extend_with_readers_into_file
     pub fn extend(&mut self, t2: &mut FastTrie, uid_offset_0: usize, uid_offset_1: usize) {
         assert_eq!(self.root_levels, t2.root_levels);
 
@@ -721,21 +722,4 @@ pub fn merge_tries<T: Clone + AddAssign>(
     }
 
     output
-}
-
-pub fn hex_to_u8(hex: &str) -> Result<Vec<u8>, ParseIntError> {
-    let mut bytes = Vec::new();
-    for i in 0..hex.len() / 2 {
-        let byte = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16)?;
-        bytes.push(byte);
-    }
-    if hex.len() % 2 == 1 {
-        let byte = u8::from_str_radix(&hex[hex.len() - 1..hex.len()], 16)? * 16;
-        bytes.push(byte);
-    }
-    Ok(bytes)
-}
-
-pub fn compress_hex_strs(strs: &[&str]) -> Result<Vec<Vec<u8>>, ParseIntError> {
-    strs.iter().map(|s| hex_to_u8(s)).collect()
 }

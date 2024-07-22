@@ -1,12 +1,12 @@
 use arrow::array::ArrayData;
 use arrow::pyarrow::FromPyArrow;
-use pyo3::Python;
 use pyo3::{pyfunction, types::PyString, PyAny};
+use pyo3::{PyNativeType, Python};
 
 use crate::lava;
 use crate::lava::error::LavaError;
 use ndarray::{Array1, Array2, Ix2};
-use numpy::{IntoPyArray, PyArray2, PyArray1, PyReadonlyArrayDyn};
+use numpy::{IntoPyArray, PyArray1, PyArray2, PyReadonlyArrayDyn};
 use pyo3::Py;
 use std::time::Instant;
 
@@ -33,10 +33,13 @@ pub fn search_lava_substring(
     query: String,
     k: usize,
     reader_type: Option<&PyString>,
+    sample_factor: Option<usize>,
 ) -> Result<Vec<(u64, u64)>, LavaError> {
     let reader_type = reader_type.map(|x| x.to_string()).unwrap_or_default();
 
-    py.allow_threads(|| lava::search_lava_substring(files, query, k, reader_type.into()))
+    py.allow_threads(|| {
+        lava::search_lava_substring(files, query, k, reader_type.into(), sample_factor)
+    })
 }
 
 #[pyfunction]
@@ -59,42 +62,45 @@ pub fn search_lava_vector(
     query: Vec<f32>,
     nprobes: usize,
     reader_type: Option<&PyString>,
-) -> Result<(Vec<usize>, Vec<Py<PyArray1<u8>>>, Vec<(usize, Py<PyArray1<u8>>)>), LavaError> {
+) -> Result<
+    (
+        Vec<usize>,
+        Vec<Py<PyArray1<u8>>>,
+        Vec<(usize, Py<PyArray1<u8>>)>,
+    ),
+    LavaError,
+> {
     let reader_type = reader_type.map(|x| x.to_string()).unwrap_or_default();
 
     let start = Instant::now();
 
-    let result: (Vec<usize>, Vec<Array1<u8>>, Vec<(usize, Array1<u8>)>) = py.allow_threads(move || {
-        lava::search_lava_vector(
-            files,
-            query,
-            nprobes,
-            reader_type.into(),
-        )
-    })?;
+    let result: (Vec<usize>, Vec<Array1<u8>>, Vec<(usize, Array1<u8>)>) =
+        py.allow_threads(move || {
+            lava::search_lava_vector(files, query, nprobes, reader_type.into())
+        })?;
 
     let end = Instant::now();
     println!("rust func call: {:?}", end - start);
 
     let start = Instant::now();
 
-    let x = result.1
+    let x = result
+        .1
         .into_iter()
-        .map(|x| x.into_pyarray(py).to_owned())
+        .map(|x| x.into_pyarray_bound(py).unbind())
         .collect();
 
-    let y = result.2
+    let y = result
+        .2
         .into_iter()
-        .map(|(x, y)| (x, y.into_pyarray(py).to_owned()))
+        .map(|(x, y)| (x, y.into_pyarray_bound(py).unbind()))
         .collect();
 
     let end = Instant::now();
     println!("conversion: {:?}", end - start);
-    
 
     Ok((result.0, x, y))
 }
-
 
 #[pyfunction]
 pub fn get_tokenizer_vocab(
@@ -106,7 +112,6 @@ pub fn get_tokenizer_vocab(
 
     py.allow_threads(|| lava::get_tokenizer_vocab(files, reader_type.into()))
 }
-
 
 #[pyfunction]
 pub fn merge_lava_generic(
@@ -140,8 +145,8 @@ pub fn build_lava_bm25(
     tokenizer_file: Option<&PyString>,
 ) -> Result<Vec<(usize, usize)>, LavaError> {
     let output_file_name = output_file_name.to_string();
-    let array = ArrayData::from_pyarrow(array)?;
-    let uid = ArrayData::from_pyarrow(uid)?;
+    let array = ArrayData::from_pyarrow_bound(&array.as_borrowed())?;
+    let uid = ArrayData::from_pyarrow_bound(&uid.as_borrowed())?;
     let tokenizer_file = tokenizer_file.map(|x| x.to_string());
 
     py.allow_threads(|| {
@@ -164,33 +169,10 @@ pub fn build_lava_uuid(
     uid: &PyAny,
 ) -> Result<Vec<(usize, usize)>, LavaError> {
     let output_file_name = output_file_name.to_string();
-    let array = ArrayData::from_pyarrow(array)?;
-    let uid = ArrayData::from_pyarrow(uid)?;
-
-    py.allow_threads(|| {
-        lava::build_lava_uuid(
-            output_file_name,
-            array,
-            uid,
-        )
-    })
+    let array = ArrayData::from_pyarrow_bound(&array.as_borrowed())?;
+    let uid = ArrayData::from_pyarrow_bound(&uid.as_borrowed())?;
+    py.allow_threads(|| lava::build_lava_uuid(output_file_name, array, uid))
 }
-
-// #[pyfunction]
-// pub fn build_lava_kmer(
-//     py: Python,
-//     output_file_name: &PyString,
-//     array: &PyAny,
-//     uid: &PyAny,
-//     tokenizer_file: Option<&PyString>,
-// ) -> Result<(), LavaError> {
-//     let output_file_name = output_file_name.to_string();
-//     let array = ArrayData::from_pyarrow(array)?;
-//     let uid = ArrayData::from_pyarrow(uid)?;
-//     let tokenizer_file = tokenizer_file.map(|x| x.to_string());
-
-//     py.allow_threads(|| lava::build_lava_kmer(output_file_name, array, uid, tokenizer_file))
-// }
 
 #[pyfunction]
 pub fn build_lava_substring(
@@ -202,8 +184,8 @@ pub fn build_lava_substring(
     token_skip_factor: Option<u32>,
 ) -> Result<Vec<(usize, usize)>, LavaError> {
     let output_file_name = output_file_name.to_string();
-    let array = ArrayData::from_pyarrow(array)?;
-    let uid = ArrayData::from_pyarrow(uid)?;
+    let array = ArrayData::from_pyarrow_bound(&array.as_borrowed())?;
+    let uid = ArrayData::from_pyarrow_bound(&uid.as_borrowed())?;
     let tokenizer_file = tokenizer_file.map(|x| x.to_string());
 
     py.allow_threads(|| {

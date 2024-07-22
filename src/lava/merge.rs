@@ -207,7 +207,6 @@ async fn merge_lava_uuid(
 
     // let buffer: bytes::Bytes = reader1.read_range(0, file_size1 as u64).await?;
     // let mut fast_trie1 = FastTrie::deserialize(buffer.to_vec());
-
     // let buffer: bytes::Bytes = reader2.read_range(0, file_size2 as u64).await?;
     // let mut fast_trie2 = FastTrie::deserialize(buffer.to_vec());
 
@@ -216,7 +215,6 @@ async fn merge_lava_uuid(
     //     uid_offsets[0] as usize,
     //     uid_offsets[1] as usize,
     // );
-
     // let (serialized, (cache_start, cache_end)) = fast_trie1.serialize();
     // let mut output_file = File::create(condensed_lava_file)?;
     // output_file.write(&serialized)?;

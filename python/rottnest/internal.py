@@ -241,18 +241,18 @@ def search_index_uuid(indices: List[str], query: str, K: int, columns = []):
     return return_full_result(result, metadata, column_name, columns)
 
 
-def search_index_substring(indices: List[str], query: str, K: int, columns = []):
+def search_index_substring(indices: List[str], query: str, K: int, sample_factor = None, columns = []):
 
     metadata = get_metadata_and_populate_cache(indices)
     
-    index_search_results = rottnest.search_lava_substring([f"{index_name}.lava" for index_name in indices], query, K, "aws")
+    index_search_results = rottnest.search_lava_substring([f"{index_name}.lava" for index_name in indices], query, K, "aws", sample_factor = sample_factor)
     print(index_search_results)
 
     if len(index_search_results) == 0:
         return None
 
     result, column_name, metadata = get_result_from_index_result(metadata, index_search_results)
-    result =  polars.from_arrow(result).filter(polars.col(column_name).str.to_lowercase().str.contains(query.lower()))
+    result =  polars.from_arrow(result).filter(polars.col(column_name).str.to_lowercase().str.contains(query.lower(), literal=True))
 
     return return_full_result(result, metadata, column_name, columns)
 

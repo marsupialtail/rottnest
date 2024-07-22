@@ -1,9 +1,9 @@
 use arrow::array::{make_array, Array, ArrayData, LargeStringArray, UInt64Array};
+use byteorder::{LittleEndian, WriteBytesExt};
 use itertools::Itertools;
 use serde_json;
 use tokenizers::parallelism::MaybeParallelIterator;
-use tokenizers::tokenizer::Tokenizer;
-use byteorder::{WriteBytesExt, LittleEndian}; // You'll need the `byteorder` crate
+use tokenizers::tokenizer::Tokenizer; // You'll need the `byteorder` crate
 
 use bincode;
 use bytes;
@@ -16,9 +16,9 @@ use std::io::Read;
 use crate::lava::constants::*;
 use crate::lava::error::LavaError;
 use crate::lava::plist::PListChunk;
-use crate::lava::trie::{FastTrie, BinaryTrieNode};
+use crate::lava::trie::{BinaryTrieNode, FastTrie};
 use std::fs::File;
-use std::io::{Seek, SeekFrom, Write, BufWriter};
+use std::io::{BufWriter, Seek, SeekFrom, Write};
 use zstd::stream::encode_all;
 
 use crate::vamana::{build_index_par, IndexParams, VamanaIndex};
@@ -53,7 +53,6 @@ pub async fn build_lava_uuid(
     array: ArrayData,
     uid: ArrayData,
 ) -> Result<Vec<(usize, usize)>, LavaError> {
-
     let array = make_array(array);
     // let uid = make_array(ArrayData::from_pyarrow(uid)?);
     let uid = make_array(uid);
@@ -524,6 +523,8 @@ pub async fn build_lava_substring(
         })
         .collect::<Vec<(Vec<u64>, Vec<u32>)>>();
 
+    println!("{:?}", named_encodings[1]);
+
     let uids: Vec<u64> = named_encodings
         .iter()
         .map(|(uid, _)| uid)
@@ -556,6 +557,8 @@ pub async fn build_lava_substring(
     } else {
         (encodings, uids)
     };
+
+    println!("{:?}", &encodings[..200]);
 
     for i in 10..encodings.len() {
         suffices.push(encodings[i - 10..i].to_vec());
