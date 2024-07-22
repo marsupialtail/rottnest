@@ -2,8 +2,9 @@ import rottnest
 import pyarrow
 from tqdm import tqdm
 import polars
+import sys
 
-metadata = polars.read_parquet("bench.parquet")[:10]
+metadata = polars.read_parquet("bench.parquet")[:int(sys.argv[1])]
 
 # metadatas = []
 # filenames = []
