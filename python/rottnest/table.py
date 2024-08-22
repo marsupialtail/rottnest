@@ -1,10 +1,5 @@
-from deltalake import DeltaTable, write_deltalake
-import duckdb
-import pyarrow
 import polars
-from deltalake._internal import TableNotFoundError
 import uuid
-
 from . import internal
 """
 the schema of the metadata table will be:
@@ -15,6 +10,9 @@ We seek to maintain the invariant that each parquet file is covered by only one 
 """
 
 def index_delta(table: str, column: str, index_dir: str, type: str, index_impl = 'physical', extra_configs = {}):
+
+    from deltalake import DeltaTable, write_deltalake
+    from deltalake._internal import TableNotFoundError
 
     assert type in {"uuid", "substring", "vector"}
     assert index_impl in {"physical", "virtual"}
@@ -62,30 +60,45 @@ def index_delta(table: str, column: str, index_dir: str, type: str, index_impl =
 # we should deprecate the type argument, and figure out the type automatically.
 def search_delta(table: str, index_dir: str, query,  type: str, K: int, snapshot : int | None = None, extra_configs = {}):
 
+    from deltalake import DeltaTable, write_deltalake
+    from deltalake._internal import TableNotFoundError
+
     assert type in {"uuid", "substring", "vector"}
 
     main_table = DeltaTable(table)
     if snapshot is not None:
         main_table.load_as_version(snapshot)
 
-    existing_parquet_files = polars.from_dict({"covered_parquet_files": main_table.file_uris()})
+    existing_parquet_files = set(main_table.file_uris())
     
     index_dir = index_dir.rstrip("/")
     metadata_table_dir = f"{index_dir}/metadata_table"
 
+    selected_indices = []
+    uncovered_parquets = set(existing_parquet_files)
+
     try:
         metadata = polars.from_arrow(DeltaTable(metadata_table_dir).to_pyarrow_table())
-        metadata = metadata.explode('covered_parquet_files')
+        # convert it to a dictionary
+        metadata = {row['index_file']: row['covered_parquet_files'] for _, row in metadata.iterrows()}
+        
+        while True:
+            overlap_to_index_file = {len(existing_parquet_files.intersection(v)): k for k, v in metadata.items()}
+            max_overlap = max(overlap_to_index_file.keys())
+            if max_overlap == 0:
+                break
+            index_file = overlap_to_index_file[max_overlap]
+            selected_indices.append(index_file)
+            uncovered_parquets = uncovered_parquets.difference(set(metadata[index_file]))
+            del metadata[index_file]
+
     except TableNotFoundError:
-        # brute force 
         pass
-
     
     
-    
-    # we want to figure out the minimal number of index files that cover the existing parquet files to the best of our abilities.
-
-
-
-    # if type == "uuid":
-    #     index_search_results = internal.search_lava_uuid([f"{index_name}.lava" for index_name in indices], query, K, "aws")
+    if type == "uuid":
+        index_search_results = internal.search_lava_uuid([f"{index_name}.lava" for index_name in selected_indices], query, K, "aws")
+    elif type == "substring":
+        index_search_results = internal.search_lava_substring([f"{index_name}.lava" for index_name in selected_indices], query, K, "aws")
+    elif type == "vector":
+        index_search_results = internal.search_lava_vector([f"{index_name}.lava" for index_name in selected_indices], query, K, "aws")

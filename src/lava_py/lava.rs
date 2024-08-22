@@ -33,12 +33,20 @@ pub fn search_lava_substring(
     query: String,
     k: usize,
     reader_type: Option<&PyString>,
+    token_viable_limit: Option<usize>,
     sample_factor: Option<usize>,
 ) -> Result<Vec<(u64, u64)>, LavaError> {
     let reader_type = reader_type.map(|x| x.to_string()).unwrap_or_default();
 
     py.allow_threads(|| {
-        lava::search_lava_substring(files, query, k, reader_type.into(), sample_factor)
+        lava::search_lava_substring(
+            files,
+            query,
+            k,
+            reader_type.into(),
+            token_viable_limit,
+            sample_factor,
+        )
     })
 }
 

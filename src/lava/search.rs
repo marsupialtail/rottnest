@@ -66,6 +66,105 @@ async fn get_tokenizer_async(
     Ok((tokenizer, result))
 }
 
+async fn process_substring_query(
+    query: Vec<u32>,
+    n: u64,
+    fm_chunk_offsets: &[u64],
+    cumulative_counts: &[u64],
+    posting_list_offsets: &[u64],
+    reader: &mut AsyncReader,
+    file_id: u64,
+) -> Vec<(u64, u64)> {
+    let mut res: Vec<(u64, u64)> = vec![];
+    let mut start: usize = 0;
+    let mut end: usize = n as usize;
+
+    for i in (0..query.len()).rev() {
+        let current_token = query[i];
+
+        let start_byte = fm_chunk_offsets[start / FM_CHUNK_TOKS];
+        let end_byte = fm_chunk_offsets[start / FM_CHUNK_TOKS + 1];
+        let start_chunk = reader.read_range(start_byte, end_byte).await.unwrap();
+
+        let start_byte = fm_chunk_offsets[end / FM_CHUNK_TOKS];
+        let end_byte = fm_chunk_offsets[end / FM_CHUNK_TOKS + 1];
+        let end_chunk = reader.read_range(start_byte, end_byte).await.unwrap();
+
+        start = cumulative_counts[current_token as usize] as usize
+            + FMChunk::new(start_chunk)
+                .unwrap()
+                .search(current_token, start % FM_CHUNK_TOKS)
+                .unwrap() as usize;
+        end = cumulative_counts[current_token as usize] as usize
+            + FMChunk::new(end_chunk)
+                .unwrap()
+                .search(current_token, end % FM_CHUNK_TOKS)
+                .unwrap() as usize;
+
+        if start >= end {
+            return res;
+        }
+
+        if end <= start + 2 {
+            break;
+        }
+    }
+
+    let start_offset = posting_list_offsets[start / FM_CHUNK_TOKS];
+    let end_offset = posting_list_offsets[end / FM_CHUNK_TOKS + 1];
+    let total_chunks = end / FM_CHUNK_TOKS - start / FM_CHUNK_TOKS + 1;
+
+    let plist_chunks = reader.read_range(start_offset, end_offset).await.unwrap();
+
+    let mut chunk_set = JoinSet::new();
+
+    for i in 0..total_chunks {
+        let this_start = posting_list_offsets[start / FM_CHUNK_TOKS + i];
+        let this_end = posting_list_offsets[start / FM_CHUNK_TOKS + i + 1];
+        let this_chunk = plist_chunks
+            [(this_start - start_offset) as usize..(this_end - start_offset) as usize]
+            .to_vec();
+
+        chunk_set.spawn(async move {
+            let mut decompressor = Decoder::new(&this_chunk[..]).unwrap();
+            let mut serialized_plist_chunk: Vec<u8> = Vec::with_capacity(this_chunk.len());
+            decompressor
+                .read_to_end(&mut serialized_plist_chunk)
+                .unwrap();
+            let plist_chunk: Vec<u64> = bincode::deserialize(&serialized_plist_chunk).unwrap();
+
+            let chunk_res: Vec<(u64, u64)> = if i == 0 {
+                if total_chunks == 1 {
+                    plist_chunk[start % FM_CHUNK_TOKS..end % FM_CHUNK_TOKS]
+                        .iter()
+                        .map(|&uid| (file_id, uid))
+                        .collect()
+                } else {
+                    plist_chunk[start % FM_CHUNK_TOKS..]
+                        .iter()
+                        .map(|&uid| (file_id, uid))
+                        .collect()
+                }
+            } else if i == total_chunks - 1 {
+                plist_chunk[..end % FM_CHUNK_TOKS]
+                    .iter()
+                    .map(|&uid| (file_id, uid))
+                    .collect()
+            } else {
+                plist_chunk.iter().map(|&uid| (file_id, uid)).collect()
+            };
+
+            chunk_res
+        });
+    }
+
+    while let Some(chunk_res) = chunk_set.join_next().await {
+        res.extend(chunk_res.unwrap());
+    }
+
+    res
+}
+
 async fn search_substring_one_file(
     file_id: u64,
     mut reader: AsyncReader,
@@ -92,86 +191,33 @@ async fn search_substring_one_file(
         .read_range_and_decompress(total_counts_offset, (file_size - 32) as u64)
         .await?;
 
-    // let previous_range: u64 = u64::MAX;
-
-    let mut res: Vec<(u64, u64)> = vec![];
+    let mut query_set = JoinSet::new();
 
     for query in queries {
-        let mut start: usize = 0;
-        let mut end: usize = n as usize;
-        for i in (0..query.len()).rev() {
-            let current_token = query[i];
+        let fm_chunk_offsets = fm_chunk_offsets.clone();
+        let cumulative_counts = cumulative_counts.clone();
+        let posting_list_offsets = posting_list_offsets.clone();
+        let mut reader = reader.clone();
 
-            let start_byte = fm_chunk_offsets[start / FM_CHUNK_TOKS];
-            let end_byte = fm_chunk_offsets[start / FM_CHUNK_TOKS + 1];
-            let start_chunk = reader.read_range(start_byte, end_byte).await?;
-
-            let start_byte = fm_chunk_offsets[end / FM_CHUNK_TOKS];
-            let end_byte = fm_chunk_offsets[end / FM_CHUNK_TOKS + 1];
-            let end_chunk = reader.read_range(start_byte, end_byte).await?;
-
-            start = cumulative_counts[current_token as usize] as usize
-                + FMChunk::new(start_chunk)?
-                    .search(current_token, start % FM_CHUNK_TOKS)
-                    .unwrap() as usize;
-            end = cumulative_counts[current_token as usize] as usize
-                + FMChunk::new(end_chunk)?
-                    .search(current_token, end % FM_CHUNK_TOKS)
-                    .unwrap() as usize;
-
-            if start >= end {
-                break;
-            }
-        }
-
-        if start >= end {
-            continue;
-        }
-
-        let start_offset = posting_list_offsets[start / FM_CHUNK_TOKS];
-        let end_offset = posting_list_offsets[end / FM_CHUNK_TOKS + 1];
-        let total_chunks = end / FM_CHUNK_TOKS - start / FM_CHUNK_TOKS + 1;
-
-        // println!("total chunks: {}", total_chunks);
-
-        let plist_chunks = reader.read_range(start_offset, end_offset).await?;
-        for i in 0..total_chunks {
-            let this_start = posting_list_offsets[start / FM_CHUNK_TOKS + i];
-            let this_end = posting_list_offsets[start / FM_CHUNK_TOKS + i + 1];
-            let this_chunk = &plist_chunks
-                [(this_start - start_offset) as usize..(this_end - start_offset) as usize];
-
-            // decompress this chunk
-            let mut decompressor = Decoder::new(&this_chunk[..])?;
-            let mut serialized_plist_chunk: Vec<u8> = Vec::with_capacity(this_chunk.len() as usize);
-            decompressor.read_to_end(&mut serialized_plist_chunk)?;
-            let plist_chunk: Vec<u64> = bincode::deserialize(&serialized_plist_chunk)?;
-
-            if i == 0 {
-                if total_chunks == 1 {
-                    for uid in &plist_chunk[start % FM_CHUNK_TOKS..end % FM_CHUNK_TOKS] {
-                        // println!("push file_id {}", file_id);
-                        res.push((file_id as u64, *uid));
-                    }
-                } else {
-                    for uid in &plist_chunk[start % FM_CHUNK_TOKS..] {
-                        // println!("push file_id {}", file_id);
-                        res.push((file_id as u64, *uid));
-                    }
-                }
-            } else if i == total_chunks - 1 {
-                for uid in &plist_chunk[..end % FM_CHUNK_TOKS] {
-                    // println!("push file_id {}", file_id);
-                    res.push((file_id as u64, *uid));
-                }
-            } else {
-                for uid in &plist_chunk[..] {
-                    // println!("push file_id {}", file_id);
-                    res.push((file_id as u64, *uid));
-                }
-            }
-        }
+        query_set.spawn(async move {
+            process_substring_query(
+                query,
+                n,
+                &fm_chunk_offsets,
+                &cumulative_counts,
+                &posting_list_offsets,
+                &mut reader,
+                file_id,
+            )
+            .await
+        });
     }
+
+    let mut res = Vec::new();
+    while let Some(query_res) = query_set.join_next().await {
+        res.extend(query_res.unwrap());
+    }
+
     Ok(res)
 }
 
@@ -229,16 +275,22 @@ async fn search_generic_async(
     while let Some(res) = join_set.join_next().await {
         let res = res.unwrap().unwrap();
         result.extend(res);
-        if result.len() >= k {
-            break;
-        }
+        /*
+        This is not safe. This is because the index might raise false positives, such that the top K only contains false positives.
+        We should support doing this if the index is guaranteed not to have false positives.
+        E.g. SSA index will have false positives with skip_factor > 1
+        E.g. Trie index will have false positives since values on the itnermediate nodes, due to the merge process.
+         */
+        // if result.len() >= k {
+        //     break;
+        // }
     }
 
     join_set.shutdown().await;
 
     // keep only k elements in the result
-    let mut result: Vec<(u64, u64)> = result.into_iter().collect_vec();
-    result.truncate(k);
+    let result: Vec<(u64, u64)> = result.into_iter().collect_vec();
+    // result.truncate(k);
     Ok(result)
 }
 
@@ -431,6 +483,7 @@ pub async fn search_lava_substring(
     query: String,
     k: usize,
     reader_type: ReaderType,
+    token_viable_limit: Option<usize>,
     sample_factor: Option<usize>,
 ) -> Result<Vec<(u64, u64)>, LavaError> {
     let (_file_sizes, readers) = get_file_sizes_and_readers(&files, reader_type.clone()).await?;
@@ -471,9 +524,7 @@ pub async fn search_lava_substring(
         .cloned()
         .collect();
 
-    println!("{:?}", result);
-
-    let query: Vec<Vec<u32>> = if let Some(sample_factor) = sample_factor {
+    let mut query: Vec<Vec<u32>> = if let Some(sample_factor) = sample_factor {
         (0..sample_factor)
             .map(|offset| {
                 result
@@ -489,7 +540,23 @@ pub async fn search_lava_substring(
         vec![result]
     };
 
-    // println!("{:?}", result);
+    // query = [i[-token_viable_limit:] for i in query]
+
+    if let Some(token_viable_limit) = token_viable_limit {
+        query.iter_mut().for_each(|vec| {
+            if vec.len() > token_viable_limit {
+                *vec = vec
+                    .iter()
+                    .rev()
+                    .take(token_viable_limit)
+                    .rev()
+                    .cloned()
+                    .collect();
+            }
+        });
+    }
+
+    println!("{:?}", query);
 
     let (file_sizes, readers) = get_file_sizes_and_readers(&files, reader_type).await?;
     search_generic_async(file_sizes, readers, QueryParam::Substring(query), k).await
@@ -551,19 +618,34 @@ pub async fn search_lava_vector_async(
             decompressor.read_to_end(&mut centroid_vectors).unwrap();
 
             let centroid_vectors = bytes_to_f32_vec(&centroid_vectors);
-            let array2 = Array2::<f32>::from_shape_vec((1000, 128), centroid_vectors).unwrap();
+            let num_vectors = centroid_vectors.len() / 128;
+            let array2 =
+                Array2::<f32>::from_shape_vec((num_vectors, 128), centroid_vectors).unwrap();
 
-            (results, array2)
+            (num_vectors, array2)
         }));
     }
 
-    let result: Vec<Result<(Vec<u64>, Array2<f32>), tokio::task::JoinError>> =
+    let result: Vec<Result<(usize, Array2<f32>), tokio::task::JoinError>> =
         futures::future::join_all(futures).await;
 
     let end = Instant::now();
     println!("Time stage 1 read: {:?}", end - start);
 
     let start = Instant::now();
+
+    let arr_lens = result
+        .iter()
+        .map(|x| x.as_ref().unwrap().0)
+        .collect::<Vec<_>>();
+    // get cumulative arr len starting from 0
+    let cumsum = arr_lens
+        .iter()
+        .scan(0, |acc, &x| {
+            *acc += x;
+            Some(*acc)
+        })
+        .collect::<Vec<_>>();
 
     let arrays: Vec<Array2<f32>> = result.into_iter().map(|x| x.unwrap().1).collect();
     let centroids = concatenate(
@@ -595,7 +677,21 @@ pub async fn search_lava_vector_async(
 
     let mut file_indices: Vec<Vec<usize>> = vec![vec![]; files.len()];
     for idx in smallest_indices.iter() {
-        file_indices[*idx / 1000].push(*idx % 1000 as usize);
+        // figure out which file idx based on cumsum. need to find the index of the thing that is just bigger than idx
+
+        let file_idx = cumsum
+            .iter()
+            .enumerate()
+            .find(|(_, &val)| val > *idx)
+            .unwrap()
+            .0;
+        let last_cumsum = if file_idx == 0 {
+            0
+        } else {
+            cumsum[file_idx - 1]
+        };
+        let remainder = idx - last_cumsum;
+        file_indices[file_idx].push(remainder);
     }
 
     let end = Instant::now();
@@ -749,6 +845,7 @@ mod tests {
             "Samsung Galaxy Note".to_string(),
             10,
             ReaderType::default(),
+            Some(10),
             None,
         );
         println!("{:?}", result.unwrap());

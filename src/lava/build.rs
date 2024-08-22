@@ -523,8 +523,6 @@ pub async fn build_lava_substring(
         })
         .collect::<Vec<(Vec<u64>, Vec<u32>)>>();
 
-    println!("{:?}", named_encodings[1]);
-
     let uids: Vec<u64> = named_encodings
         .iter()
         .map(|(uid, _)| uid)
@@ -557,8 +555,6 @@ pub async fn build_lava_substring(
     } else {
         (encodings, uids)
     };
-
-    println!("{:?}", &encodings[..200]);
 
     for i in 10..encodings.len() {
         suffices.push(encodings[i - 10..i].to_vec());
@@ -598,16 +594,16 @@ pub async fn build_lava_substring(
 
     // write out the bwt to a numpy array
 
-    let file = File::create("output.bin")?;
-    let mut writer = BufWriter::new(file);
+    // let file = File::create("output.bin")?;
+    // let mut writer = BufWriter::new(file);
 
-    // Write each u32 to the file as bytes
-    for number in bwt.iter() {
-        writer.write_u32::<LittleEndian>(*number)?;
-    }
+    // // Write each u32 to the file as bytes
+    // for number in bwt.iter() {
+    //     writer.write_u32::<LittleEndian>(*number)?;
+    // }
 
     // Flush the buffer to ensure all data is written to the file
-    writer.flush()?;
+    // writer.flush()?;
 
     let mut file = File::create(output_file_name)?;
     file.write_all(&(compressed_tokenizer.len() as u64).to_le_bytes())?;

@@ -58,7 +58,7 @@ def read_columns(file_paths: list, row_groups: list, row_nr: list):
     return pyarrow.concat_tables(results)
 
 
-def get_physical_layout(file_paths: list[str], column_name: str, type = "str"):
+def get_physical_layout(file_paths: list[str], column_name: str, type = "str", remote = None):
 
     assert type in {"str", "binary"}
 
@@ -80,7 +80,7 @@ def get_physical_layout(file_paths: list[str], column_name: str, type = "str"):
 
         metadata = polars.from_dict({
                 "uid": np.arange(len(data_page_num_rows) + 1),
-                "file_path": [file_path] * (len(data_page_num_rows) + 1),
+                "file_path": [file_path if remote is None else remote + file_path] * (len(data_page_num_rows) + 1),
                 "column_name": [column_name] * (len(data_page_num_rows) + 1),
                 # TODO: figure out a better way to handle this. Currently this is definitely not a bottleneck. Write ampl factor is almost 10x
                 # writing just one row followed by a bunch of Nones don't help, likely because it's already smart enough to do dict encoding.
@@ -105,7 +105,7 @@ def get_physical_layout(file_paths: list[str], column_name: str, type = "str"):
 
     return pyarrow.concat_arrays(all_arrs), pyarrow.array(all_uids.astype(np.uint64)), polars.concat(metadatas)
 
-def get_virtual_layout(file_paths: list[str], column_name: str, key_column_name: str, type = "str", stride = 500):
+def get_virtual_layout(file_paths: list[str], column_name: str, key_column_name: str, type = "str", stride = 500, remote = None):
 
     fs = get_fs_from_file_path(file_paths[0])
     metadatas = []
@@ -119,7 +119,7 @@ def get_virtual_layout(file_paths: list[str], column_name: str, key_column_name:
         arr = table[column_name].to_arrow().cast(pyarrow.large_string() if type == 'str' else pyarrow.large_binary())
         uid = table['__uid__'].to_arrow().cast(pyarrow.uint64())
 
-        metadata = table.groupby("__uid__").agg([polars.col(key_column_name).min().alias("min"), polars.col(key_column_name).max().alias("max")]).sort("__uid__")
+        metadata = table.group_by("__uid__").agg([polars.col(key_column_name).min().alias("min"), polars.col(key_column_name).max().alias("max")]).sort("__uid__")
         
     return arr, uid, metadata
 
@@ -164,7 +164,7 @@ def get_result_from_index_result(metadata: polars.DataFrame, index_search_result
 def return_full_result(result: polars.DataFrame, metadata: polars.DataFrame, column_name: str, columns: List[str]):
     if columns != []:
         result = result.join(metadata.select(["__metadata_key__", "file_path", "row_groups"]), on = "__metadata_key__", how = "left")
-        grouped = result.groupby(["file_path", "row_groups"]).agg([polars.col('__metadata_key__'), polars.col('__row_group_rownr__')])
+        grouped = result.group_by(["file_path", "row_groups"]).agg([polars.col('__metadata_key__'), polars.col('__row_group_rownr__')])
         collected_results = polars.from_arrow(read_columns(grouped["file_path"].to_list(), grouped["row_groups"].to_list(), grouped["__row_group_rownr__"].to_list()))
         unnested_metadata_key = grouped['__metadata_key__'].explode()
         unnested_row_group_rownr = grouped['__row_group_rownr__'].explode()

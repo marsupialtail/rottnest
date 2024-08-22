@@ -27,9 +27,9 @@ def index_files_bm25(file_paths: list[str], column_name: str, name = uuid.uuid4(
     file_data = file_data.replace_schema_metadata({"cache_ranges": json.dumps(cache_ranges)})
     pq.write_table(file_data, f"{name}.meta", write_statistics = False, compression = 'zstd')
 
-def index_files_substring(file_paths: list[str], column_name: str, name = uuid.uuid4().hex, index_mode = "physical", tokenizer_file = None, token_skip_factor = None):
+def index_files_substring(file_paths: list[str], column_name: str, name = uuid.uuid4().hex, index_mode = "physical", tokenizer_file = None, token_skip_factor = None, remote = None):
 
-    arr, uid, file_data = get_physical_layout(file_paths, column_name) if index_mode == "physical" else get_virtual_layout(file_paths, column_name, "uid")
+    arr, uid, file_data = get_physical_layout(file_paths, column_name, remote = remote) if index_mode == "physical" else get_virtual_layout(file_paths, column_name, "uid", remote = remote)
 
     cache_ranges = rottnest.build_lava_substring(f"{name}.lava", arr, uid, tokenizer_file, token_skip_factor)
 
@@ -37,9 +37,9 @@ def index_files_substring(file_paths: list[str], column_name: str, name = uuid.u
     file_data = file_data.replace_schema_metadata({"cache_ranges": json.dumps(cache_ranges)})
     pq.write_table(file_data, f"{name}.meta", write_statistics = False, compression = 'zstd')
 
-def index_files_uuid(file_paths: list[str], column_name: str, name = uuid.uuid4().hex, index_mode = "physical"):
+def index_files_uuid(file_paths: list[str], column_name: str, name = uuid.uuid4().hex, index_mode = "physical", remote = None):
 
-    arr, uid, file_data = get_physical_layout(file_paths, column_name) if index_mode == "physical" else get_virtual_layout(file_paths, column_name, "uid")
+    arr, uid, file_data = get_physical_layout(file_paths, column_name, remote = remote) if index_mode == "physical" else get_virtual_layout(file_paths, column_name, "uid", remote = remote)
 
     idx = pac.sort_indices(arr)
     arr = arr.take(idx)
@@ -51,7 +51,9 @@ def index_files_uuid(file_paths: list[str], column_name: str, name = uuid.uuid4(
     file_data = file_data.replace_schema_metadata({"cache_ranges": json.dumps(cache_ranges)})
     pq.write_table(file_data, f"{name}.meta", write_statistics = False, compression = 'zstd')
 
-def index_files_vector(file_paths: list[str], column_name: str, name = uuid.uuid4().hex, dtype = 'f32', index_mode = "physical", gpu = False):
+
+
+def index_files_vector(file_paths: list[str], column_name: str, name = uuid.uuid4().hex, dtype = 'f32', index_mode = "physical", gpu = False, remote = None):
 
     try:
         import faiss
@@ -64,7 +66,7 @@ def index_files_vector(file_paths: list[str], column_name: str, name = uuid.uuid
     assert dtype == 'f32'
     dtype_size = 4
 
-    arr, uid, file_data = get_physical_layout(file_paths, column_name, type = "binary") if index_mode == "physical" else get_virtual_layout(file_paths, column_name, "uid", type = "binary")
+    arr, uid, file_data = get_physical_layout(file_paths, column_name, type = "binary", remote = remote) if index_mode == "physical" else get_virtual_layout(file_paths, column_name, "uid", type = "binary", remote = remote)
     uid = uid.to_numpy()
 
     # arr will be a array of largebinary, we need to convert it into numpy, time for some arrow ninja
@@ -75,9 +77,8 @@ def index_files_vector(file_paths: list[str], column_name: str, name = uuid.uuid
     dim = diffs.item() // dtype_size
     x = np.frombuffer(buffers[2], dtype = np.float32).reshape(len(arr), dim)
 
-    num_centroids = 1000 # len(arr) // 10_000
+    num_centroids = len(arr) // 10_000
 
-    # kmeans = faiss.Kmeans(128, len(arr) // 10_000, niter=30, verbose=True, gpu = gpu)
     kmeans = faiss.Kmeans(128,num_centroids, niter=30, verbose=True, gpu = gpu)
     kmeans.train(x)
     centroids = kmeans.centroids
@@ -91,21 +92,45 @@ def index_files_vector(file_paths: list[str], column_name: str, name = uuid.uuid
     posting_lists = [[] for _ in range(num_centroids)]
     codes_lists = [[] for _ in range(num_centroids)]
 
-    for i in tqdm(range(len(arr) // batch_size)):
-        batch = x[i * batch_size:(i + 1) * batch_size]
+    if gpu:
 
-        distances = -np.sum(centroids ** 2, axis=1, keepdims=True).T + 2 * np.dot(batch, centroids.T)
-        indices = np.argpartition(-distances, kth=20, axis=1)[:, :20]
-        sorted_indices = np.argsort(-distances[np.arange(distances.shape[0])[:, None], indices], axis=1)
-        indices = indices[np.arange(indices.shape[0])[:, None], sorted_indices]     
+        res = faiss.StandardGpuResources()
+        d = centroids.shape[1]
+        index = faiss.GpuIndexFlatL2(res, d)
+        index.add(centroids.astype('float32'))
 
-        closest_centroids = list(indices[:,0])
-        # closest2_centroids = list(indices[:,1])
+        # Process batches
+        for i in tqdm(range(len(arr) // batch_size)):
+            batch = x[i * batch_size:(i + 1) * batch_size].astype('float32')
+            k = 20 
+            distances, indices = index.search(batch, k)
+            
+            # The indices are already sorted by distance, so we don't need to sort again
+            closest_centroids = indices[:, 0]
 
-        for k in range(batch_size):
-            # TODO: this uses UID! Just a warning. because gemv is fast even on lowly CPUs for final reranking.
-            posting_lists[closest_centroids[k]].append(uid[i * batch_size + k])
-            codes_lists[closest_centroids[k]].append(codes[i * batch_size + k])
+            for k in range(batch_size):
+                # TODO: this uses UID! Just a warning. because gemv is fast even on lowly CPUs for final reranking.
+                posting_lists[closest_centroids[k]].append(uid[i * batch_size + k])
+                codes_lists[closest_centroids[k]].append(codes[i * batch_size + k])
+
+    
+    else:
+        for i in tqdm(range(len(arr) // batch_size)):
+            batch = x[i * batch_size:(i + 1) * batch_size]
+
+            distances = -np.sum(centroids ** 2, axis=1, keepdims=True).T + 2 * np.dot(batch, centroids.T)
+            indices = np.argpartition(-distances, kth=20, axis=1)[:, :20]
+            sorted_indices = np.argsort(-distances[np.arange(distances.shape[0])[:, None], indices], axis=1)
+            indices = indices[np.arange(indices.shape[0])[:, None], sorted_indices]     
+
+            closest_centroids = list(indices[:,0])
+            # closest2_centroids = list(indices[:,1])
+
+            for k in range(batch_size):
+                # TODO: this uses UID! Just a warning. because gemv is fast even on lowly CPUs for final reranking.
+                posting_lists[closest_centroids[k]].append(uid[i * batch_size + k])
+                codes_lists[closest_centroids[k]].append(codes[i * batch_size + k])
+
     
     f = open(f"{name}.lava", "wb")
     centroid_offsets = [0]
@@ -241,15 +266,18 @@ def search_index_uuid(indices: List[str], query: str, K: int, columns = []):
     return return_full_result(result, metadata, column_name, columns)
 
 
-def search_index_substring(indices: List[str], query: str, K: int, sample_factor = None, columns = []):
+def search_index_substring(indices: List[str], query: str, K: int, sample_factor = None, token_viable_limit = 1, columns = []):
 
     metadata = get_metadata_and_populate_cache(indices)
     
-    index_search_results = rottnest.search_lava_substring([f"{index_name}.lava" for index_name in indices], query, K, "aws", sample_factor = sample_factor)
+    index_search_results = rottnest.search_lava_substring([f"{index_name}.lava" for index_name in indices], query, K, "aws", sample_factor = sample_factor, token_viable_limit = token_viable_limit)
     print(index_search_results)
 
     if len(index_search_results) == 0:
         return None
+    
+    if len(index_search_results) > 10000:
+        return "Brute Force Please"
 
     result, column_name, metadata = get_result_from_index_result(metadata, index_search_results)
     result =  polars.from_arrow(result).filter(polars.col(column_name).str.to_lowercase().str.contains(query.lower(), literal=True))
