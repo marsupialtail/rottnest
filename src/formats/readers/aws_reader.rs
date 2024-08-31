@@ -55,12 +55,11 @@ impl AsyncAwsReader {
 
 #[async_trait]
 impl super::Reader for AsyncAwsReader {
-
     fn update_filename(&mut self, file: String) -> Result<(), LavaError> {
         if !file.starts_with("s3://") {
             return Err(LavaError::Parse("File scheme not supported".to_string()));
         }
-    
+
         let tokens = file[5..].split('/').collect::<Vec<_>>();
         let bucket = tokens[0].to_string();
         let filename = tokens[1..].join("/");
@@ -87,7 +86,7 @@ impl super::Reader for AsyncAwsReader {
                 .set_range(Some(format!("bytes={}-{}", from, to - 1)))
                 .send()
                 .await;
-            
+
             if let Ok(res) = this_result {
                 break res;
             }
@@ -164,7 +163,9 @@ impl Operator {
     }
 }
 
-pub(crate) async fn get_file_size_and_reader(file: String) -> Result<(usize, AsyncAwsReader), LavaError> {
+pub(crate) async fn get_file_size_and_reader(
+    file: String,
+) -> Result<(usize, AsyncAwsReader), LavaError> {
     // Extract filename
     let mut reader = get_reader(file.clone()).await?;
     // Get the file size
@@ -176,7 +177,6 @@ pub(crate) async fn get_file_size_and_reader(file: String) -> Result<(usize, Asy
 
     Ok((file_size as usize, reader))
 }
-
 
 pub(crate) async fn get_reader(file: String) -> Result<AsyncAwsReader, LavaError> {
     // Extract filename
@@ -192,5 +192,9 @@ pub(crate) async fn get_reader(file: String) -> Result<AsyncAwsReader, LavaError
     let filename = tokens[1..].join("/");
 
     // Create the reader
-    Ok(AsyncAwsReader::new(operator.into_inner(), bucket.clone(), filename.clone()))
+    Ok(AsyncAwsReader::new(
+        operator.into_inner(),
+        bucket.clone(),
+        filename.clone(),
+    ))
 }

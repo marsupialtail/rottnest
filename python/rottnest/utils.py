@@ -57,6 +57,16 @@ def read_columns(file_paths: list, row_groups: list, row_nr: list):
     
     return pyarrow.concat_tables(results)
 
+def read_row_groups(file_paths: list, row_groups: list, row_ranges: list, column: str):
+
+    def read_parquet_file(file, row_group, row_range):
+        f = pq.ParquetFile(file.replace("s3://",''), filesystem=get_fs_from_file_path(file))
+        return f.read_row_group(row_group, columns=[column])[column].combine_chunks()[row_range[0]:row_range[1]]
+
+    with ThreadPoolExecutor(max_workers=os.cpu_count()) as executor:  # Control the number of parallel threads
+        results = list(executor.map(read_parquet_file, file_paths, row_groups, row_ranges))
+
+    return results
 
 def get_physical_layout(file_paths: list[str], column_name: str, type = "str", remote = None):
 
@@ -151,6 +161,9 @@ def get_result_from_index_result(metadata: polars.DataFrame, index_search_result
     result = rottnest.read_indexed_pages(column_name, metadata["file_path"].to_list(), metadata["row_groups"].to_list(),
                                      metadata["data_page_offsets"].to_list(), metadata["data_page_sizes"].to_list(), metadata["dictionary_page_sizes"].to_list(),
                                      "aws", file_metadatas)
+    
+    # magic number 2044 for vetors
+    # result = read_row_groups(metadata["file_path"].to_list(), metadata["row_groups"].to_list(), [(i, i + 2044) for i in metadata['page_row_offset_in_row_group'].to_list()], column_name)
 
     row_group_rownr = [pyarrow.array(np.arange(metadata['page_row_offset_in_row_group'][i], metadata['page_row_offset_in_row_group'][i] + len(arr))) for i, arr in enumerate(result)]
     

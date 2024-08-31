@@ -229,11 +229,15 @@ async fn search_uuid_one_file(
 ) -> Result<Vec<(u64, u64)>, LavaError> {
     let mut result: Vec<(u64, u64)> = Vec::new();
     let mut start_time = Instant::now();
-    let mut end_time = Instant::now();
 
     let this_result: Vec<usize> =
         FastTrie::query_with_reader(file_size, &mut reader, &query).await?;
     result.extend(this_result.iter().map(|x| (file_id, *x as u64)));
+
+    // println!(
+    //     "search_uuid_one_file: {}ms",
+    //     start_time.elapsed().as_millis()
+    // );
 
     Ok(result)
 }
@@ -246,6 +250,7 @@ async fn search_generic_async(
 ) -> Result<Vec<(u64, u64)>, LavaError> {
     let mut join_set = JoinSet::new();
 
+    let mut start_time = Instant::now();
     for file_id in 0..readers.len() {
         let reader = readers.remove(0);
         let file_size = file_sizes.remove(0);
@@ -276,10 +281,7 @@ async fn search_generic_async(
         let res = res.unwrap().unwrap();
         result.extend(res);
         /*
-        This is not safe. This is because the index might raise false positives, such that the top K only contains false positives.
-        We should support doing this if the index is guaranteed not to have false positives.
-        E.g. SSA index will have false positives with skip_factor > 1
-        E.g. Trie index will have false positives since values on the itnermediate nodes, due to the merge process.
+        We cannot truncate to k anywhere, not even at the end, because of false
          */
         // if result.len() >= k {
         //     break;
@@ -288,9 +290,9 @@ async fn search_generic_async(
 
     join_set.shutdown().await;
 
-    // keep only k elements in the result
+    println!("Time stage 1 read: {:?}", start_time.elapsed());
+
     let result: Vec<(u64, u64)> = result.into_iter().collect_vec();
-    // result.truncate(k);
     Ok(result)
 }
 
@@ -770,11 +772,11 @@ pub async fn search_lava_vector_async(
             futures.push(tokio::spawn(async move {
                 let start_time = Instant::now();
                 let codes_and_plist = reader_c.read_range(start, end).await.unwrap();
-                println!(
-                    "Time to read {:?}, {:?}",
-                    Instant::now() - start_time,
-                    codes_and_plist.len()
-                );
+                // println!(
+                //     "Time to read {:?}, {:?}",
+                //     Instant::now() - start_time,
+                //     codes_and_plist.len()
+                // );
                 (file_id, Array1::<u8>::from_vec(codes_and_plist.to_vec()))
             }));
         }
