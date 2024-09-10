@@ -11,9 +11,7 @@ use std::sync::{Arc, Mutex};
 use zstd::stream::encode_all;
 use zstd::stream::read::Decoder;
 
-use crate::formats::readers::{
-    get_file_size_and_reader, get_file_sizes_and_readers, AsyncReader, ReaderType,
-};
+use crate::formats::readers::{get_file_size_and_reader, get_file_sizes_and_readers, AsyncReader, ReaderType};
 use crate::lava::constants::*;
 use crate::lava::error::LavaError;
 use crate::lava::fm_chunk::FMChunk;
@@ -21,9 +19,7 @@ use crate::lava::plist::PListChunk;
 use crate::lava::trie::FastTrie;
 use std::collections::HashMap;
 
-use crate::vamana::{
-    access::InMemoryAccessMethodF32, merge_indexes_par, EuclideanF32, IndexParams, VamanaIndex,
-};
+use crate::vamana::{access::InMemoryAccessMethodF32, merge_indexes_par, EuclideanF32, IndexParams, VamanaIndex};
 
 // @Rain chore: we need to simplify all the iterator impls
 
@@ -37,15 +33,8 @@ struct PListIterator {
 impl PListIterator {
     // take ownership of the data structures
     pub async fn new(mut reader: AsyncReader, plist_offsets: Vec<u64>) -> Result<Self, LavaError> {
-        let plist_chunk = reader
-            .read_range_and_decompress(plist_offsets[0], plist_offsets[1])
-            .await?;
-        Ok(Self {
-            reader: reader,
-            plist_offsets: plist_offsets,
-            current_chunk_offset: 0,
-            current_chunk: plist_chunk,
-        })
+        let plist_chunk = reader.read_range_and_decompress(plist_offsets[0], plist_offsets[1]).await?;
+        Ok(Self { reader: reader, plist_offsets: plist_offsets, current_chunk_offset: 0, current_chunk: plist_chunk })
     }
 
     pub async fn advance(&mut self) -> Result<(), LavaError> {
@@ -68,18 +57,13 @@ struct FMChunkIterator {
     reader: AsyncReader,
     fm_chunk_offsets: Vec<u64>,
     current_chunk_offset: usize,
-    pub current_chunk: FMChunk,
+    pub current_chunk: FMChunk<u32>,
 }
 
 impl FMChunkIterator {
     // take ownership of the data structures
-    pub async fn new(
-        mut reader: AsyncReader,
-        fm_chunk_offsets: Vec<u64>,
-    ) -> Result<Self, LavaError> {
-        let buffer3 = reader
-            .read_range(fm_chunk_offsets[0], fm_chunk_offsets[1])
-            .await?;
+    pub async fn new(mut reader: AsyncReader, fm_chunk_offsets: Vec<u64>) -> Result<Self, LavaError> {
+        let buffer3 = reader.read_range(fm_chunk_offsets[0], fm_chunk_offsets[1]).await?;
         let current_chunk = FMChunk::new(buffer3)?;
 
         Ok(Self {
@@ -109,11 +93,8 @@ impl FMChunkIterator {
     }
 
     pub async fn reset(&mut self) -> Result<(), LavaError> {
-        self.current_chunk = FMChunk::new(
-            self.reader
-                .read_range(self.fm_chunk_offsets[0], self.fm_chunk_offsets[1])
-                .await?,
-        )?;
+        self.current_chunk =
+            FMChunk::new(self.reader.read_range(self.fm_chunk_offsets[0], self.fm_chunk_offsets[1]).await?)?;
         self.current_chunk_offset = 0;
 
         Ok(())
@@ -138,12 +119,9 @@ impl PListChunkIterator {
     ) -> Result<Self, LavaError> {
         // read the first chunk
 
-        let buffer3 = reader
-            .read_range(plist_offsets[0], plist_offsets[1])
-            .await?;
+        let buffer3 = reader.read_range(plist_offsets[0], plist_offsets[1]).await?;
         let result: Vec<Vec<u64>> =
-            PListChunk::search_compressed(buffer3.to_vec(), &(0..plist_elems[1]).collect())
-                .unwrap();
+            PListChunk::search_compressed(buffer3.to_vec(), &(0..plist_elems[1]).collect()).unwrap();
 
         Ok(Self {
             reader: reader,
@@ -179,8 +157,7 @@ impl PListChunkIterator {
 
             self.current_chunk = PListChunk::search_compressed(
                 buffer3.to_vec(),
-                &(0..(self.plist_elems[self.current_chunk_offset + 1]
-                    - self.plist_elems[self.current_chunk_offset]))
+                &(0..(self.plist_elems[self.current_chunk_offset + 1] - self.plist_elems[self.current_chunk_offset]))
                     .collect(),
             )
             .unwrap();
@@ -200,10 +177,8 @@ async fn merge_lava_uuid(
     assert_eq!(lava_files.len(), 2);
     assert_eq!(uid_offsets.len(), 2);
 
-    let (file_size1, mut reader1) =
-        get_file_size_and_reader(lava_files[0].clone(), reader_type.clone()).await?;
-    let (file_size2, mut reader2) =
-        get_file_size_and_reader(lava_files[1].clone(), reader_type.clone()).await?;
+    let (file_size1, mut reader1) = get_file_size_and_reader(lava_files[0].clone(), reader_type.clone()).await?;
+    let (file_size2, mut reader2) = get_file_size_and_reader(lava_files[1].clone(), reader_type.clone()).await?;
 
     // let buffer: bytes::Bytes = reader1.read_range(0, file_size1 as u64).await?;
     // let mut fast_trie1 = FastTrie::deserialize(buffer.to_vec());
@@ -262,13 +237,11 @@ async fn merge_lava_bm25(
         let num_documents = results[2];
         total_num_documents += num_documents;
 
-        let compressed_token_counts = reader
-            .read_range(compressed_term_dict_offset, compressed_plist_offsets_offset)
-            .await?;
+        let compressed_token_counts =
+            reader.read_range(compressed_term_dict_offset, compressed_plist_offsets_offset).await?;
 
         let mut decompressed_token_counts: Vec<u8> = Vec::new();
-        let mut decompressor: Decoder<'_, BufReader<&[u8]>> =
-            Decoder::new(&compressed_token_counts[..])?;
+        let mut decompressor: Decoder<'_, BufReader<&[u8]>> = Decoder::new(&compressed_token_counts[..])?;
         decompressor.read_to_end(&mut decompressed_token_counts)?;
         let token_counts: Vec<usize> = bincode::deserialize(&decompressed_token_counts)?;
 
@@ -281,16 +254,12 @@ async fn merge_lava_bm25(
             }
         }
 
-        let buffer2 = reader
-            .read_range(compressed_plist_offsets_offset, file_size - 24)
-            .await?;
+        let buffer2 = reader.read_range(compressed_plist_offsets_offset, file_size - 24).await?;
 
         decompressor = Decoder::new(&buffer2[..])?;
-        let mut decompressed_serialized_plist_offsets: Vec<u8> =
-            Vec::with_capacity(buffer2.len() as usize);
+        let mut decompressed_serialized_plist_offsets: Vec<u8> = Vec::with_capacity(buffer2.len() as usize);
         decompressor.read_to_end(&mut decompressed_serialized_plist_offsets)?;
-        let this_plist_offsets: Vec<u64> =
-            bincode::deserialize(&decompressed_serialized_plist_offsets)?;
+        let this_plist_offsets: Vec<u64> = bincode::deserialize(&decompressed_serialized_plist_offsets)?;
 
         if (this_plist_offsets.len() % 2) != 0 {
             let err = LavaError::Parse("data corruption".to_string());
@@ -299,8 +268,7 @@ async fn merge_lava_bm25(
         let num_elements = this_plist_offsets.len() / 2;
 
         let compressed_tokenizer_size = reader.read_usize_from_start(0, 1).await?[0];
-        let this_compressed_tokenizer: bytes::Bytes =
-            reader.read_range(8, 8 + compressed_tokenizer_size).await?;
+        let this_compressed_tokenizer: bytes::Bytes = reader.read_range(8, 8 + compressed_tokenizer_size).await?;
 
         match &compressed_tokenizer {
             Some(value) => assert!(
@@ -380,21 +348,16 @@ async fn merge_lava_bm25(
     output_file.write(&compressed_token_counts)?;
 
     let serialized = bincode::serialize(&new_plist_offsets).unwrap();
-    let compressed_plist_offsets =
-        encode_all(&serialized[..], 0).expect("Compression of plist offsets failed");
+    let compressed_plist_offsets = encode_all(&serialized[..], 0).expect("Compression of plist offsets failed");
 
-    let compressed_plist_offsets_offset =
-        compressed_term_dict_offset + compressed_token_counts.len() as u64;
+    let compressed_plist_offsets_offset = compressed_term_dict_offset + compressed_token_counts.len() as u64;
     output_file.write(&compressed_plist_offsets)?;
 
     output_file.write(&(compressed_term_dict_offset as u64).to_le_bytes())?;
     output_file.write(&(compressed_plist_offsets_offset as u64).to_le_bytes())?;
     output_file.write(&(total_num_documents as u64).to_le_bytes())?;
 
-    Ok(vec![(
-        compressed_term_dict_offset as usize,
-        output_file.seek(SeekFrom::Current(0))? as usize,
-    )])
+    Ok(vec![(compressed_term_dict_offset as usize, output_file.seek(SeekFrom::Current(0))? as usize)])
 }
 
 async fn compute_interleave(
@@ -491,8 +454,7 @@ async fn merge_lava_substring(
         // instead of bothering with wrapping this thing in Arc<Mutex<>>. Lots of tech debt to clean up
         // needed for the FMChunkIterator and PListIterator
         let (_, mut reader) = get_file_size_and_reader(file.clone(), reader_type.clone()).await?;
-        let (file_size, reader1) =
-            get_file_size_and_reader(file.clone(), reader_type.clone()).await?;
+        let (file_size, reader1) = get_file_size_and_reader(file.clone(), reader_type.clone()).await?;
         let file_size = file_size as u64;
 
         let results = reader.read_usize_from_end(4).await?;
@@ -504,8 +466,7 @@ async fn merge_lava_substring(
         ns.push(n);
 
         let compressed_tokenizer_size = reader.read_usize_from_start(0, 1).await?[0];
-        let this_compressed_tokenizer: bytes::Bytes =
-            reader.read_range(8, 8 + compressed_tokenizer_size).await?;
+        let this_compressed_tokenizer: bytes::Bytes = reader.read_range(8, 8 + compressed_tokenizer_size).await?;
 
         match &compressed_tokenizer {
             Some(value) => assert!(
@@ -515,15 +476,12 @@ async fn merge_lava_substring(
             None => compressed_tokenizer = Some(this_compressed_tokenizer.to_vec()),
         }
 
-        let fm_chunk_offsets: Vec<u64> = reader
-            .read_range_and_decompress(fm_chunk_offsets_offset, posting_list_offsets_offset)
-            .await?;
-        let posting_list_offsets: Vec<u64> = reader
-            .read_range_and_decompress(posting_list_offsets_offset, total_counts_offset)
-            .await?;
-        let cumulative_counts: Vec<u64> = reader
-            .read_range_and_decompress(total_counts_offset, (file_size - 32) as u64)
-            .await?;
+        let fm_chunk_offsets: Vec<u64> =
+            reader.read_range_and_decompress(fm_chunk_offsets_offset, posting_list_offsets_offset).await?;
+        let posting_list_offsets: Vec<u64> =
+            reader.read_range_and_decompress(posting_list_offsets_offset, total_counts_offset).await?;
+        let cumulative_counts: Vec<u64> =
+            reader.read_range_and_decompress(total_counts_offset, (file_size - 32) as u64).await?;
 
         // println!("{} {}", file, cumulative_counts.len());
 
@@ -623,21 +581,16 @@ async fn merge_lava_substring(
 
     for i in 0..bwt_output.len() {
         let current_tok = bwt_output[i];
-        next_chunk_counts
-            .entry(current_tok)
-            .and_modify(|count| *count += 1)
-            .or_insert(1);
+        next_chunk_counts.entry(current_tok).and_modify(|count| *count += 1).or_insert(1);
         current_chunk.push(current_tok);
 
         if ((i + 1) % FM_CHUNK_TOKS == 0) || i == bwt_output.len() - 1 {
             let serialized_counts = bincode::serialize(&current_chunk_counts)?;
-            let compressed_counts =
-                encode_all(&serialized_counts[..], 0).expect("Compression failed");
+            let compressed_counts = encode_all(&serialized_counts[..], 0).expect("Compression failed");
             output_file.write_all(&(compressed_counts.len() as u64).to_le_bytes())?;
             output_file.write_all(&compressed_counts)?;
             let serialized_chunk = bincode::serialize(&current_chunk)?;
-            let compressed_chunk =
-                encode_all(&serialized_chunk[..], 0).expect("Compression failed");
+            let compressed_chunk = encode_all(&serialized_chunk[..], 0).expect("Compression failed");
             output_file.write_all(&compressed_chunk)?;
             fm_chunk_offsets.push(output_file.seek(SeekFrom::Current(0))? as usize);
             current_chunk_counts = next_chunk_counts.clone();
@@ -645,8 +598,7 @@ async fn merge_lava_substring(
         }
     }
 
-    let mut posting_list_offsets: Vec<usize> =
-        vec![output_file.seek(SeekFrom::Current(0))? as usize];
+    let mut posting_list_offsets: Vec<usize> = vec![output_file.seek(SeekFrom::Current(0))? as usize];
 
     for i in (0..index_output.len()).step_by(FM_CHUNK_TOKS) {
         let slice = &index_output[i..std::cmp::min(index_output.len(), i + FM_CHUNK_TOKS)];
@@ -660,8 +612,7 @@ async fn merge_lava_substring(
 
     let fm_chunk_offsets_offset = output_file.seek(SeekFrom::Current(0))? as usize;
     let serialized_fm_chunk_offsets = bincode::serialize(&fm_chunk_offsets)?;
-    let compressed_fm_chunk_offsets =
-        encode_all(&serialized_fm_chunk_offsets[..], 0).expect("Compression failed");
+    let compressed_fm_chunk_offsets = encode_all(&serialized_fm_chunk_offsets[..], 0).expect("Compression failed");
     output_file.write_all(&compressed_fm_chunk_offsets)?;
 
     let posting_list_offsets_offset = output_file.seek(SeekFrom::Current(0))? as usize;
@@ -672,8 +623,7 @@ async fn merge_lava_substring(
 
     let total_counts_offset = output_file.seek(SeekFrom::Current(0))? as usize;
     let serialized_total_counts = bincode::serialize(&combined_cumulative_counts)?;
-    let compressed_total_counts: Vec<u8> =
-        encode_all(&serialized_total_counts[..], 0).expect("Compression failed");
+    let compressed_total_counts: Vec<u8> = encode_all(&serialized_total_counts[..], 0).expect("Compression failed");
     output_file.write_all(&compressed_total_counts)?;
 
     output_file.write_all(&(fm_chunk_offsets_offset as u64).to_le_bytes())?;
@@ -681,10 +631,7 @@ async fn merge_lava_substring(
     output_file.write_all(&(total_counts_offset as u64).to_le_bytes())?;
     output_file.write_all(&(bwt_output.len() as u64).to_le_bytes())?;
 
-    Ok(vec![(
-        cache_start,
-        output_file.seek(SeekFrom::Current(0))? as usize,
-    )])
+    Ok(vec![(cache_start, output_file.seek(SeekFrom::Current(0))? as usize)])
 }
 
 #[async_recursion]
@@ -718,34 +665,17 @@ async fn async_parallel_merge_files(
             let merged_files_shared = Arc::new(Mutex::new(vec![]));
             let new_uid_offsets_shared = Arc::new(Mutex::new(vec![]));
 
-            let chunked_files: Vec<Vec<String>> = files
-                .into_iter()
-                .chunks(k)
-                .into_iter()
-                .map(|chunk| chunk.collect())
-                .collect();
+            let chunked_files: Vec<Vec<String>> =
+                files.into_iter().chunks(k).into_iter().map(|chunk| chunk.collect()).collect();
 
-            let chunked_uid_offsets: Vec<Vec<u64>> = uid_offsets
-                .into_iter()
-                .chunks(k)
-                .into_iter()
-                .map(|chunk| chunk.collect())
-                .collect();
+            let chunked_uid_offsets: Vec<Vec<u64>> =
+                uid_offsets.into_iter().chunks(k).into_iter().map(|chunk| chunk.collect()).collect();
 
-            for (file_chunk, uid_chunk) in chunked_files
-                .into_iter()
-                .zip(chunked_uid_offsets.into_iter())
-            {
+            for (file_chunk, uid_chunk) in chunked_files.into_iter().zip(chunked_uid_offsets.into_iter()) {
                 if file_chunk.len() == 1 {
                     // If there's an odd file out, directly move it to the next level
-                    merged_files_shared
-                        .lock()
-                        .unwrap()
-                        .push(file_chunk[0].clone());
-                    new_uid_offsets_shared
-                        .lock()
-                        .unwrap()
-                        .push(uid_chunk[0].clone());
+                    merged_files_shared.lock().unwrap().push(file_chunk[0].clone());
+                    new_uid_offsets_shared.lock().unwrap().push(uid_chunk[0].clone());
                     continue;
                 }
 
@@ -811,22 +741,15 @@ async fn async_parallel_merge_files(
             }
 
             // Wait for all tasks to complete, MUST BE IN ORDER due to cache_ranges!
-            let cache_ranges: Vec<Vec<(usize, usize)>> = futures::future::join_all(tasks)
-                .await
-                .into_iter()
-                .collect::<Result<Vec<_>, _>>()
-                .unwrap();
+            let cache_ranges: Vec<Vec<(usize, usize)>> =
+                futures::future::join_all(tasks).await.into_iter().collect::<Result<Vec<_>, _>>().unwrap();
 
             // Extract the merged files for the next level of merging
-            let merged_files: Vec<String> = Arc::try_unwrap(merged_files_shared)
-                .expect("Lock still has multiple owners")
-                .into_inner()
-                .unwrap();
+            let merged_files: Vec<String> =
+                Arc::try_unwrap(merged_files_shared).expect("Lock still has multiple owners").into_inner().unwrap();
 
-            let new_uid_offsets = Arc::try_unwrap(new_uid_offsets_shared)
-                .expect("Lock still has multiple owners")
-                .into_inner()
-                .unwrap();
+            let new_uid_offsets =
+                Arc::try_unwrap(new_uid_offsets_shared).expect("Lock still has multiple owners").into_inner().unwrap();
 
             // Recurse with the newly merged files
             async_parallel_merge_files(
@@ -854,17 +777,9 @@ pub async fn parallel_merge_files(
     reader_type: ReaderType,
 ) -> Result<Vec<(usize, usize)>, LavaError> {
     let do_not_delete = BTreeSet::from_iter(files.clone().into_iter());
-    let result = async_parallel_merge_files(
-        condensed_lava_file,
-        files,
-        do_not_delete,
-        uid_offsets,
-        k,
-        mode,
-        reader_type,
-        None,
-    )
-    .await?;
+    let result =
+        async_parallel_merge_files(condensed_lava_file, files, do_not_delete, uid_offsets, k, mode, reader_type, None)
+            .await?;
     Ok(result)
 }
 
@@ -890,10 +805,7 @@ mod tests {
     pub fn test_merge_lava_substring() {
         let res = parallel_merge_files(
             "merged.lava".to_string(),
-            vec![
-                "chinese_index/0.lava".to_string(),
-                "chinese_index/1.lava".to_string(),
-            ],
+            vec!["chinese_index/0.lava".to_string(), "chinese_index/1.lava".to_string()],
             vec![0, 1000000],
             2,
             1,

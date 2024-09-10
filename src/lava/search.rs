@@ -31,22 +31,21 @@ enum QueryParam {
     Substring(Vec<Vec<u32>>),
     Uuid(String),
 }
-
-async fn get_tokenizer_async(
-    mut readers: Vec<AsyncReader>,
-) -> Result<(Tokenizer, Vec<String>), LavaError> {
+use std::fmt::Debug;
+async fn get_tokenizer_async(mut readers: Vec<AsyncReader>) -> Result<(Tokenizer, Vec<String>), LavaError> {
     let mut compressed_tokenizer: Option<Vec<u8>> = None;
 
     for i in 0..readers.len() {
         // now interpret this as a usize
         // readers[i].seek(SeekFrom::Start(0)).await?;
         let compressed_tokenizer_size = readers[i].read_usize_from_start(0, 1).await?[0];
-        let this_compressed_tokenizer: bytes::Bytes = readers[i]
-            .read_range(8, 8 + compressed_tokenizer_size)
-            .await?;
+        let this_compressed_tokenizer: bytes::Bytes = readers[i].read_range(8, 8 + compressed_tokenizer_size).await?;
         match &compressed_tokenizer {
-            Some(value) => assert!(this_compressed_tokenizer == value, "detected different tokenizers between different lava files, can't search across them."), 
-            None => compressed_tokenizer = Some(this_compressed_tokenizer.to_vec())
+            Some(value) => assert!(
+                this_compressed_tokenizer == value,
+                "detected different tokenizers between different lava files, can't search across them."
+            ),
+            None => compressed_tokenizer = Some(this_compressed_tokenizer.to_vec()),
         }
     }
 
@@ -66,15 +65,31 @@ async fn get_tokenizer_async(
     Ok((tokenizer, result))
 }
 
-async fn process_substring_query(
-    query: Vec<u32>,
+use num_traits::{AsPrimitive, PrimInt, Unsigned};
+use serde::{Deserialize, Serialize};
+use std::ops::Add;
+
+async fn process_substring_query<T>(
+    query: Vec<T>,
     n: u64,
     fm_chunk_offsets: &[u64],
     cumulative_counts: &[u64],
     posting_list_offsets: &[u64],
     reader: &mut AsyncReader,
     file_id: u64,
-) -> Vec<(u64, u64)> {
+) -> Vec<(u64, u64)>
+where
+    T: PrimInt
+        + Unsigned
+        + Serialize
+        + for<'de> Deserialize<'de>
+        + Clone
+        + Eq
+        + std::hash::Hash
+        + AsPrimitive<usize>
+        + 'static,
+    usize: AsPrimitive<T>,
+{
     let mut res: Vec<(u64, u64)> = vec![];
     let mut start: usize = 0;
     let mut end: usize = n as usize;
@@ -90,16 +105,10 @@ async fn process_substring_query(
         let end_byte = fm_chunk_offsets[end / FM_CHUNK_TOKS + 1];
         let end_chunk = reader.read_range(start_byte, end_byte).await.unwrap();
 
-        start = cumulative_counts[current_token as usize] as usize
-            + FMChunk::new(start_chunk)
-                .unwrap()
-                .search(current_token, start % FM_CHUNK_TOKS)
-                .unwrap() as usize;
-        end = cumulative_counts[current_token as usize] as usize
-            + FMChunk::new(end_chunk)
-                .unwrap()
-                .search(current_token, end % FM_CHUNK_TOKS)
-                .unwrap() as usize;
+        start = cumulative_counts[current_token.as_()] as usize
+            + FMChunk::<T>::new(start_chunk).unwrap().search(current_token, start % FM_CHUNK_TOKS).unwrap() as usize;
+        end = cumulative_counts[current_token.as_()] as usize
+            + FMChunk::<T>::new(end_chunk).unwrap().search(current_token, end % FM_CHUNK_TOKS).unwrap() as usize;
 
         if start >= end {
             return res;
@@ -121,35 +130,23 @@ async fn process_substring_query(
     for i in 0..total_chunks {
         let this_start = posting_list_offsets[start / FM_CHUNK_TOKS + i];
         let this_end = posting_list_offsets[start / FM_CHUNK_TOKS + i + 1];
-        let this_chunk = plist_chunks
-            [(this_start - start_offset) as usize..(this_end - start_offset) as usize]
-            .to_vec();
+        let this_chunk =
+            plist_chunks[(this_start - start_offset) as usize..(this_end - start_offset) as usize].to_vec();
 
         chunk_set.spawn(async move {
             let mut decompressor = Decoder::new(&this_chunk[..]).unwrap();
             let mut serialized_plist_chunk: Vec<u8> = Vec::with_capacity(this_chunk.len());
-            decompressor
-                .read_to_end(&mut serialized_plist_chunk)
-                .unwrap();
+            decompressor.read_to_end(&mut serialized_plist_chunk).unwrap();
             let plist_chunk: Vec<u64> = bincode::deserialize(&serialized_plist_chunk).unwrap();
 
             let chunk_res: Vec<(u64, u64)> = if i == 0 {
                 if total_chunks == 1 {
-                    plist_chunk[start % FM_CHUNK_TOKS..end % FM_CHUNK_TOKS]
-                        .iter()
-                        .map(|&uid| (file_id, uid))
-                        .collect()
+                    plist_chunk[start % FM_CHUNK_TOKS..end % FM_CHUNK_TOKS].iter().map(|&uid| (file_id, uid)).collect()
                 } else {
-                    plist_chunk[start % FM_CHUNK_TOKS..]
-                        .iter()
-                        .map(|&uid| (file_id, uid))
-                        .collect()
+                    plist_chunk[start % FM_CHUNK_TOKS..].iter().map(|&uid| (file_id, uid)).collect()
                 }
             } else if i == total_chunks - 1 {
-                plist_chunk[..end % FM_CHUNK_TOKS]
-                    .iter()
-                    .map(|&uid| (file_id, uid))
-                    .collect()
+                plist_chunk[..end % FM_CHUNK_TOKS].iter().map(|&uid| (file_id, uid)).collect()
             } else {
                 plist_chunk.iter().map(|&uid| (file_id, uid)).collect()
             };
@@ -165,14 +162,26 @@ async fn process_substring_query(
     res
 }
 
-async fn search_substring_one_file(
+async fn search_substring_one_file<T>(
     file_id: u64,
     mut reader: AsyncReader,
     file_size: usize,
-    queries: Vec<Vec<u32>>,
-) -> Result<Vec<(u64, u64)>, LavaError> {
-    // println!("executing on thread {:?}", std::thread::current().id());
-
+    queries: Vec<Vec<T>>,
+) -> Result<Vec<(u64, u64)>, LavaError>
+where
+    T: PrimInt
+        + Unsigned
+        + Serialize
+        + for<'de> Deserialize<'de>
+        + Clone
+        + Eq
+        + std::hash::Hash
+        + AsPrimitive<usize>
+        + Debug
+        + Send
+        + 'static,
+    usize: AsPrimitive<T>,
+{
     println!("{:?}", queries);
 
     let results = reader.read_usize_from_end(4).await?;
@@ -181,15 +190,12 @@ async fn search_substring_one_file(
     let total_counts_offset = results[2];
     let n = results[3];
 
-    let fm_chunk_offsets: Vec<u64> = reader
-        .read_range_and_decompress(fm_chunk_offsets_offset, posting_list_offsets_offset)
-        .await?;
-    let posting_list_offsets: Vec<u64> = reader
-        .read_range_and_decompress(posting_list_offsets_offset, total_counts_offset)
-        .await?;
-    let cumulative_counts: Vec<u64> = reader
-        .read_range_and_decompress(total_counts_offset, (file_size - 32) as u64)
-        .await?;
+    let fm_chunk_offsets: Vec<u64> =
+        reader.read_range_and_decompress(fm_chunk_offsets_offset, posting_list_offsets_offset).await?;
+    let posting_list_offsets: Vec<u64> =
+        reader.read_range_and_decompress(posting_list_offsets_offset, total_counts_offset).await?;
+    let cumulative_counts: Vec<u64> =
+        reader.read_range_and_decompress(total_counts_offset, (file_size - 32) as u64).await?;
 
     let mut query_set = JoinSet::new();
 
@@ -200,7 +206,7 @@ async fn search_substring_one_file(
         let mut reader = reader.clone();
 
         query_set.spawn(async move {
-            process_substring_query(
+            process_substring_query::<T>(
                 query,
                 n,
                 &fm_chunk_offsets,
@@ -230,8 +236,7 @@ async fn search_uuid_one_file(
     let mut result: Vec<(u64, u64)> = Vec::new();
     let mut start_time = Instant::now();
 
-    let this_result: Vec<usize> =
-        FastTrie::query_with_reader(file_size, &mut reader, &query).await?;
+    let this_result: Vec<usize> = FastTrie::query_with_reader(file_size, &mut reader, &query).await?;
     result.extend(this_result.iter().map(|x| (file_id, *x as u64)));
 
     // println!(
@@ -257,20 +262,10 @@ async fn search_generic_async(
 
         match query {
             QueryParam::Substring(ref value) => {
-                join_set.spawn(search_substring_one_file(
-                    file_id as u64,
-                    reader,
-                    file_size,
-                    value.clone(),
-                ));
+                join_set.spawn(search_substring_one_file::<u32>(file_id as u64, reader, file_size, value.clone()));
             }
             QueryParam::Uuid(ref value) => {
-                join_set.spawn(search_uuid_one_file(
-                    file_id as u64,
-                    reader,
-                    file_size,
-                    value.clone(),
-                ));
+                join_set.spawn(search_uuid_one_file(file_id as u64, reader, file_size, value.clone()));
             }
             _ => panic!("invalid mode"),
         }
@@ -320,23 +315,17 @@ async fn search_bm25_async(
 
         // now read the term dictionary
         let token_counts = readers[i]
-            .read_range_and_decompress(
-                compressed_term_dictionary_offset,
-                compressed_plist_offsets_offset,
-            )
+            .read_range_and_decompress(compressed_term_dictionary_offset, compressed_plist_offsets_offset)
             .await?;
 
         for query_token in query_tokens.iter() {
-            total_token_counts.insert(
-                *query_token,
-                total_token_counts[query_token] + token_counts[*query_token as usize] as usize,
-            );
+            total_token_counts
+                .insert(*query_token, total_token_counts[query_token] + token_counts[*query_token as usize] as usize);
         }
         total_documents += num_documents as usize;
 
-        let plist_offsets = readers[i]
-            .read_range_and_decompress(compressed_plist_offsets_offset, file_sizes[i] as u64 - 24)
-            .await?;
+        let plist_offsets =
+            readers[i].read_range_and_decompress(compressed_plist_offsets_offset, file_sizes[i] as u64 - 24).await?;
 
         if plist_offsets.len() % 2 != 0 {
             let err = LavaError::Parse("data corruption".to_string());
@@ -353,10 +342,7 @@ async fn search_bm25_async(
                 Err(idx) => (idx - 1, tok - term_dict_len[idx - 1]),
             };
 
-            chunks_to_search
-                .entry((i as usize, idx))
-                .or_insert_with(Vec::new)
-                .push((*token, offset as u64));
+            chunks_to_search.entry((i as usize, idx)).or_insert_with(Vec::new).push((*token, offset as u64));
         }
 
         all_plist_offsets.push(plist_offsets);
@@ -370,10 +356,7 @@ async fn search_bm25_async(
         idf.insert(
             query_token,
             query_weight
-                * ((total_documents as f32 - token_count as f32 + 0.5)
-                    / (token_count as f32 + 0.5)
-                    + 1.0)
-                    .ln(),
+                * ((total_documents as f32 - token_count as f32 + 0.5) / (token_count as f32 + 0.5) + 1.0).ln(),
         );
     }
 
@@ -383,12 +366,10 @@ async fn search_bm25_async(
     let mut join_set: JoinSet<Result<Vec<(usize, u64, u32, u64)>, LavaError>> = JoinSet::new();
     // need to parallelize this @Rain.
     for (file_id, chunk_id, tokens, offsets) in
-        chunks_to_search
-            .into_iter()
-            .map(|((file_id, chunk_id), token_offsets)| {
-                let (tokens, offsets): (Vec<u32>, Vec<u64>) = token_offsets.into_iter().unzip();
-                (file_id, chunk_id, Arc::new(tokens), Arc::new(offsets))
-            })
+        chunks_to_search.into_iter().map(|((file_id, chunk_id), token_offsets)| {
+            let (tokens, offsets): (Vec<u32>, Vec<u64>) = token_offsets.into_iter().unzip();
+            (file_id, chunk_id, Arc::new(tokens), Arc::new(offsets))
+        })
     {
         let reader_type = match readers[file_id].reader {
             ClonableAsyncReader::AwsSdk(_) => ReaderType::AwsSdk,
@@ -399,10 +380,7 @@ async fn search_bm25_async(
         let mut reader = match reader_type {
             ReaderType::AwsSdk | ReaderType::Http => readers[file_id].clone(),
             ReaderType::Local => {
-                get_file_size_and_reader(readers[file_id].filename.clone(), reader_type)
-                    .await
-                    .unwrap()
-                    .1
+                get_file_size_and_reader(readers[file_id].filename.clone(), reader_type).await.unwrap().1
             }
         };
         let start = all_plist_offsets[file_id][chunk_id];
@@ -416,8 +394,7 @@ async fn search_bm25_async(
 
             // get all the second item in the offsets into its own vector
 
-            let results: Vec<Vec<u64>> =
-                PListChunk::search_compressed(buffer3.to_vec(), offsets.as_ref())?;
+            let results: Vec<Vec<u64>> = PListChunk::search_compressed(buffer3.to_vec(), offsets.as_ref())?;
 
             let mut res = vec![];
             for (i, result) in results.iter().enumerate() {
@@ -494,48 +471,18 @@ pub async fn search_lava_substring(
     let mut skip_tokens: HashSet<u32> = HashSet::new();
     for char in SKIP.chars() {
         let char_str = char.to_string();
-        skip_tokens.extend(
-            tokenizer
-                .encode(char_str.clone(), false)
-                .unwrap()
-                .get_ids()
-                .to_vec(),
-        );
-        skip_tokens.extend(
-            tokenizer
-                .encode(format!(" {}", char_str), false)
-                .unwrap()
-                .get_ids()
-                .to_vec(),
-        );
-        skip_tokens.extend(
-            tokenizer
-                .encode(format!("{} ", char_str), false)
-                .unwrap()
-                .get_ids()
-                .to_vec(),
-        );
+        skip_tokens.extend(tokenizer.encode(char_str.clone(), false).unwrap().get_ids().to_vec());
+        skip_tokens.extend(tokenizer.encode(format!(" {}", char_str), false).unwrap().get_ids().to_vec());
+        skip_tokens.extend(tokenizer.encode(format!("{} ", char_str), false).unwrap().get_ids().to_vec());
     }
 
     let lower: String = query.chars().flat_map(|c| c.to_lowercase()).collect();
     let encoding = tokenizer.encode(lower, false).unwrap();
-    let result: Vec<u32> = encoding
-        .get_ids()
-        .iter()
-        .filter(|id| !skip_tokens.contains(id))
-        .cloned()
-        .collect();
+    let result: Vec<u32> = encoding.get_ids().iter().filter(|id| !skip_tokens.contains(id)).cloned().collect();
 
     let mut query: Vec<Vec<u32>> = if let Some(sample_factor) = sample_factor {
         (0..sample_factor)
-            .map(|offset| {
-                result
-                    .iter()
-                    .skip(offset)
-                    .step_by(sample_factor)
-                    .cloned()
-                    .collect::<Vec<u32>>()
-            })
+            .map(|offset| result.iter().skip(offset).step_by(sample_factor).cloned().collect::<Vec<u32>>())
             .filter(|vec| !vec.is_empty())
             .collect()
     } else {
@@ -547,13 +494,7 @@ pub async fn search_lava_substring(
     if let Some(token_viable_limit) = token_viable_limit {
         query.iter_mut().for_each(|vec| {
             if vec.len() > token_viable_limit {
-                *vec = vec
-                    .iter()
-                    .rev()
-                    .take(token_viable_limit)
-                    .rev()
-                    .cloned()
-                    .collect();
+                *vec = vec.iter().rev().take(token_viable_limit).rev().cloned().collect();
             }
         });
     }
@@ -581,10 +522,7 @@ pub fn search_lava_vector(
     nprobes: usize,
     reader_type: ReaderType,
 ) -> Result<(Vec<usize>, Vec<Array1<u8>>, Vec<(usize, Array1<u8>)>), LavaError> {
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .unwrap();
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
 
     let res = rt.block_on(search_lava_vector_async(files, query, nprobes, reader_type));
     rt.shutdown_background();
@@ -609,37 +547,29 @@ pub async fn search_lava_vector_async(
         futures.push(tokio::spawn(async move {
             let results = reader.read_usize_from_end(4).await.unwrap();
 
-            let centroid_vectors_compressed_bytes =
-                reader.read_range(results[2], results[3]).await.unwrap();
+            let centroid_vectors_compressed_bytes = reader.read_range(results[2], results[3]).await.unwrap();
 
             // decompress them
-            let mut decompressor =
-                Decoder::new(centroid_vectors_compressed_bytes.as_ref()).unwrap();
-            let mut centroid_vectors: Vec<u8> =
-                Vec::with_capacity(centroid_vectors_compressed_bytes.len() as usize);
+            let mut decompressor = Decoder::new(centroid_vectors_compressed_bytes.as_ref()).unwrap();
+            let mut centroid_vectors: Vec<u8> = Vec::with_capacity(centroid_vectors_compressed_bytes.len() as usize);
             decompressor.read_to_end(&mut centroid_vectors).unwrap();
 
             let centroid_vectors = bytes_to_f32_vec(&centroid_vectors);
             let num_vectors = centroid_vectors.len() / 128;
-            let array2 =
-                Array2::<f32>::from_shape_vec((num_vectors, 128), centroid_vectors).unwrap();
+            let array2 = Array2::<f32>::from_shape_vec((num_vectors, 128), centroid_vectors).unwrap();
 
             (num_vectors, array2)
         }));
     }
 
-    let result: Vec<Result<(usize, Array2<f32>), tokio::task::JoinError>> =
-        futures::future::join_all(futures).await;
+    let result: Vec<Result<(usize, Array2<f32>), tokio::task::JoinError>> = futures::future::join_all(futures).await;
 
     let end = Instant::now();
     println!("Time stage 1 read: {:?}", end - start);
 
     let start = Instant::now();
 
-    let arr_lens = result
-        .iter()
-        .map(|x| x.as_ref().unwrap().0)
-        .collect::<Vec<_>>();
+    let arr_lens = result.iter().map(|x| x.as_ref().unwrap().0).collect::<Vec<_>>();
     // get cumulative arr len starting from 0
     let cumsum = arr_lens
         .iter()
@@ -650,48 +580,24 @@ pub async fn search_lava_vector_async(
         .collect::<Vec<_>>();
 
     let arrays: Vec<Array2<f32>> = result.into_iter().map(|x| x.unwrap().1).collect();
-    let centroids = concatenate(
-        Axis(0),
-        arrays
-            .iter()
-            .map(|array| array.view())
-            .collect::<Vec<_>>()
-            .as_slice(),
-    )
-    .unwrap();
+    let centroids =
+        concatenate(Axis(0), arrays.iter().map(|array| array.view()).collect::<Vec<_>>().as_slice()).unwrap();
     let query = Array1::<f32>::from_vec(query);
     let query_broadcast = query.broadcast(centroids.dim()).unwrap();
 
     let difference = &centroids - &query_broadcast;
     let norms = difference.map_axis(Axis(1), |row| row.dot(&row).sqrt());
-    let mut indices_and_values: Vec<(usize, f32)> = norms
-        .iter()
-        .enumerate()
-        .map(|(idx, &val)| (idx, val))
-        .collect();
+    let mut indices_and_values: Vec<(usize, f32)> = norms.iter().enumerate().map(|(idx, &val)| (idx, val)).collect();
 
     indices_and_values.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(Ordering::Equal));
-    let smallest_indices: Vec<usize> = indices_and_values
-        .iter()
-        .map(|&(idx, _)| idx)
-        .take(nprobes)
-        .collect();
+    let smallest_indices: Vec<usize> = indices_and_values.iter().map(|&(idx, _)| idx).take(nprobes).collect();
 
     let mut file_indices: Vec<Vec<usize>> = vec![vec![]; files.len()];
     for idx in smallest_indices.iter() {
         // figure out which file idx based on cumsum. need to find the index of the thing that is just bigger than idx
 
-        let file_idx = cumsum
-            .iter()
-            .enumerate()
-            .find(|(_, &val)| val > *idx)
-            .unwrap()
-            .0;
-        let last_cumsum = if file_idx == 0 {
-            0
-        } else {
-            cumsum[file_idx - 1]
-        };
+        let file_idx = cumsum.iter().enumerate().find(|(_, &val)| val > *idx).unwrap().0;
+        let last_cumsum = if file_idx == 0 { 0 } else { cumsum[file_idx - 1] };
         let remainder = idx - last_cumsum;
         file_indices[file_idx].push(remainder);
     }
@@ -719,14 +625,11 @@ pub async fn search_lava_vector_async(
 
             let pq_bytes = reader.read_range(results[0], results[1]).await.unwrap();
 
-            let compressed_centroid_offset_bytes =
-                reader.read_range(results[1], results[2]).await.unwrap();
+            let compressed_centroid_offset_bytes = reader.read_range(results[1], results[2]).await.unwrap();
             let mut decompressor = Decoder::new(compressed_centroid_offset_bytes.as_ref()).unwrap();
             let mut centroid_offsets_bytes: Vec<u8> =
                 Vec::with_capacity(compressed_centroid_offset_bytes.len() as usize);
-            decompressor
-                .read_to_end(&mut centroid_offsets_bytes)
-                .unwrap();
+            decompressor.read_to_end(&mut centroid_offsets_bytes).unwrap();
 
             // now reinterpret centroid_offsets_bytes as a Vec<u64>
 
@@ -749,8 +652,7 @@ pub async fn search_lava_vector_async(
 
     let result: Vec<Result<(Vec<(usize, u64, u64)>, Array1<u8>), tokio::task::JoinError>> =
         futures::future::join_all(futures).await;
-    let result: Vec<(Vec<(usize, u64, u64)>, Array1<u8>)> =
-        result.into_iter().map(|x| x.unwrap()).collect();
+    let result: Vec<(Vec<(usize, u64, u64)>, Array1<u8>)> = result.into_iter().map(|x| x.unwrap()).collect();
 
     let pq_bytes: Vec<Array1<u8>> = result.iter().map(|x| x.1.clone()).collect::<Vec<_>>();
 
@@ -758,9 +660,7 @@ pub async fn search_lava_vector_async(
     println!("Time stage 2 read: {:?}", end - start);
 
     let start = Instant::now();
-    let reader = get_reader(files[file_ids[0]].clone(), reader_type.clone())
-        .await
-        .unwrap();
+    let reader = get_reader(files[file_ids[0]].clone(), reader_type.clone()).await.unwrap();
 
     let mut futures = FuturesUnordered::new();
     for i in 0..result.len() {
@@ -795,10 +695,7 @@ pub async fn search_lava_vector_async(
 }
 
 #[tokio::main]
-pub async fn get_tokenizer_vocab(
-    files: Vec<String>,
-    reader_type: ReaderType,
-) -> Result<Vec<String>, LavaError> {
+pub async fn get_tokenizer_vocab(files: Vec<String>, reader_type: ReaderType) -> Result<Vec<String>, LavaError> {
     let (_file_sizes, readers) = get_file_sizes_and_readers(&files, reader_type).await?;
     Ok(get_tokenizer_async(readers).await?.1)
 }
@@ -814,14 +711,9 @@ mod tests {
     pub fn test_search_lava_one() {
         let file = "msmarco_index/1.lava";
 
-        let res = search_lava_bm25(
-            vec![file.to_string()],
-            vec![6300, 15050],
-            vec![0.1, 0.2],
-            10,
-            ReaderType::default(),
-        )
-        .unwrap();
+        let res =
+            search_lava_bm25(vec![file.to_string()], vec![6300, 15050], vec![0.1, 0.2], 10, ReaderType::default())
+                .unwrap();
 
         println!("{:?}", res);
     }
