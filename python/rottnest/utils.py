@@ -68,7 +68,7 @@ def read_row_groups(file_paths: list, row_groups: list, row_ranges: list, column
 
     return results
 
-def get_physical_layout(file_paths: list[str], column_name: str, type = "str", remote = None):
+def get_physical_layout(file_paths: list, column_name: str, type = "str", remote = None):
 
     assert type in {"str", "binary"}
 
@@ -115,7 +115,7 @@ def get_physical_layout(file_paths: list[str], column_name: str, type = "str", r
 
     return pyarrow.concat_arrays(all_arrs), pyarrow.array(all_uids.astype(np.uint64)), polars.concat(metadatas)
 
-def get_virtual_layout(file_paths: list[str], column_name: str, key_column_name: str, type = "str", stride = 500, remote = None):
+def get_virtual_layout(file_paths: list, column_name: str, key_column_name: str, type = "str", stride = 500, remote = None):
 
     fs = get_fs_from_file_path(file_paths[0])
     metadatas = []

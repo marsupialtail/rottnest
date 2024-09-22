@@ -5,19 +5,19 @@ use serde_json;
 use tokenizers::parallelism::MaybeParallelIterator;
 use tokenizers::tokenizer::Tokenizer; // You'll need the `byteorder` crate
 
-use bincode;
-use bytes;
-use std::collections::BTreeMap;
-use std::collections::BTreeSet;
-use std::collections::HashMap;
-use std::collections::HashSet;
-use std::io::Read;
-
 use crate::lava::constants::*;
 use crate::lava::error::LavaError;
 use crate::lava::plist::PListChunk;
 use crate::lava::trie::{BinaryTrieNode, FastTrie};
+use bincode;
+use bytes;
+use divsufsort::sort_in_place;
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
+use std::collections::HashMap;
+use std::collections::HashSet;
 use std::fs::File;
+use std::io::Read;
 use std::io::{BufWriter, Seek, SeekFrom, Write};
 use zstd::stream::encode_all;
 
@@ -228,48 +228,20 @@ pub async fn build_lava_bm25(
     Ok(vec![(compressed_term_dict_offset as usize, cache_end)])
 }
 
-#[tokio::main]
-pub async fn build_lava_substring_char(
+pub async fn _build_lava_substring_char(
     output_file_name: String,
-    array: ArrayData,
-    uid: ArrayData,
-    char_skip_factor: Option<u32>,
+    texts: Vec<(u64, String)>,
+    char_skip_factor: u32,
 ) -> Result<Vec<(usize, usize)>, LavaError> {
-    let array = make_array(array);
-    // let uid = make_array(ArrayData::from_pyarrow(uid)?);
-    let uid = make_array(uid);
-
-    let char_skip_factor = char_skip_factor.unwrap_or(1);
-
-    let array: &arrow_array::GenericByteArray<arrow_array::types::GenericStringType<i64>> = array
-        .as_any()
-        .downcast_ref::<LargeStringArray>()
-        .ok_or(LavaError::Parse("Expects string array as first argument".to_string()))?;
-
-    let uid = uid
-        .as_any()
-        .downcast_ref::<UInt64Array>()
-        .ok_or(LavaError::Parse("Expects uint64 array as second argument".to_string()))?;
-
-    if array.len() != uid.len() {
-        return Err(LavaError::Parse("The length of the array and the uid array must be the same".to_string()));
-    }
-
-    let mut texts: Vec<(u64, &str)> = Vec::with_capacity(array.len());
-    for i in 0..array.len() {
-        let text = array.value(i);
-        texts.push((uid.value(i), text));
-    }
-
-    // parallelize the string operations
     let named_encodings = texts
-        .into_maybe_par_iter()
+        .into_iter()
         .map(|(uid, text)| {
             let lower: String = text.chars().flat_map(|c| c.to_lowercase()).collect();
             let result: Vec<u8> = if char_skip_factor == 1 {
-                text.chars().filter(|id| !SKIP.chars().contains(id)).map(|c| c as u8).collect()
+                lower.chars().filter(|id| !SKIP.chars().contains(id)).map(|c| c as u8).collect()
             } else {
-                text.chars()
+                lower
+                    .chars()
                     .filter(|id| !SKIP.chars().contains(id))
                     .enumerate()
                     .filter(|&(index, _)| index % char_skip_factor as usize == 1)
@@ -283,21 +255,9 @@ pub async fn build_lava_substring_char(
     let uids: Vec<u64> = named_encodings.iter().map(|(uid, _)| uid).flatten().cloned().collect::<Vec<u64>>();
     let encodings: Vec<u8> = named_encodings.into_iter().map(|(_, text)| text).flatten().collect::<Vec<u8>>();
 
-    let mut suffices: Vec<Vec<u8>> = vec![];
+    let mut sa: Vec<i32> = (0..encodings.len() as i32).collect();
 
-    for i in 10..encodings.len() {
-        suffices.push(encodings[i - 10..i].to_vec());
-    }
-
-    for i in encodings.len()..encodings.len() + 10 {
-        let mut suffix = encodings[i - 10..encodings.len()].to_vec();
-        suffix.append(&mut vec![0; i - encodings.len()]);
-        suffices.push(suffix);
-    }
-
-    let mut sa: Vec<usize> = (0..suffices.len()).collect();
-
-    sa.par_sort_by(|&a, &b| suffices[a].cmp(&suffices[b]));
+    sort_in_place(&encodings, &mut sa);
 
     let mut idx: Vec<u64> = Vec::with_capacity(encodings.len());
     let mut bwt: Vec<u8> = Vec::with_capacity(encodings.len());
@@ -382,6 +342,43 @@ pub async fn build_lava_substring_char(
     let cache_end = file.seek(SeekFrom::Current(0))? as usize;
 
     Ok(vec![(cache_start, cache_end)])
+}
+
+#[tokio::main]
+pub async fn build_lava_substring_char(
+    output_file_name: String,
+    array: ArrayData,
+    uid: ArrayData,
+    char_skip_factor: Option<u32>,
+) -> Result<Vec<(usize, usize)>, LavaError> {
+    let array = make_array(array);
+    // let uid = make_array(ArrayData::from_pyarrow(uid)?);
+    let uid = make_array(uid);
+
+    let char_skip_factor = char_skip_factor.unwrap_or(1);
+
+    let array: &arrow_array::GenericByteArray<arrow_array::types::GenericStringType<i64>> = array
+        .as_any()
+        .downcast_ref::<LargeStringArray>()
+        .ok_or(LavaError::Parse("Expects string array as first argument".to_string()))?;
+
+    let uid = uid
+        .as_any()
+        .downcast_ref::<UInt64Array>()
+        .ok_or(LavaError::Parse("Expects uint64 array as second argument".to_string()))?;
+
+    if array.len() != uid.len() {
+        return Err(LavaError::Parse("The length of the array and the uid array must be the same".to_string()));
+    }
+
+    let mut texts: Vec<(u64, String)> = Vec::with_capacity(array.len());
+    for i in 0..array.len() {
+        let text = array.value(i);
+        texts.push((uid.value(i), text.to_string()));
+    }
+
+    println!("made it to this point");
+    _build_lava_substring_char(output_file_name, texts, char_skip_factor).await
 }
 
 #[tokio::main]

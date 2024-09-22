@@ -2,6 +2,7 @@ use pyo3::prelude::*;
 
 mod format;
 mod lava;
+mod logcloud;
 
 #[pymodule]
 fn rottnest(_py: Python, m: &PyModule) -> PyResult<()> {
@@ -20,5 +21,9 @@ fn rottnest(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(format::get_parquet_layout, m)?)?;
     m.add_function(wrap_pyfunction!(format::read_indexed_pages, m)?)?;
     m.add_function(wrap_pyfunction!(format::populate_cache, m)?)?;
+
+    m.add_function(wrap_pyfunction!(logcloud::index_logcloud, m)?)?;
+    m.add_function(wrap_pyfunction!(logcloud::search_logcloud, m)?)?;
+
     Ok(())
 }

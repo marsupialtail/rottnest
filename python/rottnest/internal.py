@@ -27,11 +27,11 @@ def index_files_bm25(file_paths: list[str], column_name: str, name = uuid.uuid4(
     file_data = file_data.replace_schema_metadata({"cache_ranges": json.dumps(cache_ranges)})
     pq.write_table(file_data, f"{name}.meta", write_statistics = False, compression = 'zstd')
 
-def index_files_substring(file_paths: list[str], column_name: str, name = uuid.uuid4().hex, index_mode = "physical", tokenizer_file = None, token_skip_factor = None, remote = None):
+def index_files_substring(file_paths: list[str], column_name: str, name = uuid.uuid4().hex, index_mode = "physical", tokenizer_file = None, token_skip_factor = None, remote = None, char_index = False):
 
     arr, uid, file_data = get_physical_layout(file_paths, column_name, remote = remote) if index_mode == "physical" else get_virtual_layout(file_paths, column_name, "uid", remote = remote)
 
-    cache_ranges = rottnest.build_lava_substring(f"{name}.lava", arr, uid, tokenizer_file, token_skip_factor)
+    cache_ranges = rottnest.build_lava_substring(f"{name}.lava", arr, uid, tokenizer_file, token_skip_factor, char_index)
 
     file_data = file_data.to_arrow()
     file_data = file_data.replace_schema_metadata({"cache_ranges": json.dumps(cache_ranges)})
@@ -266,11 +266,11 @@ def search_index_uuid(indices: List[str], query: str, K: int, columns = []):
     return return_full_result(result, metadata, column_name, columns)
 
 
-def search_index_substring(indices: List[str], query: str, K: int, sample_factor = None, token_viable_limit = 1, columns = []):
+def search_index_substring(indices: List[str], query: str, K: int, sample_factor = None, token_viable_limit = 10, columns = [], char_index = False):
 
     metadata = get_metadata_and_populate_cache(indices)
     
-    index_search_results = rottnest.search_lava_substring([f"{index_name}.lava" for index_name in indices], query, K, "aws", sample_factor = sample_factor, token_viable_limit = token_viable_limit)
+    index_search_results = rottnest.search_lava_substring([f"{index_name}.lava" for index_name in indices], query, K, "aws", sample_factor = sample_factor, token_viable_limit = token_viable_limit, char_index = char_index)
     print(index_search_results)
 
     if len(index_search_results) == 0:

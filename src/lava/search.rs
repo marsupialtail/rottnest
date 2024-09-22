@@ -28,6 +28,7 @@ use std::cmp::Ordering;
 use std::io::{self, Cursor};
 
 enum QueryParam {
+    SubstringChar(Vec<Vec<u8>>),
     Substring(Vec<Vec<u32>>),
     Uuid(String),
 }
@@ -264,6 +265,9 @@ async fn search_generic_async(
             QueryParam::Substring(ref value) => {
                 join_set.spawn(search_substring_one_file::<u32>(file_id as u64, reader, file_size, value.clone()));
             }
+            QueryParam::SubstringChar(ref value) => {
+                join_set.spawn(search_substring_one_file::<u8>(file_id as u64, reader, file_size, value.clone()));
+            }
             QueryParam::Uuid(ref value) => {
                 join_set.spawn(search_uuid_one_file(file_id as u64, reader, file_size, value.clone()));
             }
@@ -489,8 +493,9 @@ pub async fn search_lava_substring(
         vec![result]
     };
 
-    // query = [i[-token_viable_limit:] for i in query]
+    println!("query {:?}", query);
 
+    // query = [i[-token_viable_limit:] for i in query]
     if let Some(token_viable_limit) = token_viable_limit {
         query.iter_mut().for_each(|vec| {
             if vec.len() > token_viable_limit {
@@ -499,10 +504,48 @@ pub async fn search_lava_substring(
         });
     }
 
-    println!("{:?}", query);
+    println!("query {:?}", query);
 
     let (file_sizes, readers) = get_file_sizes_and_readers(&files, reader_type).await?;
     search_generic_async(file_sizes, readers, QueryParam::Substring(query), k).await
+}
+
+#[tokio::main]
+pub async fn search_lava_substring_char(
+    files: Vec<String>,
+    query: String,
+    k: usize,
+    reader_type: ReaderType,
+    token_viable_limit: Option<usize>,
+    sample_factor: Option<usize>,
+) -> Result<Vec<(u64, u64)>, LavaError> {
+    let lower: String = query.chars().flat_map(|c| c.to_lowercase()).collect();
+    let result: Vec<u8> = lower.chars().filter(|id| !SKIP.chars().contains(id)).map(|c| c as u8).collect();
+
+    let mut query: Vec<Vec<u8>> = if let Some(sample_factor) = sample_factor {
+        (0..sample_factor)
+            .map(|offset| result.iter().skip(offset).step_by(sample_factor).cloned().collect::<Vec<u8>>())
+            .filter(|vec| !vec.is_empty())
+            .collect()
+    } else {
+        vec![result]
+    };
+
+    println!("query {:?}", query);
+
+    // query = [i[-token_viable_limit:] for i in query]
+    if let Some(token_viable_limit) = token_viable_limit {
+        query.iter_mut().for_each(|vec| {
+            if vec.len() > token_viable_limit {
+                *vec = vec.iter().rev().take(token_viable_limit).rev().cloned().collect();
+            }
+        });
+    }
+
+    println!("query {:?}", query);
+
+    let (file_sizes, readers) = get_file_sizes_and_readers(&files, reader_type).await?;
+    search_generic_async(file_sizes, readers, QueryParam::SubstringChar(query), k).await
 }
 
 fn bytes_to_f32_vec(bytes: &[u8]) -> Vec<f32> {
