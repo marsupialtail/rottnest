@@ -361,7 +361,6 @@ async fn search_kauai(
     println!("byte offsets: {:?}", byte_offsets);
 
     let dictionary: String = read_and_decompress(reader, 0, byte_offsets[0]).await?;
-    let dictionary: String = "".to_string();
     let template: String = read_and_decompress(reader, byte_offsets[0], byte_offsets[1] - byte_offsets[0]).await?;
     let template_plist: Vec<Vec<PlistSize>> =
         read_and_decompress(reader, byte_offsets[1], byte_offsets[2] - byte_offsets[1]).await?;
