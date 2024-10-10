@@ -41,18 +41,11 @@ use super::readers::ReaderType;
 use serde::{Deserialize, Serialize};
 use tokio::task::JoinSet;
 
-async fn get_metadata_bytes(
-    reader: &mut AsyncReader,
-    file_size: usize,
-) -> Result<Bytes, LavaError> {
+async fn get_metadata_bytes(reader: &mut AsyncReader, file_size: usize) -> Result<Bytes, LavaError> {
     // check file is large enough to hold footer
 
-    let footer: [u8; 8] = reader
-        .read_range(file_size as u64 - 8, file_size as u64)
-        .await?
-        .to_byte_slice()
-        .try_into()
-        .unwrap();
+    let footer: [u8; 8] =
+        reader.read_range(file_size as u64 - 8, file_size as u64).await?.to_byte_slice().try_into().unwrap();
 
     let metadata_len = decode_footer(&footer)?;
     let footer_metadata_len = FOOTER_SIZE + metadata_len;
@@ -64,9 +57,7 @@ async fn get_metadata_bytes(
     }
 
     let start = file_size as u64 - footer_metadata_len as u64;
-    let bytes = reader
-        .read_range(start, start + metadata_len as u64)
-        .await?;
+    let bytes = reader.read_range(start, start + metadata_len as u64).await?;
 
     Ok(bytes)
 }
@@ -81,8 +72,7 @@ pub(crate) fn decode_page(
     let mut can_decompress = true;
 
     if let Some(ref header_v2) = page_header.data_page_header_v2 {
-        offset = (header_v2.definition_levels_byte_length + header_v2.repetition_levels_byte_length)
-            as usize;
+        offset = (header_v2.definition_levels_byte_length + header_v2.repetition_levels_byte_length) as usize;
         // When is_compressed flag is missing the page is considered compressed
         can_decompress = header_v2.is_compressed.unwrap_or(true);
     }
@@ -95,16 +85,10 @@ pub(crate) fn decode_page(
             let mut decompressed = Vec::with_capacity(uncompressed_size);
             let compressed = &buffer.as_ref()[offset..];
             decompressed.extend_from_slice(&buffer.as_ref()[..offset]);
-            decompressor.decompress(
-                compressed,
-                &mut decompressed,
-                Some(uncompressed_size - offset),
-            )?;
+            decompressor.decompress(compressed, &mut decompressed, Some(uncompressed_size - offset))?;
 
             if decompressed.len() != uncompressed_size {
-                return Err(LavaError::from(ParquetError::General(
-                    "messed decompression".to_string(),
-                )));
+                return Err(LavaError::from(ParquetError::General("messed decompression".to_string())));
             }
 
             Bytes::from(decompressed)
@@ -114,9 +98,10 @@ pub(crate) fn decode_page(
 
     let result = match page_header.type_ {
         PageType::DICTIONARY_PAGE => {
-            let dict_header = page_header.dictionary_page_header.as_ref().ok_or_else(|| {
-                ParquetError::General("Missing dictionary page header".to_string())
-            })?;
+            let dict_header = page_header
+                .dictionary_page_header
+                .as_ref()
+                .ok_or_else(|| ParquetError::General("Missing dictionary page header".to_string()))?;
             let is_sorted = dict_header.is_sorted.unwrap_or(false);
             Page::DictionaryPage {
                 buf: buffer,
@@ -164,10 +149,7 @@ pub(crate) fn decode_page(
     Ok(result)
 }
 
-fn read_page_header<C: ChunkReader>(
-    reader: &C,
-    offset: u64,
-) -> Result<(usize, PageHeader), LavaError> {
+fn read_page_header<C: ChunkReader>(reader: &C, offset: u64) -> Result<(usize, PageHeader), LavaError> {
     struct TrackedRead<R>(R, usize);
 
     impl<R: Read> Read for TrackedRead<R> {
@@ -185,10 +167,7 @@ fn read_page_header<C: ChunkReader>(
     Ok((tracked.1, header))
 }
 
-async fn parse_metadatas(
-    file_paths: &Vec<String>,
-    reader_type: ReaderType,
-) -> HashMap<String, ParquetMetaData> {
+async fn parse_metadatas(file_paths: &Vec<String>, reader_type: ReaderType) -> HashMap<String, ParquetMetaData> {
     let iter = file_paths.iter().dedup();
 
     let handles = stream::iter(iter)
@@ -197,25 +176,17 @@ async fn parse_metadatas(
             let reader_type = reader_type.clone();
 
             tokio::spawn(async move {
-                let (file_size, mut reader) =
-                    get_file_size_and_reader(file_path.clone(), reader_type)
-                        .await
-                        .unwrap();
+                let (file_size, mut reader) = get_file_size_and_reader(file_path.clone(), reader_type).await.unwrap();
 
-                let metadata_bytes = get_metadata_bytes(&mut reader, file_size as usize)
-                    .await
-                    .unwrap();
+                let metadata_bytes = get_metadata_bytes(&mut reader, file_size as usize).await.unwrap();
 
-                let metadata = decode_metadata(metadata_bytes.to_byte_slice())
-                    .map_err(LavaError::from)
-                    .unwrap();
+                let metadata = decode_metadata(metadata_bytes.to_byte_slice()).map_err(LavaError::from).unwrap();
                 (file_path, metadata)
             })
         })
         .collect::<Vec<_>>()
         .await;
-    let res: Vec<Result<(String, ParquetMetaData), tokio::task::JoinError>> =
-        futures::future::join_all(handles).await;
+    let res: Vec<Result<(String, ParquetMetaData), tokio::task::JoinError>> = futures::future::join_all(handles).await;
 
     let mut metadatas = HashMap::new();
 
@@ -246,14 +217,11 @@ pub async fn get_parquet_layout(
     file_path: &str,
     reader_type: ReaderType,
 ) -> Result<(Vec<arrow::array::ArrayData>, ParquetLayout), LavaError> {
-    let (file_size, mut reader) =
-        get_file_size_and_reader(file_path.to_string(), reader_type).await?;
+    let (file_size, mut reader) = get_file_size_and_reader(file_path.to_string(), reader_type).await?;
     let metadata_bytes = get_metadata_bytes(&mut reader, file_size as usize).await?;
     let metadata = decode_metadata(metadata_bytes.to_byte_slice()).map_err(LavaError::from)?;
 
-    let codec_options = CodecOptionsBuilder::default()
-        .set_backward_compatible_lz4(false)
-        .build();
+    let codec_options = CodecOptionsBuilder::default().set_backward_compatible_lz4(false).build();
 
     let mut parquet_layout = ParquetLayout {
         num_row_groups: metadata.num_row_groups(),
@@ -274,25 +242,19 @@ pub async fn get_parquet_layout(
         .columns()
         .iter()
         .position(|column| column.name() == column_name)
-        .expect(&format!(
-            "column {} not found in parquet file {}",
-            column_name, file_path
-        ));
+        .expect(&format!("column {} not found in parquet file {}", column_name, file_path));
 
     //TODO: @rain we should parallelize this across row groups using tokio
     // this need to refactor the ParquetLayout data structure, since it won't cost too much time, postpone for now.
 
     for row_group in 0..metadata.num_row_groups() {
         let column = metadata.row_group(row_group).column(column_index);
-        let mut start = column
-            .dictionary_page_offset()
-            .unwrap_or_else(|| column.data_page_offset()) as u64;
+        let mut start = column.dictionary_page_offset().unwrap_or_else(|| column.data_page_offset()) as u64;
         let end = start + column.compressed_size() as u64;
 
         let compression_scheme = column.compression();
-        let mut codec = create_codec(compression_scheme, &codec_options)
-            .unwrap()
-            .unwrap();
+        let mut codec = create_codec(compression_scheme, &codec_options).unwrap();
+        //.unwrap();
 
         let mut total_data_pages: usize = 0;
 
@@ -321,12 +283,10 @@ pub async fn get_parquet_layout(
                     dictionary_page_size = page_header.compressed_page_size as usize + header_len;
                     let page: Page = decode_page(
                         page_header,
-                        column_chunk_bytes.slice(
-                            (start as usize + header_len)
-                                ..(start as usize + dictionary_page_size as usize),
-                        ),
+                        column_chunk_bytes
+                            .slice((start as usize + header_len)..(start as usize + dictionary_page_size as usize)),
                         Type::BYTE_ARRAY,
-                        Some(&mut codec),
+                        codec.as_mut(),
                     )
                     .unwrap();
                     start += dictionary_page_size as u64;
@@ -334,16 +294,10 @@ pub async fn get_parquet_layout(
                 }
                 PageType::DATA_PAGE | PageType::DATA_PAGE_V2 => {
                     let compressed_page_size = page_header.compressed_page_size;
-                    parquet_layout
-                        .data_page_sizes
-                        .push(compressed_page_size as usize + header_len);
-                    parquet_layout
-                        .data_page_offsets
-                        .push((column_chunk_offset + start) as usize);
+                    parquet_layout.data_page_sizes.push(compressed_page_size as usize + header_len);
+                    parquet_layout.data_page_offsets.push((column_chunk_offset + start) as usize);
 
-                    parquet_layout
-                        .dictionary_page_sizes
-                        .push(dictionary_page_size);
+                    parquet_layout.dictionary_page_sizes.push(dictionary_page_size);
                     total_data_pages += 1;
 
                     let page = decode_page(
@@ -353,13 +307,11 @@ pub async fn get_parquet_layout(
                                 ..(start as usize + header_len + compressed_page_size as usize),
                         ),
                         Type::BYTE_ARRAY,
-                        Some(&mut codec),
+                        codec.as_mut(),
                     )
                     .unwrap();
 
-                    parquet_layout
-                        .data_page_num_rows
-                        .push(page.num_values() as usize);
+                    parquet_layout.data_page_num_rows.push(page.num_values() as usize);
                     total_values += page.num_values() as usize;
 
                     start += compressed_page_size as u64 + header_len as u64;
@@ -393,23 +345,18 @@ pub async fn get_parquet_layout(
 
     for _ in (0..total_values).step_by(10_000) {
         let array = array_reader.next_batch(10_000).unwrap();
-        let new_array: Result<
-            &arrow_array::GenericByteArray<arrow::datatypes::GenericStringType<i32>>,
-            ArrowError,
-        > = array.as_any().downcast_ref::<StringArray>().ok_or_else(|| {
-            ArrowError::ParseError("Expects string array as first argument".to_string())
-        });
+        let new_array: Result<&arrow_array::GenericByteArray<arrow::datatypes::GenericStringType<i32>>, ArrowError> =
+            array
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .ok_or_else(|| ArrowError::ParseError("Expects string array as first argument".to_string()));
 
         let data = match new_array {
             Ok(_) => new_array.unwrap().to_data(),
             Err(_) => array
                 .as_any()
                 .downcast_ref::<BinaryArray>()
-                .ok_or_else(|| {
-                    ArrowError::ParseError(
-                        "Expects string or binary array as first argument".to_string(),
-                    )
-                })
+                .ok_or_else(|| ArrowError::ParseError("Expects string or binary array as first argument".to_string()))
                 .unwrap()
                 .to_data(),
         };
@@ -442,21 +389,14 @@ pub async fn read_indexed_pages_async(
     // current implementation might re-read dictionary pages, this should be optimized
     // we are assuming that all the files are either on disk or cloud.
 
-    let codec_options = CodecOptionsBuilder::default()
-        .set_backward_compatible_lz4(false)
-        .build();
+    let codec_options = CodecOptionsBuilder::default().set_backward_compatible_lz4(false).build();
 
     let metadatas = match file_metadatas {
         Some(file_metadatas) => {
             println!("Using provided file metadatas");
             let mut metadatas: HashMap<String, ParquetMetaData> = HashMap::new();
             for (key, value) in file_metadatas.into_iter() {
-                metadatas.insert(
-                    key,
-                    decode_metadata(value.to_byte_slice())
-                        .map_err(LavaError::from)
-                        .unwrap(),
-                );
+                metadatas.insert(key, decode_metadata(value.to_byte_slice()).map_err(LavaError::from).unwrap());
             }
             metadatas
         }
@@ -465,17 +405,9 @@ pub async fn read_indexed_pages_async(
 
     let in_order: bool = in_order.unwrap_or(true);
 
-    let mut reader = get_reader(file_paths[0].clone(), reader_type.clone())
-        .await
-        .unwrap();
+    let mut reader = get_reader(file_paths[0].clone(), reader_type.clone()).await.unwrap();
 
-    let iter = izip!(
-        file_paths,
-        row_groups,
-        page_offsets,
-        page_sizes,
-        dict_page_sizes
-    );
+    let iter = izip!(file_paths, row_groups, page_offsets, page_sizes, dict_page_sizes);
 
     let start = std::time::Instant::now();
 
@@ -483,115 +415,84 @@ pub async fn read_indexed_pages_async(
     let mut join_set = JoinSet::new();
 
     let iter: Vec<_> = stream::iter(iter)
-        .map(
-            |(file_path, row_group, page_offset, page_size, dict_page_size)| {
-                let column_index = metadatas[&file_path]
-                    .file_metadata()
-                    .schema_descr()
-                    .columns()
-                    .iter()
-                    .position(|column| column.name() == column_name)
-                    .expect(&format!(
-                        "column {} not found in parquet file {}",
-                        column_name, file_path
-                    ));
-                let column_descriptor = metadatas[&file_path]
-                    .row_group(row_group)
-                    .schema_descr()
-                    .column(column_index);
+        .map(|(file_path, row_group, page_offset, page_size, dict_page_size)| {
+            let column_index = metadatas[&file_path]
+                .file_metadata()
+                .schema_descr()
+                .columns()
+                .iter()
+                .position(|column| column.name() == column_name)
+                .expect(&format!("column {} not found in parquet file {}", column_name, file_path));
+            let column_descriptor = metadatas[&file_path].row_group(row_group).schema_descr().column(column_index);
 
-                let compression_scheme = metadatas[&file_path]
-                    .row_group(row_group)
-                    .column(column_index)
-                    .compression();
-                let dict_page_offset = metadatas[&file_path]
-                    .row_group(row_group)
-                    .column(column_index)
-                    .dictionary_page_offset();
-                let mut codec = create_codec(compression_scheme, &codec_options)
-                    .unwrap()
-                    .unwrap();
+            let compression_scheme = metadatas[&file_path].row_group(row_group).column(column_index).compression();
+            let dict_page_offset =
+                metadatas[&file_path].row_group(row_group).column(column_index).dictionary_page_offset();
+            let mut codec = create_codec(compression_scheme, &codec_options).unwrap().unwrap();
 
-                let mut reader_c = reader.clone();
-                reader_c.update_filename(file_path).unwrap();
+            let mut reader_c = reader.clone();
+            reader_c.update_filename(file_path).unwrap();
 
-                let future = async move {
-                    let mut pages: Vec<parquet::column::page::Page> = Vec::new();
-                    if dict_page_size > 0 {
-                        let start = dict_page_offset.unwrap() as u64;
-                        let dict_page_bytes = reader_c
-                            .read_range(start, start + dict_page_size as u64)
-                            .await
-                            .unwrap();
-                        let dict_page_bytes = Bytes::from(dict_page_bytes);
-                        let (dict_header_len, dict_header) =
-                            read_page_header(&dict_page_bytes, 0).unwrap();
-                        let dict_page = decode_page(
-                            dict_header,
-                            dict_page_bytes.slice(dict_header_len..dict_page_size),
-                            Type::BYTE_ARRAY,
-                            Some(&mut codec),
-                        )
-                        .unwrap();
-                        pages.push(dict_page);
-                    }
-
-                    let page_bytes = reader_c
-                        .read_range(page_offset, page_offset + page_size as u64)
-                        .await
-                        .unwrap();
-                    let (header_len, header) = read_page_header(&page_bytes, 0).unwrap();
-                    let page: Page = decode_page(
-                        header,
-                        page_bytes.slice(header_len..page_size),
+            let future = async move {
+                let mut pages: Vec<parquet::column::page::Page> = Vec::new();
+                if dict_page_size > 0 {
+                    let start = dict_page_offset.unwrap() as u64;
+                    let dict_page_bytes = reader_c.read_range(start, start + dict_page_size as u64).await.unwrap();
+                    let dict_page_bytes = Bytes::from(dict_page_bytes);
+                    let (dict_header_len, dict_header) = read_page_header(&dict_page_bytes, 0).unwrap();
+                    let dict_page = decode_page(
+                        dict_header,
+                        dict_page_bytes.slice(dict_header_len..dict_page_size),
                         Type::BYTE_ARRAY,
                         Some(&mut codec),
                     )
                     .unwrap();
-                    let num_values = page.num_values();
+                    pages.push(dict_page);
+                }
 
-                    pages.push(page);
-                    let page_iterator = InMemoryPageIterator::new(vec![pages]);
-                    let mut array_reader = make_byte_array_reader(
-                        Box::new(page_iterator),
-                        column_descriptor.clone(),
-                        None,
-                    )
-                    .unwrap();
-                    let array = array_reader.next_batch(num_values as usize).unwrap();
+                let page_bytes = reader_c.read_range(page_offset, page_offset + page_size as u64).await.unwrap();
+                let (header_len, header) = read_page_header(&page_bytes, 0).unwrap();
+                let page: Page =
+                    decode_page(header, page_bytes.slice(header_len..page_size), Type::BYTE_ARRAY, Some(&mut codec))
+                        .unwrap();
+                let num_values = page.num_values();
 
-                    let new_array: Result<
-                        &arrow_array::GenericByteArray<arrow::datatypes::GenericStringType<i32>>,
-                        ArrowError,
-                    > = array.as_any().downcast_ref::<StringArray>().ok_or_else(|| {
-                        ArrowError::ParseError("Expects string array as first argument".to_string())
-                    });
+                pages.push(page);
+                let page_iterator = InMemoryPageIterator::new(vec![pages]);
+                let mut array_reader =
+                    make_byte_array_reader(Box::new(page_iterator), column_descriptor.clone(), None).unwrap();
+                let array = array_reader.next_batch(num_values as usize).unwrap();
 
-                    let data = match new_array {
-                        Ok(_) => new_array.unwrap().to_data(),
-                        Err(_) => array
-                            .as_any()
-                            .downcast_ref::<BinaryArray>()
-                            .ok_or_else(|| {
-                                ArrowError::ParseError(
-                                    "Expects string or binary array as first argument".to_string(),
-                                )
-                            })
-                            .unwrap()
-                            .to_data(),
-                    };
+                let new_array: Result<
+                    &arrow_array::GenericByteArray<arrow::datatypes::GenericStringType<i32>>,
+                    ArrowError,
+                > = array
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .ok_or_else(|| ArrowError::ParseError("Expects string array as first argument".to_string()));
 
-                    data
+                let data = match new_array {
+                    Ok(_) => new_array.unwrap().to_data(),
+                    Err(_) => array
+                        .as_any()
+                        .downcast_ref::<BinaryArray>()
+                        .ok_or_else(|| {
+                            ArrowError::ParseError("Expects string or binary array as first argument".to_string())
+                        })
+                        .unwrap()
+                        .to_data(),
                 };
 
-                if in_order {
-                    let handle = tokio::spawn(future);
-                    future_handles.push(handle);
-                } else {
-                    join_set.spawn(future);
-                }
-            },
-        )
+                data
+            };
+
+            if in_order {
+                let handle = tokio::spawn(future);
+                future_handles.push(handle);
+            } else {
+                join_set.spawn(future);
+            }
+        })
         .collect::<Vec<_>>()
         .await;
 
@@ -628,10 +529,7 @@ pub fn read_indexed_pages(
     file_metadatas: Option<HashMap<String, Bytes>>,
     in_order: Option<bool>,
 ) -> Result<Vec<ArrayData>, LavaError> {
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .unwrap();
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
 
     let res = rt.block_on(read_indexed_pages_async(
         column_name,

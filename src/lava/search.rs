@@ -280,7 +280,7 @@ async fn search_generic_async(
         let res = res.unwrap().unwrap();
         result.extend(res);
         /*
-        We cannot truncate to k anywhere, not even at the end, because of false
+        We cannot truncate to k anywhere, not even at the end, because of false positives
          */
         // if result.len() >= k {
         //     break;
@@ -510,8 +510,7 @@ pub async fn search_lava_substring(
     search_generic_async(file_sizes, readers, QueryParam::Substring(query), k).await
 }
 
-#[tokio::main]
-pub async fn search_lava_substring_char(
+pub async fn _search_lava_substring_char(
     files: Vec<String>,
     query: String,
     k: usize,
@@ -546,6 +545,18 @@ pub async fn search_lava_substring_char(
 
     let (file_sizes, readers) = get_file_sizes_and_readers(&files, reader_type).await?;
     search_generic_async(file_sizes, readers, QueryParam::SubstringChar(query), k).await
+}
+
+#[tokio::main]
+pub async fn search_lava_substring_char(
+    files: Vec<String>,
+    query: String,
+    k: usize,
+    reader_type: ReaderType,
+    token_viable_limit: Option<usize>,
+    sample_factor: Option<usize>,
+) -> Result<Vec<(u64, u64)>, LavaError> {
+    _search_lava_substring_char(files, query, k, reader_type, token_viable_limit, sample_factor).await
 }
 
 fn bytes_to_f32_vec(bytes: &[u8]) -> Vec<f32> {

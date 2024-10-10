@@ -1,5 +1,5 @@
+use itertools::Itertools;
 use log::{info, warn};
-use parquet::{column::reader, format::DictionaryPageHeader};
 use rand::Rng;
 use tokio::{task::JoinSet, time::sleep};
 
@@ -10,20 +10,23 @@ use crate::{
     lava::{
         build::_build_lava_substring_char,
         error::LavaError,
-        logcloud_plist::{PListChunk, PlistSize},
-        search::search_lava_substring_char,
+        logcloud_common::{get_all_types, get_type, PListChunk, PlistSize},
+        search::_search_lava_substring_char,
     },
 };
 use serde::de::DeserializeOwned;
+use std::collections::{HashMap, HashSet};
+use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
+use std::path::{Path, PathBuf};
+
 use std::{
-    collections::{HashMap, HashSet},
-    fs::{self, read_dir, File},
+    fs::{self, read_dir},
     io::{self, Read},
-    path::Path,
-    time::{Duration, Instant},
 };
 use zstd::stream::{encode_all, read::Decoder};
+
+const BRUTE_THRESHOLD: usize = 5;
 
 async fn read_and_decompress<T>(reader: &mut AsyncReader, start: u64, size: u64) -> Result<T, LavaError>
 where
@@ -37,15 +40,13 @@ where
     Ok(result)
 }
 
-const ROW_GROUP_SIZE: usize = 100000;
-const DICT_RATIO_THRESHOLD: f64 = 0.5;
+const DICT_THRESHOLD: usize = 1000;
 
 fn merge_files(
     input_filenames: &[String],
     input_filenames_linenumbers: &[String],
     output_filename: &str,
     output_filename_linenumbers: &str,
-    num_row_groups: usize,
 ) -> io::Result<()> {
     let mut input_files: Vec<BufReader<File>> = Vec::new();
     let mut input_files_linenumbers: Vec<BufReader<File>> = Vec::new();
@@ -97,11 +98,11 @@ fn merge_files(
             }
         }
 
-        if it_linenumbers.len() > (num_row_groups as f64 * DICT_RATIO_THRESHOLD) as usize {
+        if it_linenumbers.len() > DICT_THRESHOLD {
             write!(dict_file, "{}", it)?;
         } else {
             write!(output_file, "{}", it)?;
-            for num in it_linenumbers {
+            for num in it_linenumbers.into_iter().sorted() {
                 write!(output_file_linenumbers, "{} ", num)?;
             }
             writeln!(output_file_linenumbers)?;
@@ -130,15 +131,6 @@ fn merge_files(
 }
 
 fn compact(num_groups: usize) -> io::Result<()> {
-    // Read the total number of lines
-    let filename = format!("compressed/{}/current_line_number", num_groups - 1);
-    let file = File::open(&filename)?;
-    let mut reader = BufReader::new(file);
-    let mut line = String::new();
-    reader.read_line(&mut line)?;
-    let total_lines: usize = line.trim().parse().unwrap();
-    let num_row_groups = total_lines / ROW_GROUP_SIZE + 1;
-
     // Handle outliers
     let mut input_filenames = Vec::new();
     let mut input_filenames_linenumbers = Vec::new();
@@ -151,13 +143,7 @@ fn compact(num_groups: usize) -> io::Result<()> {
     }
 
     if !input_filenames.is_empty() {
-        merge_files(
-            &input_filenames,
-            &input_filenames_linenumbers,
-            "compressed/outlier",
-            "compressed/outlier_lineno",
-            num_row_groups,
-        )?;
+        merge_files(&input_filenames, &input_filenames_linenumbers, "compressed/outlier", "compressed/outlier_lineno")?;
     }
 
     // Process types 1 to 63
@@ -182,13 +168,7 @@ fn compact(num_groups: usize) -> io::Result<()> {
         let output_filename = format!("compressed/compacted_type_{}", type_);
         let output_filename_linenumbers = format!("compressed/compacted_type_{}_lineno", type_);
 
-        merge_files(
-            &input_filenames,
-            &input_filenames_linenumbers,
-            &output_filename,
-            &output_filename_linenumbers,
-            num_row_groups,
-        )?;
+        merge_files(&input_filenames, &input_filenames_linenumbers, &output_filename, &output_filename_linenumbers)?;
     }
 
     println!("Files merged");
@@ -201,8 +181,8 @@ pub fn write_kauai(filename: &str, num_groups: usize) -> std::io::Result<()> {
 
     // Read and compress dictionary
     let dictionary_str = std::fs::read_to_string("compressed/compacted_type_0")?;
-    let compressed_dictionary = encode_all(&bincode::serialize(&dictionary_str.as_bytes()).unwrap()[..], 10)?;
-    fp.write_all(&compressed_dictionary)?;
+    // let compressed_dictionary = encode_all(&bincode::serialize(&dictionary_str.as_bytes()).unwrap()[..], 10)?;
+    // fp.write_all(&compressed_dictionary)?;
     byte_offsets.push(fp.metadata()?.len());
 
     let mut templates = Vec::new();
@@ -254,18 +234,18 @@ pub fn write_kauai(filename: &str, num_groups: usize) -> std::io::Result<()> {
                     }
                     // outlier_file.read_to_string(&mut item)?;
                     outliers.push(item);
-                    outlier_linenos.push(vec![lineno / ROW_GROUP_SIZE as u32]);
+                    outlier_linenos.push(vec![lineno as u32]);
                 } else {
                     let idx = if group_template_idx.contains_key(&(eid as usize)) {
                         group_template_idx[&(eid as usize)]
                     } else {
                         panic!("Template not found for eid: {}, {:?}", eid, group_template_idx);
                     };
-                    if template_posting_lists[idx].is_empty()
-                        || template_posting_lists[idx].last() != Some(&(lineno / ROW_GROUP_SIZE as u32))
-                    {
-                        template_posting_lists[idx].push(lineno / ROW_GROUP_SIZE as u32);
-                    }
+                    // if template_posting_lists[idx].is_empty()
+                    //     || template_posting_lists[idx].last() != Some(&(lineno as u32))
+                    // {
+                    //     template_posting_lists[idx].push(lineno as u32);
+                    // }
                 }
                 lineno = lineno.wrapping_add(1);
                 if lineno == 0 {
@@ -276,45 +256,29 @@ pub fn write_kauai(filename: &str, num_groups: usize) -> std::io::Result<()> {
     }
 
     // Write templates and template_posting_lists to files
-    {
-        let mut template_fp = File::create("compressed/template")?;
-        let mut template_lineno_fp = File::create("compressed/template_lineno")?;
-        for (template, posting_list) in templates.iter().zip(&template_posting_lists) {
-            writeln!(template_fp, "{}", template)?;
-            for &num in posting_list {
-                write!(template_lineno_fp, "{} ", num)?;
-            }
-            writeln!(template_lineno_fp)?;
-        }
-    }
+    // {
+    //     let mut template_fp = File::create("compressed/template")?;
+    //     let mut template_lineno_fp = File::create("compressed/template_lineno")?;
+    //     for (template, posting_list) in templates.iter().zip(&template_posting_lists) {
+    //         writeln!(template_fp, "{}", template)?;
+    //         for &num in posting_list {
+    //             write!(template_lineno_fp, "{} ", num)?;
+    //         }
+    //         writeln!(template_lineno_fp)?;
+    //     }
+    // }
 
     // Remove templates with empty posting lists
-    let templates = templates
-        .iter()
-        .enumerate()
-        .filter(|&(i, _)| !template_posting_lists[i].is_empty())
-        .map(|(_, template)| template.clone())
-        .collect::<Vec<_>>();
+    // let templates = templates
+    //     .iter()
+    //     .enumerate()
+    //     .filter(|&(i, _)| !template_posting_lists[i].is_empty())
+    //     .map(|(_, template)| template.clone())
+    //     .collect::<Vec<_>>();
 
-    template_posting_lists.retain(|list| !list.is_empty());
+    // template_posting_lists.retain(|list| !list.is_empty());
 
     let template_str = templates.join("\n") + "\n";
-    let compressed_template_str = encode_all(&bincode::serialize(&template_str).unwrap()[..], 0)?;
-    fp.write_all(&compressed_template_str)?;
-    byte_offsets.push(fp.metadata()?.len());
-
-    let serialized2 = encode_all(&bincode::serialize(&template_posting_lists).unwrap()[..], 10).unwrap();
-    fp.write_all(&serialized2)?;
-    byte_offsets.push(fp.metadata()?.len());
-
-    let outlier_str = outliers.join("") + "\n";
-    let compressed_outlier_str = encode_all(&bincode::serialize(&outlier_str).unwrap()[..], 0)?;
-    fp.write_all(&compressed_outlier_str)?;
-    byte_offsets.push(fp.metadata()?.len());
-
-    let serialized = encode_all(&bincode::serialize(&outlier_linenos).unwrap()[..], 10).unwrap();
-    fp.write_all(&serialized)?;
-    byte_offsets.push(fp.metadata()?.len());
 
     let mut outlier_type_str = String::new();
     let mut outlier_type_linenos = Vec::new();
@@ -331,17 +295,21 @@ pub fn write_kauai(filename: &str, num_groups: usize) -> std::io::Result<()> {
             line.split_whitespace().filter_map(|s| s.parse().ok()).collect::<HashSet<_>>().into_iter().collect();
         outlier_type_linenos.push(numbers);
     }
+    let outlier_str = outliers.join("") + "\n";
 
-    let compressed_outlier_type_str = encode_all(&bincode::serialize(&outlier_type_str).unwrap()[..], 0)?;
-    fp.write_all(&compressed_outlier_type_str)?;
-    byte_offsets.push(fp.metadata()?.len());
+    let kauai_metadata: (String, String, Vec<Vec<u32>>, String, Vec<Vec<u32>>, String, Vec<Vec<u32>>) = (
+        dictionary_str,
+        template_str,
+        template_posting_lists,
+        outlier_str,
+        outlier_linenos,
+        outlier_type_str,
+        outlier_type_linenos,
+    );
 
-    let serialized3 = encode_all(&bincode::serialize(&outlier_type_linenos).unwrap()[..], 10).unwrap();
-    fp.write_all(&serialized3)?;
-
-    for offset in byte_offsets {
-        fp.write_all(&offset.to_le_bytes())?;
-    }
+    let compressed_metadata_page = encode_all(&bincode::serialize(&kauai_metadata).unwrap()[..], 10).unwrap();
+    fp.write_all(&compressed_metadata_page)?;
+    fp.write_all(&compressed_metadata_page.len().to_le_bytes())?;
 
     fp.flush()?;
 
@@ -351,40 +319,37 @@ pub fn write_kauai(filename: &str, num_groups: usize) -> std::io::Result<()> {
 // std::pair<int, std::vector<plist_size_t>> search_kauai(VirtualFileRegion * vfr, std::string query, int k) {
 
 async fn search_kauai(
-    reader: &mut AsyncReader,
+    file_id: usize,
+    mut reader: AsyncReader,
     file_size: usize,
-    query: &str,
-    k: u32,
-) -> Result<(u32, Vec<PlistSize>), LavaError> {
-    let byte_offsets = reader.read_usize_from_end(6).await?;
-
-    println!("byte offsets: {:?}", byte_offsets);
-
-    let dictionary: String = read_and_decompress(reader, 0, byte_offsets[0]).await?;
-    let template: String = read_and_decompress(reader, byte_offsets[0], byte_offsets[1] - byte_offsets[0]).await?;
-    let template_plist: Vec<Vec<PlistSize>> =
-        read_and_decompress(reader, byte_offsets[1], byte_offsets[2] - byte_offsets[1]).await?;
-    let outlier: String = read_and_decompress(reader, byte_offsets[2], byte_offsets[3] - byte_offsets[2]).await?;
-    let outlier_plist: Vec<Vec<PlistSize>> =
-        read_and_decompress(reader, byte_offsets[3], byte_offsets[4] - byte_offsets[3]).await?;
-    let outlier_type: String = read_and_decompress(reader, byte_offsets[4], byte_offsets[5] - byte_offsets[4]).await?;
-    let outlier_type_pl_size = file_size as u64 - byte_offsets[5] - 6 * std::mem::size_of::<usize>() as u64;
-    let outlier_type_plist: Vec<Vec<PlistSize>> =
-        read_and_decompress(reader, byte_offsets[5], outlier_type_pl_size).await?;
+    query: String,
+    limit: u32,
+) -> Result<(u32, Vec<(usize, PlistSize)>), LavaError> {
+    let metadata_page_length = reader.read_usize_from_end(1).await?[0];
+    // Read the metadata page
+    let metadata_page: (String, String, Vec<Vec<PlistSize>>, String, Vec<Vec<PlistSize>>, String, Vec<Vec<PlistSize>>) =
+        read_and_decompress(
+            &mut reader,
+            file_size as u64 - metadata_page_length as u64 - 8,
+            metadata_page_length as u64,
+        )
+        .await?;
+    let (dictionary, template, template_plist, outlier, outlier_plist, outlier_type, outlier_type_plist) =
+        metadata_page;
 
     for (_, line) in dictionary.lines().enumerate() {
-        if line.contains(query) {
+        if line.contains(&query) {
             println!("query matched dictionary item, brute force {}", query);
             return Ok((0, Vec::new()));
         }
     }
 
-    let mut matched_row_groups = Vec::new();
+    let mut match_uids = Vec::new();
 
     let search_text = |query: &str,
                        source_str: &str,
                        plists: &[Vec<PlistSize>],
-                       matched_row_groups: &mut Vec<PlistSize>,
+                       match_uids: &mut Vec<(usize, PlistSize)>,
                        write: bool| {
         if write {
             println!("{}", source_str);
@@ -393,123 +358,38 @@ async fn search_kauai(
             if let Some(_) = line.find(query) {
                 println!("{} {}", line, line_no);
                 let posting_list = &plists[line_no];
-                for &row_group in posting_list {
-                    print!("{} ", row_group);
-                    matched_row_groups.push(row_group);
+                for &uid in posting_list {
+                    print!("{} ", uid);
+                    match_uids.push((file_id, uid));
                 }
                 println!();
             }
         }
     };
 
-    search_text(query, &template, &template_plist, &mut matched_row_groups, false);
+    // search_text(&query, &template, &template_plist, &mut match_uids, false);
+    for (_, line) in template.lines().enumerate() {
+        if line.contains(&query) {
+            println!("query matched template, brute force {}", query);
+            return Ok((0, Vec::new()));
+        }
+    }
 
     // Print matched row groups
-    for &row_group in &matched_row_groups {
-        print!("{} ", row_group);
+    for &uid in &match_uids {
+        print!("{:?} ", uid);
     }
-    println!("MADE IT HERE");
 
-    search_text(query, &outlier, &outlier_plist, &mut matched_row_groups, false);
+    search_text(&query, &outlier, &outlier_plist, &mut match_uids, false);
 
-    if matched_row_groups.len() >= k.try_into().unwrap() {
+    if match_uids.len() >= limit.try_into().unwrap() {
         println!("inexact query for top K satisfied by template and outlier {}", query);
-        return Ok((1, matched_row_groups));
+        return Ok((1, match_uids));
     }
-
-    println!("MADE IT HERE");
 
     // Search in outlier types
-    search_text(query, &outlier_type, &outlier_type_plist, &mut matched_row_groups, false);
-
-    if matched_row_groups.len() >= k.try_into().unwrap() {
-        println!("inexact query for top K satisfied by template, outlier and outlier types {}", query);
-        Ok((1, matched_row_groups))
-    } else {
-        println!("inexact query for top K not satisfied by template, outlier and outlier types {}", query);
-        Ok((2, matched_row_groups))
-    }
-}
-
-async fn search_oahu(
-    reader: &mut AsyncReader,
-    file_size: usize,
-    query_type: i32,
-    chunks: Option<Vec<usize>>,
-    query_str: &str,
-) -> Result<Vec<PlistSize>, LavaError> {
-    // Read the metadata page length
-    let metadata_page_length = reader.read_usize_from_end(1).await?[0];
-    // Read the metadata page
-    let metadata_page: (Vec<i32>, Vec<usize>, Vec<usize>) =
-        read_and_decompress(reader, file_size as u64 - metadata_page_length as u64 - 8, metadata_page_length as u64)
-            .await?;
-    let (types, type_offsets, byte_offsets) = metadata_page;
-    // Find query_type in type_order
-    println!("type_order: {:?} {}", types, query_type);
-    let type_index = types.iter().position(|&x| x == query_type);
-    if type_index.is_none() {
-        return Ok(Vec::new());
-    }
-    let type_index = type_index.unwrap();
-
-    let type_offset = type_offsets[type_index];
-    let num_chunks = type_offsets[type_index + 1] - type_offset;
-
-    // Process blocks using JoinSet, if chunks is specified make sure it's shorter than num_chunks, otherwise it is 0 .. num_chunks
-
-    let chunks = match chunks {
-        Some(chunks) => {
-            if chunks.len() <= num_chunks {
-                chunks
-            } else {
-                return Err(LavaError::Parse("Invalid chunks specified".to_string()));
-            }
-        }
-        None => (0..num_chunks).collect(),
-    };
-
-    let mut set = JoinSet::new();
-
-    for chunk in chunks {
-        let block_offset = byte_offsets[type_offset + chunk] as u64;
-        let next_block_offset = byte_offsets[type_offset + chunk + 1] as u64;
-        let block_size = next_block_offset - block_offset;
-
-        let mut reader_clone = reader.clone(); // Assuming AsyncReader implements Clone
-        let query_str_clone = query_str.to_string();
-
-        set.spawn(async move {
-            let block = reader_clone.read_range(block_offset, block_offset + block_size).await.unwrap();
-
-            let compressed_strings_length = u64::from_le_bytes(block[0..8].try_into().unwrap()) as usize;
-            let compressed_strings = &block[8..8 + compressed_strings_length];
-
-            let mut decompressor = Decoder::new(compressed_strings).unwrap();
-            let mut decompressed_strings: Vec<u8> = Vec::with_capacity(compressed_strings.len() as usize);
-            decompressor.read_to_end(&mut decompressed_strings).unwrap();
-
-            let compressed_plist = &block[8 + compressed_strings_length..];
-            let plist = PListChunk::from_compressed(compressed_plist).unwrap();
-
-            let mut row_groups = Vec::new();
-            for (line_number, line) in String::from_utf8_lossy(&decompressed_strings).lines().enumerate() {
-                if format!("\n{}\n", line).contains(&query_str_clone) {
-                    row_groups.extend(plist.lookup(line_number).unwrap());
-                }
-            }
-
-            row_groups
-        });
-    }
-
-    let mut all_row_groups = Vec::new();
-    while let Some(result) = set.join_next().await {
-        let result = result.unwrap();
-        all_row_groups.extend(result);
-    }
-
-    Ok(all_row_groups)
+    search_text(&query, &outlier_type, &outlier_type_plist, &mut match_uids, false);
+    return Ok((1, match_uids));
 }
 
 fn write_block(fp: &mut File, buffer: &str, lineno_buffer: &[Vec<PlistSize>], byte_offsets: &mut Vec<usize>) {
@@ -524,7 +404,7 @@ fn write_block(fp: &mut File, buffer: &str, lineno_buffer: &[Vec<PlistSize>], by
     byte_offsets.push(byte_offsets.last().unwrap() + compressed_buffer.len() + serialized.len() + 8);
 }
 
-const BLOCK_BYTE_LIMIT: usize = 1000000;
+const BLOCK_BYTE_LIMIT: usize = 1_000_000;
 
 pub fn write_oahu(output_name: &str) -> Vec<(u64, String)> {
     // Get all types by listing compressed/compacted_type* files
@@ -549,6 +429,7 @@ pub fn write_oahu(output_name: &str) -> Vec<(u64, String)> {
     let mut type_chunks = HashMap::new();
 
     let mut for_hawaii: Vec<(u64, String)> = vec![];
+    let mut hawaii_types: Vec<i32> = vec![];
 
     for &type_num in &types {
         println!("Processing type: {}", type_num);
@@ -575,7 +456,7 @@ pub fn write_oahu(output_name: &str) -> Vec<(u64, String)> {
             buffer.push_str(&str_line);
             buffer.push('\n');
             lines_in_buffer += 1;
-            this_for_hawaii.push((byte_offsets.len() as u64, str_line));
+            this_for_hawaii.push((byte_offsets.len() as u64 - 1, str_line));
 
             let numbers: Vec<u32> = lineno_line.split_whitespace().map(|n| n.parse().unwrap()).collect();
             lineno_buffer.push(numbers);
@@ -602,6 +483,7 @@ pub fn write_oahu(output_name: &str) -> Vec<(u64, String)> {
 
         if blocks_written > BRUTE_THRESHOLD {
             for_hawaii.extend(this_for_hawaii);
+            hawaii_types.push(type_num);
         } else {
             this_for_hawaii.clear();
         }
@@ -615,7 +497,7 @@ pub fn write_oahu(output_name: &str) -> Vec<(u64, String)> {
     println!("type_chunks: {:?}", type_chunks);
     println!("type_uncompressed_lines_in_block: {:?}", type_uncompressed_lines_in_block);
 
-    let metadata_page: (Vec<i32>, Vec<usize>, Vec<usize>) = (types, type_offsets, byte_offsets);
+    let metadata_page: (Vec<i32>, Vec<usize>, Vec<usize>, Vec<i32>) = (types, type_offsets, byte_offsets, hawaii_types);
     let compressed_metadata = encode_all(&bincode::serialize(&metadata_page).unwrap()[..], 10).unwrap();
     fp.write_all(&compressed_metadata).unwrap();
     fp.write_all(&(compressed_metadata.len() as u64).to_le_bytes()).unwrap();
@@ -625,140 +507,204 @@ pub fn write_oahu(output_name: &str) -> Vec<(u64, String)> {
     for_hawaii
 }
 
-const SYMBOL_TY: i32 = 32;
-const BRUTE_THRESHOLD: usize = 5;
-const CHAR_TABLE: [i32; 128] = [
-    32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32,
-    32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 32, 32,
-    32, 32, 32, 32, 32, 2, 2, 2, 2, 2, 2, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 32, 32, 32, 32,
-    32, 32, 4, 4, 4, 4, 4, 4, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 32, 32,
-    32, 32, 32,
-];
-
-fn get_type(query: &str) -> i32 {
-    query.bytes().fold(0, |type_acc, c| type_acc | if c >= 128 { SYMBOL_TY } else { CHAR_TABLE[c as usize] })
-}
-
-fn get_all_types(type_: i32) -> Vec<i32> {
-    (1..=63).filter(|&i| (type_ & i) == type_).collect()
-}
-
 pub async fn search_hawaii_oahu(
-    reader_hawaii: &mut AsyncReader,
-    hawaii_size: usize,
-    reader_oahu: &mut AsyncReader,
+    file_id: usize,
+    hawaii_filename: String,
+    mut reader_oahu: AsyncReader,
     oahu_size: usize,
-    query: &str,
+    query: String,
     limit: usize,
-) -> Result<HashSet<PlistSize>, LavaError> {
-    let processed_query: String = query.chars().filter(|&c| c != '\n').collect();
+) -> Result<Vec<(usize, PlistSize)>, LavaError> {
+    info!("query: {}", query);
 
-    info!("query: {}", processed_query);
-
-    let query_type = get_type(&processed_query);
-    info!("deduced type: {}", query_type);
-
-    let types_to_search = get_all_types(query_type);
+    let types_to_search = get_all_types(get_type(&query));
     for &type_to_search in &types_to_search {
         info!("type to search: {}", type_to_search);
     }
 
-    let mut results = HashSet::new();
+    let metadata_page_length = reader_oahu.read_usize_from_end(1).await?[0];
+    // Read the metadata page
+    let metadata_page: (Vec<i32>, Vec<usize>, Vec<usize>, Vec<i32>) = read_and_decompress(
+        &mut reader_oahu,
+        oahu_size as u64 - metadata_page_length as u64 - 8,
+        metadata_page_length as u64,
+    )
+    .await?;
+    let (types, type_offsets, byte_offsets, hawaii_types) = metadata_page;
 
-    for &type_to_search in &types_to_search {
-        let mut found = search_oahu(reader_oahu, oahu_size, type_to_search, None, &processed_query).await?;
-        results.extend(found.drain(..));
+    // see if anything in hawaii_types intersects with type_to_search
+
+    let type_intersection =
+        hawaii_types.iter().filter(|&&type_| types_to_search.contains(&type_)).copied().collect::<Vec<i32>>();
+
+    let remainder_types =
+        types_to_search.iter().filter(|&&type_| !type_intersection.contains(&type_)).copied().collect::<Vec<i32>>();
+
+    let mut chunks: Vec<u64> = if type_intersection.is_empty() {
+        vec![]
+    } else {
+        _search_lava_substring_char(vec![hawaii_filename], query.clone(), limit, ReaderType::default(), None, None)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|(_, x)| x)
+            .collect_vec()
+    };
+    println!("chunks {:?}", chunks);
+
+    for remainder_type in remainder_types.iter() {
+        let type_index = types.iter().position(|&x| x == *remainder_type);
+        if type_index.is_none() {
+            continue;
+        }
+        let type_index = type_index.unwrap();
+        chunks.extend(type_offsets[type_index] as u64..type_offsets[type_index + 1] as u64);
+    }
+    println!("chunks {:?}", chunks);
+
+    let search_chunk = |block: bytes::Bytes, query_clone: String| {
+        let compressed_strings_length = u64::from_le_bytes(block[0..8].try_into().unwrap()) as usize;
+        let compressed_strings = &block[8..8 + compressed_strings_length];
+
+        let mut decompressor = Decoder::new(compressed_strings).unwrap();
+        let mut decompressed_strings: Vec<u8> = Vec::with_capacity(compressed_strings.len() as usize);
+        decompressor.read_to_end(&mut decompressed_strings).unwrap();
+
+        let compressed_plist = &block[8 + compressed_strings_length..];
+        let plist = PListChunk::from_compressed(compressed_plist).unwrap();
+
+        let mut uids = Vec::new();
+        for (line_number, line) in String::from_utf8_lossy(&decompressed_strings).lines().enumerate() {
+            if format!("\n{}\n", line).contains(&query_clone) {
+                uids.extend(plist.lookup(line_number).unwrap());
+            }
+        }
+
+        uids
+    };
+
+    let mut set = JoinSet::new();
+
+    for chunk in chunks {
+        let mut reader_clone = reader_oahu.clone(); // Assuming AsyncReader implements Clone
+        let query_clone = query.to_string();
+        let byte_offsets_clone = byte_offsets.clone();
+
+        set.spawn(async move {
+            let block: bytes::Bytes = reader_clone
+                .read_range(byte_offsets_clone[chunk as usize] as u64, byte_offsets_clone[chunk as usize + 1] as u64)
+                .await
+                .unwrap();
+            search_chunk(block, query_clone)
+        });
     }
 
-    println!("results: {:?}", results);
+    let mut all_uids = Vec::new();
+    while let Some(result) = set.join_next().await {
+        let result = result.unwrap();
+        all_uids.extend(result.into_iter().map(|x| (file_id, x)));
+        if all_uids.len() >= limit {
+            return Ok(all_uids);
+        }
+    }
 
-    // #[tokio::main]
-    // pub async fn search_lava_substring_char(
-    //     files: Vec<String>,
-    //     query: String,
-    //     k: usize,
-    //     reader_type: ReaderType,
-    //     token_viable_limit: Option<usize>,
-    //     sample_factor: Option<usize>,
-    // )
-
-    // for (&type_, chunks) in &result {
-    //     info!("searching type {}", type_);
-    //     for &chunk in chunks {
-    //         info!("chunk {}", chunk);
-    //     }
-    // }
-
-    // for (&type_, chunks) in &result {
-    //     info!("searching type {}", type_);
-
-    //     let found = if chunks == &HashSet::from([usize::MAX]) {
-    //         info!("type not found, brute forcing Oahu");
-    //         let chunks_to_search: Vec<usize> = (0..BRUTE_THRESHOLD).collect();
-    //         search_oahu(reader_oahu, oahu_size, type_, chunks_to_search, &processed_query).await?
-    //     } else {
-    //         let mut chunks_vec: Vec<usize> = chunks.iter().cloned().collect();
-    //         chunks_vec.truncate(limit);
-    //         search_oahu(reader_oahu, oahu_size, type_, &chunks_vec, &processed_query).await?
-    //     };
-
-    //     results.extend(found);
-    // }
-
-    Ok(results)
+    return Ok(all_uids);
 }
 
 #[tokio::main]
 pub async fn index_logcloud(index_name: &str, num_groups: usize) {
     let _ = compact(num_groups);
     let _ = write_kauai(index_name, num_groups).unwrap();
-    let texts = write_oahu(index_name);
+    let texts: Vec<(u64, String)> = write_oahu(index_name);
     let _ = _build_lava_substring_char(format!("{}.hawaii", index_name), texts, 1).await.unwrap();
 }
 
 #[tokio::main]
 pub async fn search_logcloud(
-    split_index_prefix: String,
+    split_index_prefixes: Vec<String>,
     query: String,
     limit: usize,
     reader_type: ReaderType,
-) -> Result<Vec<usize>, LavaError> {
-    /*
-    Expects a split_index_prefix of the form s3://bucket/index-name/indices/split_id or path/index-name/indices/split_id
-    */
-    info!("split_index_prefix: {}", split_index_prefix);
+) -> Result<(u32, Vec<(usize, PlistSize)>), LavaError> {
+    info!("split_index_prefixes: {:?}", split_index_prefixes);
 
-    let (kauai_size, mut reader_kauai) =
-        get_file_size_and_reader(format!("{}.kauai", split_index_prefix), reader_type.clone()).await?;
+    let start_time = std::time::Instant::now();
 
-    let result = search_kauai(&mut reader_kauai, kauai_size, &query, limit.try_into().unwrap()).await?;
-    println!("result: {:?}", result);
+    let kauai_filenames = split_index_prefixes
+        .iter()
+        .map(|split_index_prefix| format!("{}.kauai", split_index_prefix))
+        .collect::<Vec<_>>();
 
-    let (oahu_size, mut reader_oahu) =
-        get_file_size_and_reader(format!("{}.oahu", split_index_prefix), reader_type.clone()).await?;
-    // let (hawaii_size, mut reader_hawaii) =
-    //     get_file_size_and_reader(format!("{}.hawaii", split_index_prefix), reader_type).await?;
-    let hawaii_size = oahu_size;
-    let mut reader_hawaii = reader_oahu.clone();
-    let mut return_results = Vec::new();
+    let (kauai_sizes, reader_kauais) = get_file_sizes_and_readers(&kauai_filenames, reader_type.clone()).await?;
 
-    match result.0 {
-        0 => {
-            // you have to brute force
-            return_results.push(usize::MAX); // Using usize::MAX instead of -1
-        }
-        1 => {
-            return_results.extend(result.1.iter().map(|&x| x as usize));
-        }
-        2 => {
-            let current_results: Vec<usize> = result.1.into_iter().map(|x| x as usize).collect();
-            let next_results =
-                search_hawaii_oahu(&mut reader_hawaii, hawaii_size, &mut reader_oahu, oahu_size, &query, limit).await?;
-            return_results.extend(current_results);
-            return_results.extend(next_results.iter().map(|&x| x as usize));
-        }
-        _ => return Err(LavaError::Parse("Unexpected result from search_kauai".to_string())),
+    let mut set = JoinSet::new();
+    for (file_id, (kauai_size, reader_kauai)) in kauai_sizes.into_iter().zip(reader_kauais.into_iter()).enumerate() {
+        let query_clone = query.clone();
+        set.spawn(
+            async move { search_kauai(file_id, reader_kauai, kauai_size, query_clone, limit.try_into().unwrap()) },
+        );
     }
 
-    Ok(return_results)
+    let mut all_uids: Vec<(usize, PlistSize)> = Vec::new();
+    while let Some(result) = set.join_next().await {
+        let result = result.unwrap().await.unwrap();
+        match result.0 {
+            0 => {
+                println!("brute force");
+                return Ok((0, vec![]));
+            }
+            1 => {
+                all_uids.extend(result.1);
+
+                if all_uids.len() >= limit {
+                    return Ok((1, all_uids));
+                }
+            }
+            _ => return Err(LavaError::Parse("Unexpected result from search_kauai".to_string())),
+        }
+    }
+
+    println!("kauai time {:?}", start_time.elapsed());
+
+    let start_time = std::time::Instant::now();
+
+    // at this point we are not able to satisfy our query with kauai files alone, must query oahu and possibly hawaii files.
+    // we should do an exponential search strategy, i.e. 1 2 4 8 etc, but that's too much work for now
+
+    let oahu_filenames = split_index_prefixes
+        .iter()
+        .map(|split_index_prefix| format!("{}.oahu", split_index_prefix))
+        .collect::<Vec<_>>();
+
+    let mut hawaii_filenames = split_index_prefixes
+        .iter()
+        .map(|split_index_prefix| format!("{}.hawaii", split_index_prefix))
+        .collect::<Vec<_>>();
+
+    let (oahu_sizes, mut reader_oahus) = get_file_sizes_and_readers(&oahu_filenames, reader_type.clone()).await?;
+
+    let mut set = JoinSet::new();
+    let new_limit = limit - all_uids.len();
+
+    for (file_id, (oahu_size, reader_oahu)) in oahu_sizes.into_iter().zip(reader_oahus.into_iter()).enumerate() {
+        let hawaii_filename = hawaii_filenames.remove(0);
+        let query_clone = query.clone();
+        set.spawn(async move {
+            search_hawaii_oahu(file_id, hawaii_filename, reader_oahu, oahu_size, query_clone, new_limit)
+        });
+    }
+
+    while let Some(result) = set.join_next().await {
+        let result = result.unwrap().await.unwrap();
+        all_uids.extend(result);
+        if all_uids.len() >= limit {
+            return Ok((1, all_uids));
+        }
+    }
+
+    println!("oahu time {:?}", start_time.elapsed());
+
+    println!("all_uids {:?}", all_uids);
+
+    Ok((1, all_uids))
 }

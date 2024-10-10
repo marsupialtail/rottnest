@@ -6,6 +6,23 @@ use zstd::stream::write::Encoder;
 
 pub type PlistSize = u32;
 
+const SYMBOL_TY: i32 = 32;
+const CHAR_TABLE: [i32; 128] = [
+    32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32,
+    32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 32, 32,
+    32, 32, 32, 32, 32, 2, 2, 2, 2, 2, 2, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 32, 32, 32, 32,
+    32, 32, 4, 4, 4, 4, 4, 4, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 32, 32,
+    32, 32, 32,
+];
+
+pub(crate) fn get_type(query: &str) -> i32 {
+    query.bytes().fold(0, |type_acc, c| type_acc | if c >= 128 { SYMBOL_TY } else { CHAR_TABLE[c as usize] })
+}
+
+pub(crate) fn get_all_types(type_: i32) -> Vec<i32> {
+    (1..=63).filter(|&i| (type_ & i) == type_).collect()
+}
+
 pub struct PListChunk {
     data: Vec<Vec<PlistSize>>,
 }

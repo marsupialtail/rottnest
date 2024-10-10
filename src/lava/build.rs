@@ -302,7 +302,7 @@ pub async fn _build_lava_substring_char(
     println!("total file size: {}", file.seek(SeekFrom::Current(0))?);
 
     let mut cumulative_counts: Vec<u64> = vec![0];
-    for i in 0..current_chunk_counts.len() {
+    for i in 0..256 {
         cumulative_counts.push(cumulative_counts[i] + *current_chunk_counts.get(&(i as u8)).unwrap_or(&0));
     }
 
@@ -516,12 +516,13 @@ pub async fn build_lava_substring(
         if ((i + 1) % FM_CHUNK_TOKS == 0) || i == bwt.len() - 1 {
             let serialized_counts = bincode::serialize(&current_chunk_counts)?;
             let compressed_counts = encode_all(&serialized_counts[..], 10).expect("Compression failed");
-            println!("chunk size: {}", compressed_counts.len());
+
             file.write_all(&(compressed_counts.len() as u64).to_le_bytes())?;
             file.write_all(&compressed_counts)?;
             let serialized_chunk = bincode::serialize(&current_chunk)?;
             let compressed_chunk = encode_all(&serialized_chunk[..], 10).expect("Compression failed");
             file.write_all(&compressed_chunk)?;
+
             fm_chunk_offsets.push(file.seek(SeekFrom::Current(0))? as usize);
             current_chunk_counts = next_chunk_counts.clone();
             current_chunk = vec![];
