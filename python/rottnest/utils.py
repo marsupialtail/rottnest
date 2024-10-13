@@ -100,7 +100,7 @@ def get_physical_layout(file_paths: list, column_name: str, type = "str", remote
                 "data_page_sizes": [-1] + layout.data_page_sizes,
                 "dictionary_page_sizes": [-1] + layout.dictionary_page_sizes,
                 "row_groups": np.hstack([[-1] , np.repeat(np.arange(layout.num_row_groups), layout.row_group_data_pages)]),
-                "page_row_offset_in_row_group": np.hstack([[-1], page_row_offsets_in_row_group])
+                "page_row_offset_in_row_group": np.hstack([[-1], page_row_offsets_in_row_group]).astype(np.int64)
             }
         )
 
@@ -133,17 +133,21 @@ def get_virtual_layout(file_paths: list, column_name: str, key_column_name: str,
         
     return arr, uid, metadata
 
-def get_metadata_and_populate_cache(indices: List[str]):
+def get_metadata_and_populate_cache(indices: List[str], suffix = "meta"):
     
-    metadatas = daft.table.read_parquet_into_pyarrow_bulk([f"{index_name}.meta" for index_name in indices], io_config = get_daft_io_config_from_file_path(indices[0]))
-    metadatas = [(polars.from_arrow(i), json.loads(i.schema.metadata[b'cache_ranges'].decode())) for i in metadatas]
-
-    metadata = polars.concat([f[0].with_columns(polars.lit(i).alias("file_id").cast(polars.Int64)) for i, f in enumerate(metadatas)])
+    metadatas = daft.table.read_parquet_into_pyarrow_bulk([f"{index_name}.{suffix}" for index_name in indices], io_config = get_daft_io_config_from_file_path(indices[0]))
+    
+   
     if os.getenv("CACHE_ENABLE") and os.getenv("CACHE_ENABLE").lower() == "true":
+        metadatas = [(polars.from_arrow(i), json.loads(i.schema.metadata[b'cache_ranges'].decode())) for i in metadatas]
+        metadata = polars.concat([f[0].with_columns(polars.lit(i).alias("file_id").cast(polars.Int64)) for i, f in enumerate(metadatas)])
         cache_ranges = {f"{indices[i]}.lava": f[1] for i, f in enumerate(metadatas) if len(f[1]) > 0}
         cached_files = list(cache_ranges.keys())
         ranges = [[tuple(k) for k in cache_ranges[f]] for f in cached_files]
         rottnest.populate_cache(cached_files, ranges,  "aws")
+    else:
+        metadatas = [polars.from_arrow(i) for i in metadatas]
+        metadata = polars.concat([f.with_columns(polars.lit(i).alias("file_id").cast(polars.Int64)) for i, f in enumerate(metadatas)])
 
     return metadata
 

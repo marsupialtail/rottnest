@@ -1,17 +1,15 @@
-use arrow::array::{make_array, Array, ArrayData, LargeStringArray, UInt64Array};
-use byteorder::{LittleEndian, WriteBytesExt};
-use itertools::Itertools;
-use serde_json;
-use tokenizers::parallelism::MaybeParallelIterator;
-use tokenizers::tokenizer::Tokenizer; // You'll need the `byteorder` crate
-
 use crate::lava::constants::*;
 use crate::lava::error::LavaError;
 use crate::lava::plist::PListChunk;
 use crate::lava::trie::{BinaryTrieNode, FastTrie};
+use crate::lava::wavelet_tree::{construct_wavelet_tree, write_wavelet_tree_to_disk, WaveletTree};
+use arrow::array::{make_array, Array, ArrayData, LargeStringArray, UInt64Array};
 use bincode;
+use byteorder::{LittleEndian, WriteBytesExt};
 use bytes;
 use divsufsort::sort_in_place;
+use itertools::Itertools;
+use serde_json;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
@@ -19,6 +17,8 @@ use std::collections::HashSet;
 use std::fs::File;
 use std::io::Read;
 use std::io::{BufWriter, Seek, SeekFrom, Write};
+use tokenizers::parallelism::MaybeParallelIterator;
+use tokenizers::tokenizer::Tokenizer; // You'll need the `byteorder` crate
 use zstd::stream::encode_all;
 
 use rayon::prelude::*;
@@ -228,6 +228,85 @@ pub async fn build_lava_bm25(
     Ok(vec![(compressed_term_dict_offset as usize, cache_end)])
 }
 
+pub async fn _build_lava_substring_char_wavelet(
+    output_file_name: String,
+    texts: Vec<(u64, String)>,
+    char_skip_factor: u32,
+) -> Result<Vec<(usize, usize)>, LavaError> {
+    let named_encodings = texts
+        .into_iter()
+        .map(|(uid, text)| {
+            let lower: String = text.chars().flat_map(|c| c.to_lowercase()).collect();
+            let result: Vec<u8> = if char_skip_factor == 1 {
+                lower.chars().filter(|id| !SKIP.chars().contains(id)).map(|c| c as u8).collect()
+            } else {
+                lower
+                    .chars()
+                    .filter(|id| !SKIP.chars().contains(id))
+                    .enumerate()
+                    .filter(|&(index, _)| index % char_skip_factor as usize == 1)
+                    .map(|(_, c)| c as u8)
+                    .collect()
+            };
+            (vec![uid; result.len()], result)
+        })
+        .collect::<Vec<(Vec<u64>, Vec<u8>)>>();
+
+    let uids: Vec<u64> = named_encodings.iter().map(|(uid, _)| uid).flatten().cloned().collect::<Vec<u64>>();
+    let encodings: Vec<u8> = named_encodings.into_iter().map(|(_, text)| text).flatten().collect::<Vec<u8>>();
+
+    let mut sa: Vec<i32> = (0..encodings.len() as i32).collect();
+
+    sort_in_place(&encodings, &mut sa);
+
+    let mut idx: Vec<u64> = Vec::with_capacity(encodings.len());
+    let mut bwt: Vec<u8> = Vec::with_capacity(encodings.len());
+    let mut total_counts: Vec<usize> = vec![0; 256];
+    for i in 0..sa.len() {
+        let char = if sa[i] == 0 { encodings[encodings.len() - 1] } else { encodings[(sa[i] - 1) as usize] };
+        bwt.push(char);
+        total_counts[char as usize] += 1;
+        if sa[i] == 0 {
+            idx.push(uids[uids.len() - 1]);
+        } else {
+            idx.push(uids[(sa[i] - 1) as usize]);
+        }
+    }
+
+    let wavelet_tree = construct_wavelet_tree(&bwt);
+
+    let mut file = File::create(output_file_name)?;
+
+    let _ = write_wavelet_tree_to_disk(&wavelet_tree, &total_counts, bwt.len(), &mut file).unwrap();
+
+    // print out total file size so far
+    println!("total file size: {}", file.seek(SeekFrom::Current(0))?);
+
+    let mut posting_list_offsets: Vec<usize> = vec![file.seek(SeekFrom::Current(0))? as usize];
+
+    for i in (0..idx.len()).step_by(FM_CHUNK_TOKS) {
+        let slice = &idx[i..std::cmp::min(idx.len(), i + FM_CHUNK_TOKS)];
+        let serialized_slice = bincode::serialize(slice)?;
+        let compressed_slice = encode_all(&serialized_slice[..], 0).expect("Compression failed");
+        file.write_all(&compressed_slice)?;
+        posting_list_offsets.push(file.seek(SeekFrom::Current(0))? as usize);
+    }
+
+    let cache_start = file.seek(SeekFrom::Current(0))? as usize;
+
+    let posting_list_offsets_offset = file.seek(SeekFrom::Current(0))? as usize;
+    let serialized_posting_list_offsets = bincode::serialize(&posting_list_offsets)?;
+    let compressed_posting_list_offsets =
+        encode_all(&serialized_posting_list_offsets[..], 0).expect("Compression failed");
+    file.write_all(&compressed_posting_list_offsets)?;
+    file.write_all(&(posting_list_offsets_offset as u64).to_le_bytes())?;
+    file.write_all(&(bwt.len() as u64).to_le_bytes())?;
+
+    let cache_end = file.seek(SeekFrom::Current(0))? as usize;
+
+    Ok(vec![(cache_start, cache_end)])
+}
+
 pub async fn _build_lava_substring_char(
     output_file_name: String,
     texts: Vec<(u64, String)>,
@@ -378,7 +457,8 @@ pub async fn build_lava_substring_char(
     }
 
     println!("made it to this point");
-    _build_lava_substring_char(output_file_name, texts, char_skip_factor).await
+    // _build_lava_substring_char(output_file_name, texts, char_skip_factor).await
+    _build_lava_substring_char_wavelet(output_file_name, texts, char_skip_factor).await
 }
 
 #[tokio::main]

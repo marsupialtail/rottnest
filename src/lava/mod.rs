@@ -9,6 +9,7 @@ mod merge;
 mod plist;
 mod search;
 mod trie;
+mod wavelet_tree;
 
 pub use build::build_lava_bm25;
 pub use build::build_lava_substring;

@@ -163,6 +163,84 @@ where
     res
 }
 
+// async fn search_substring_wavelet(
+//     file_id: u64,
+//     mut reader: AsyncReader,
+//     file_size: usize,
+//     queries: Vec<Vec<u8>>,
+// ) -> Result<Vec<(u64, u64)>, LavaError> {
+//     println!("{:?}", queries);
+
+//     let results = reader.read_usize_from_end(2).await?;
+//     let posting_list_offsets_offset = results[0];
+//     let n = results[1];
+
+//     let posting_list_offsets: Vec<u64> =
+//         reader.read_range_and_decompress(posting_list_offsets_offset, (file_size - 16) as u64).await?;
+
+//     let mut query_set = JoinSet::new();
+
+//     for query in queries {
+//         let mut reader = reader.clone();
+
+//         let mut res: Vec<(u64, u64)> = vec![];
+//         let mut start: usize = 0;
+//         let mut end: usize = n as usize;
+
+//         let start_offset = posting_list_offsets[start / FM_CHUNK_TOKS];
+//         let end_offset = posting_list_offsets[end / FM_CHUNK_TOKS + 1];
+//         let total_chunks = end / FM_CHUNK_TOKS - start / FM_CHUNK_TOKS + 1;
+
+//         let plist_chunks = reader.read_range(start_offset, end_offset).await.unwrap();
+
+//         let mut chunk_set = JoinSet::new();
+
+//         for i in 0..total_chunks {
+//             let this_start = posting_list_offsets[start / FM_CHUNK_TOKS + i];
+//             let this_end = posting_list_offsets[start / FM_CHUNK_TOKS + i + 1];
+//             let this_chunk =
+//                 plist_chunks[(this_start - start_offset) as usize..(this_end - start_offset) as usize].to_vec();
+
+//             chunk_set.spawn(async move {
+//                 let mut decompressor = Decoder::new(&this_chunk[..]).unwrap();
+//                 let mut serialized_plist_chunk: Vec<u8> = Vec::with_capacity(this_chunk.len());
+//                 decompressor.read_to_end(&mut serialized_plist_chunk).unwrap();
+//                 let plist_chunk: Vec<u64> = bincode::deserialize(&serialized_plist_chunk).unwrap();
+
+//                 let chunk_res: Vec<(u64, u64)> = if i == 0 {
+//                     if total_chunks == 1 {
+//                         plist_chunk[start % FM_CHUNK_TOKS..end % FM_CHUNK_TOKS]
+//                             .iter()
+//                             .map(|&uid| (file_id, uid))
+//                             .collect()
+//                     } else {
+//                         plist_chunk[start % FM_CHUNK_TOKS..].iter().map(|&uid| (file_id, uid)).collect()
+//                     }
+//                 } else if i == total_chunks - 1 {
+//                     plist_chunk[..end % FM_CHUNK_TOKS].iter().map(|&uid| (file_id, uid)).collect()
+//                 } else {
+//                     plist_chunk.iter().map(|&uid| (file_id, uid)).collect()
+//                 };
+
+//                 chunk_res
+//             });
+//         }
+
+//         while let Some(chunk_res) = chunk_set.join_next().await {
+//             res.extend(chunk_res.unwrap());
+//         }
+
+//         res
+//     }
+
+//     let mut res = Vec::new();
+//     while let Some(query_res) = query_set.join_next().await {
+//         res.extend(query_res.unwrap());
+//     }
+
+//     Ok(res)
+// }
+
 async fn search_substring_one_file<T>(
     file_id: u64,
     mut reader: AsyncReader,

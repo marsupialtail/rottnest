@@ -1,6 +1,7 @@
 use itertools::Itertools;
 use log::{info, warn};
 use rand::Rng;
+use rayon::slice::ParallelSliceMut;
 use tokio::{task::JoinSet, time::sleep};
 
 use crate::{
@@ -27,6 +28,7 @@ use std::{
 use zstd::stream::{encode_all, read::Decoder};
 
 const BRUTE_THRESHOLD: usize = 5;
+const USE_EXPERIMENTAL_NUMERICS: bool = false;
 
 async fn read_and_decompress<T>(reader: &mut AsyncReader, start: u64, size: u64) -> Result<T, LavaError>
 where
@@ -392,6 +394,18 @@ async fn search_kauai(
     return Ok((1, match_uids));
 }
 
+fn write_1_block(fp: &mut File, numbers: Vec<usize>, lineno_buffer: &[Vec<PlistSize>], byte_offsets: &mut Vec<usize>) {
+    let compressed_buffer = zstd::encode_all(&bincode::serialize(&numbers).unwrap()[..], 10).unwrap();
+    let plist = PListChunk::new(lineno_buffer.to_vec());
+    let serialized = plist.serialize().unwrap();
+
+    fp.write_all(&(compressed_buffer.len() as u64).to_le_bytes()).unwrap();
+    fp.write_all(&compressed_buffer).unwrap();
+    fp.write_all(&serialized).unwrap();
+
+    byte_offsets.push(byte_offsets.last().unwrap() + compressed_buffer.len() + serialized.len() + 8);
+}
+
 fn write_block(fp: &mut File, buffer: &str, lineno_buffer: &[Vec<PlistSize>], byte_offsets: &mut Vec<usize>) {
     let compressed_buffer = zstd::encode_all(buffer.as_bytes(), 0).unwrap();
     let plist = PListChunk::new(lineno_buffer.to_vec());
@@ -440,58 +454,78 @@ pub fn write_oahu(output_name: &str) -> Vec<(u64, String)> {
         let string_file = File::open(string_file_path).unwrap();
         let lineno_file = File::open(lineno_file_path).unwrap();
 
-        let mut buffer = String::new();
         let mut lineno_buffer = Vec::new();
 
         let mut uncompressed_lines_in_block = 0;
         let mut blocks_written = 0;
         let mut lines_in_buffer = 0;
+        if USE_EXPERIMENTAL_NUMERICS && (type_num == 1) {
+            let mut all_numbers: Vec<usize> = vec![];
+            for (str_line, lineno_line) in BufReader::new(string_file).lines().zip(BufReader::new(lineno_file).lines())
+            {
+                let str_line = str_line.unwrap();
+                let lineno_line = lineno_line.unwrap();
+                //cast the str_line to a usize
+                let number: usize = str_line.parse().unwrap();
+                all_numbers.push(number);
+                let numbers: Vec<u32> = lineno_line.split_whitespace().map(|n| n.parse().unwrap()).collect();
+                lineno_buffer.push(numbers);
+            }
+            // sort numbers, lineno_buffer by numbers
+            let mut paired: Vec<_> = all_numbers.into_iter().zip(lineno_buffer.into_iter()).collect();
+            paired.par_sort_unstable_by(|a, b| a.0.cmp(&b.0));
+            all_numbers = paired.iter().map(|a| a.0).collect();
+            lineno_buffer = paired.into_iter().map(|a| a.1).collect();
 
-        let mut this_for_hawaii: Vec<(u64, String)> = vec![];
+            write_1_block(&mut fp, all_numbers, &lineno_buffer, &mut byte_offsets);
+        } else {
+            let mut buffer = String::new();
+            let mut this_for_hawaii: Vec<(u64, String)> = vec![];
 
-        for (str_line, lineno_line) in BufReader::new(string_file).lines().zip(BufReader::new(lineno_file).lines()) {
-            let str_line = str_line.unwrap();
-            let lineno_line = lineno_line.unwrap();
+            for (str_line, lineno_line) in BufReader::new(string_file).lines().zip(BufReader::new(lineno_file).lines())
+            {
+                let str_line = str_line.unwrap();
+                let lineno_line = lineno_line.unwrap();
 
-            buffer.push_str(&str_line);
-            buffer.push('\n');
-            lines_in_buffer += 1;
-            this_for_hawaii.push((byte_offsets.len() as u64 - 1, str_line));
+                buffer.push_str(&str_line);
+                buffer.push('\n');
+                lines_in_buffer += 1;
+                this_for_hawaii.push((byte_offsets.len() as u64 - 1, str_line));
 
-            let numbers: Vec<u32> = lineno_line.split_whitespace().map(|n| n.parse().unwrap()).collect();
-            lineno_buffer.push(numbers);
+                let numbers: Vec<u32> = lineno_line.split_whitespace().map(|n| n.parse().unwrap()).collect();
+                lineno_buffer.push(numbers);
 
-            if uncompressed_lines_in_block == 0 && buffer.len() > BLOCK_BYTE_LIMIT / 2 {
-                let compressed_buffer = zstd::encode_all(buffer.as_bytes(), 0).unwrap();
-                uncompressed_lines_in_block =
-                    ((BLOCK_BYTE_LIMIT as f32 / compressed_buffer.len() as f32) * lines_in_buffer as f32) as usize;
+                if uncompressed_lines_in_block == 0 && buffer.len() > BLOCK_BYTE_LIMIT / 2 {
+                    let compressed_buffer = zstd::encode_all(buffer.as_bytes(), 0).unwrap();
+                    uncompressed_lines_in_block =
+                        ((BLOCK_BYTE_LIMIT as f32 / compressed_buffer.len() as f32) * lines_in_buffer as f32) as usize;
+                }
+
+                if uncompressed_lines_in_block > 0 && lines_in_buffer == uncompressed_lines_in_block {
+                    write_block(&mut fp, &buffer, &lineno_buffer, &mut byte_offsets);
+                    buffer.clear();
+                    lines_in_buffer = 0;
+                    lineno_buffer.clear();
+                    blocks_written += 1;
+                }
             }
 
-            if uncompressed_lines_in_block > 0 && lines_in_buffer == uncompressed_lines_in_block {
+            if !buffer.is_empty() {
                 write_block(&mut fp, &buffer, &lineno_buffer, &mut byte_offsets);
-                buffer.clear();
-                lines_in_buffer = 0;
-                lineno_buffer.clear();
                 blocks_written += 1;
             }
-        }
 
-        if !buffer.is_empty() {
-            write_block(&mut fp, &buffer, &lineno_buffer, &mut byte_offsets);
-            blocks_written += 1;
+            if blocks_written > BRUTE_THRESHOLD {
+                for_hawaii.extend(this_for_hawaii);
+                hawaii_types.push(type_num);
+            } else {
+                this_for_hawaii.clear();
+            }
+            type_chunks.insert(type_num, blocks_written);
+            type_uncompressed_lines_in_block.insert(type_num, uncompressed_lines_in_block);
         }
-
-        if blocks_written > BRUTE_THRESHOLD {
-            for_hawaii.extend(this_for_hawaii);
-            hawaii_types.push(type_num);
-        } else {
-            this_for_hawaii.clear();
-        }
-
-        type_chunks.insert(type_num, blocks_written);
 
         type_offsets.push(byte_offsets.len() - 1);
-        type_uncompressed_lines_in_block.insert(type_num, uncompressed_lines_in_block);
     }
 
     println!("type_chunks: {:?}", type_chunks);
@@ -552,13 +586,41 @@ pub async fn search_hawaii_oahu(
     };
     println!("chunks {:?}", chunks);
 
+    let mut all_uids = Vec::new();
+
     for remainder_type in remainder_types.iter() {
         let type_index = types.iter().position(|&x| x == *remainder_type);
         if type_index.is_none() {
             continue;
         }
         let type_index = type_index.unwrap();
-        chunks.extend(type_offsets[type_index] as u64..type_offsets[type_index + 1] as u64);
+        if USE_EXPERIMENTAL_NUMERICS && (*remainder_type == 1) {
+            let block = reader_oahu
+                .read_range(
+                    byte_offsets[type_offsets[type_index]] as u64,
+                    byte_offsets[type_offsets[type_index] + 1] as u64,
+                )
+                .await
+                .unwrap();
+            let compressed_nums_length = u64::from_le_bytes(block[0..8].try_into().unwrap()) as usize;
+            println!("compressed_nums_length {:?}", compressed_nums_length);
+            println!("total bytes {:?}", block.len());
+            let mut decompressor = Decoder::new(&block[8..8 + compressed_nums_length]).unwrap();
+            let mut decompressed = Vec::new();
+            std::io::copy(&mut decompressor, &mut decompressed)?;
+            let all_numbers: Vec<usize> = bincode::deserialize(&decompressed)?;
+
+            let compressed_plist = &block[8 + compressed_nums_length..];
+            let plist = PListChunk::from_compressed(compressed_plist).unwrap();
+
+            for (line_number, this_number) in all_numbers.iter().enumerate() {
+                if this_number.to_string().contains(&query) {
+                    all_uids.extend(plist.lookup(line_number).unwrap().iter().map(|x| (file_id, *x)));
+                }
+            }
+        } else {
+            chunks.extend(type_offsets[type_index] as u64..type_offsets[type_index + 1] as u64);
+        }
     }
     println!("chunks {:?}", chunks);
 
@@ -599,7 +661,6 @@ pub async fn search_hawaii_oahu(
         });
     }
 
-    let mut all_uids = Vec::new();
     while let Some(result) = set.join_next().await {
         let result = result.unwrap();
         all_uids.extend(result.into_iter().map(|x| (file_id, x)));

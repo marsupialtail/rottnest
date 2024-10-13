@@ -8,13 +8,13 @@ import rottnest.internal as internal
 # print(result)
 
 def substring_test():
-    # internal.index_files_substring(["example_data/a.parquet"], "text", "index0", token_skip_factor = 1, char_index=True)
+    internal.index_files_substring(["example_data/a.parquet"], "text", "index0", token_skip_factor = 1, char_index=True)
     # internal.index_files_substring(["example_data/b.parquet"], "text", "index1", token_skip_factor = 1, char_index=True)
     # internal.merge_index_substring("merged_index", ["index0", "index1"])
-    result = internal.search_index_substring(["index0"], 
-                                            "One step you have to remember not to skip is to use Disk Utility to partition the SSD as GUID partition scheme HFS+ before doing the clone.", 
-                                            K = 10, sample_factor = 1, char_index=True)
-    print(result)
+    # result = internal.search_index_substring(["index0"], 
+    #                                         "One step you have to remember not to skip is to use Disk Utility to partition the SSD as GUID partition scheme HFS+ before doing the clone.", 
+    #                                         K = 10, sample_factor = 1, char_index=True)
+    # print(result)
 
 # table1 = polars.read_parquet("uuid_data/a.parquet")
 # table2 = polars.read_parquet("uuid_data/b.parquet")
