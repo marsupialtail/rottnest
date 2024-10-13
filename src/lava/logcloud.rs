@@ -702,13 +702,13 @@ pub async fn search_logcloud(
     for (file_id, (kauai_size, reader_kauai)) in kauai_sizes.into_iter().zip(reader_kauais.into_iter()).enumerate() {
         let query_clone = query.clone();
         set.spawn(
-            async move { search_kauai(file_id, reader_kauai, kauai_size, query_clone, limit.try_into().unwrap()) },
+            async move { search_kauai(file_id, reader_kauai, kauai_size, query_clone, limit.try_into().unwrap()).await.unwrap() },
         );
     }
 
     let mut all_uids: Vec<(usize, PlistSize)> = Vec::new();
     while let Some(result) = set.join_next().await {
-        let result = result.unwrap().await.unwrap();
+        let result = result.unwrap();
         match result.0 {
             0 => {
                 println!("brute force");
@@ -751,12 +751,12 @@ pub async fn search_logcloud(
         let hawaii_filename = hawaii_filenames.remove(0);
         let query_clone = query.clone();
         set.spawn(async move {
-            search_hawaii_oahu(file_id, hawaii_filename, reader_oahu, oahu_size, query_clone, new_limit)
+            search_hawaii_oahu(file_id, hawaii_filename, reader_oahu, oahu_size, query_clone, new_limit).await.unwrap()
         });
     }
 
     while let Some(result) = set.join_next().await {
-        let result = result.unwrap().await.unwrap();
+        let result = result.unwrap();
         all_uids.extend(result);
         if all_uids.len() >= limit {
             return Ok((1, all_uids));
