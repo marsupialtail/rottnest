@@ -18,7 +18,7 @@ from .utils import get_daft_io_config_from_file_path, get_fs_from_file_path, get
 
 
 def index_files_logcloud(file_paths: List[str], column_name: str, name = uuid.uuid4().hex, remote = None, 
-                         prefix_bytes = 24, prefix_format = '- %s %Y.%m.%d', batch_files = 8):
+                         prefix_bytes = None, prefix_format = None, batch_files = 8):
     from tqdm import tqdm
     num_groups = 0
     curr_max = 0

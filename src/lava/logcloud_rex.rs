@@ -192,9 +192,11 @@ pub async fn compress_logs(
     uid: ArrayData,
     index_name: String,
     group_number: usize,
-    timestamp_bytes: usize,
-    timestamp_format: String,
+    timestamp_bytes: Option<usize>,
+    timestamp_format: Option<String>,
 ) -> Result<(), LavaError> {
+    let extract_timestamp = timestamp_bytes.is_some() && timestamp_format.is_some();
+
     let array = make_array(array);
     // let uid = make_array(ArrayData::from_pyarrow(uid)?);
     let uid = make_array(uid);
@@ -243,34 +245,38 @@ pub async fn compress_logs(
         if line.is_empty() {
             continue;
         }
+        if extract_timestamp {
+            let timestamp_bytes = timestamp_bytes.unwrap();
+            let timestamp_format = timestamp_format.clone().unwrap();
+            // Attempt to parse the timestamp
+            let mut epoch_ts = if line.len() >= timestamp_bytes {
+                let extract_timestamp_from_this_line = &line[..timestamp_bytes];
+                match NaiveDateTime::parse_from_str(extract_timestamp_from_this_line.trim(), &timestamp_format) {
+                    Ok(dt) => dt.timestamp() as u64,
+                    Err(_) => last_timestamp,
+                }
+            } else {
+                last_timestamp
+            };
 
-        // Attempt to parse the timestamp
-        let mut epoch_ts = if line.len() >= timestamp_bytes {
-            let extract_timestamp_from_this_line = &line[..timestamp_bytes];
-            match NaiveDateTime::parse_from_str(extract_timestamp_from_this_line.trim(), &timestamp_format) {
-                Ok(dt) => dt.timestamp() as u64,
-                Err(_) => last_timestamp,
+            // Check if the timestamp is valid
+            if !is_valid_timestamp(epoch_ts) {
+                if last_timestamp == 0 {
+                    eprintln!("Unable to backfill timestamp for a log line, most likely because the start of a file does not contain valid timestamp");
+                    eprintln!("This will lead to wrong extracted timestamps");
+                    eprintln!(
+                        "Attempted to parse '{}' with '{}'",
+                        &line[..std::cmp::min(timestamp_bytes, line.len())],
+                        timestamp_format
+                    );
+                }
+                // Use last_timestamp even if it's 0
+                epoch_ts = last_timestamp;
+            } else {
+                // Update last_timestamp with the valid timestamp
+                last_timestamp = epoch_ts;
             }
-        } else {
-            last_timestamp
-        };
-
-        // Check if the timestamp is valid
-        if !is_valid_timestamp(epoch_ts) {
-            if last_timestamp == 0 {
-                eprintln!("Unable to backfill timestamp for a log line, most likely because the start of a file does not contain valid timestamp");
-                eprintln!("This will lead to wrong extracted timestamps");
-                eprintln!(
-                    "Attempted to parse '{}' with '{}'",
-                    &line[..std::cmp::min(timestamp_bytes, line.len())],
-                    timestamp_format
-                );
-            }
-            // Use last_timestamp even if it's 0
-            epoch_ts = last_timestamp;
-        } else {
-            // Update last_timestamp with the valid timestamp
-            last_timestamp = epoch_ts;
+            epoch_ts_vector.push(epoch_ts);
         }
         if samples.len() < TOTAL_SAMPLE_LINES {
             samples.push(line);
@@ -285,7 +291,6 @@ pub async fn compress_logs(
         current_chunk.push('\n');
         current_uids.push(ind);
 
-        epoch_ts_vector.push(epoch_ts);
         log_vector.push(line);
 
         // Check if the current chunk has reached the maximum size

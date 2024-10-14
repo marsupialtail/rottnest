@@ -1,6 +1,7 @@
 use crate::lava::constants::*;
 use crate::lava::fm_chunk::FMChunk;
 use crate::lava::plist::PListChunk;
+use crate::lava::wavelet_tree::search_wavelet_tree_from_reader;
 use crate::{
     formats::readers::{
         get_file_size_and_reader, get_file_sizes_and_readers, get_reader, get_readers, AsyncReader,
@@ -11,6 +12,7 @@ use crate::{
 use byteorder::{ByteOrder, LittleEndian, ReadBytesExt};
 use itertools::Itertools;
 use ndarray::{concatenate, stack, Array1, Array2, Axis};
+use serde::de::DeserializeOwned;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::Instant;
@@ -23,11 +25,13 @@ use tokio::task::JoinSet;
 use zstd::stream::read::Decoder;
 
 use super::trie::FastTrie;
+use super::wavelet_tree;
 use futures::stream::{FuturesUnordered, StreamExt};
 use std::cmp::Ordering;
 use std::io::{self, Cursor};
 
 enum QueryParam {
+    SubstringCharWavelet(Vec<Vec<u8>>),
     SubstringChar(Vec<Vec<u8>>),
     Substring(Vec<Vec<u32>>),
     Uuid(String),
@@ -163,83 +167,95 @@ where
     res
 }
 
-// async fn search_substring_wavelet(
-//     file_id: u64,
-//     mut reader: AsyncReader,
-//     file_size: usize,
-//     queries: Vec<Vec<u8>>,
-// ) -> Result<Vec<(u64, u64)>, LavaError> {
-//     println!("{:?}", queries);
+async fn read_and_decompress<T>(reader: &mut AsyncReader, start: u64, size: u64) -> Result<T, LavaError>
+where
+    T: DeserializeOwned,
+{
+    let compressed = reader.read_range(start, start + size).await?;
+    let mut decompressor = Decoder::new(&compressed[..]).unwrap();
+    let mut decompressed = Vec::new();
+    std::io::copy(&mut decompressor, &mut decompressed)?;
+    let result: T = bincode::deserialize(&decompressed)?;
+    Ok(result)
+}
 
-//     let results = reader.read_usize_from_end(2).await?;
-//     let posting_list_offsets_offset = results[0];
-//     let n = results[1];
+async fn search_substring_wavelet(
+    file_id: u64,
+    mut reader: AsyncReader,
+    file_size: usize,
+    queries: Vec<Vec<u8>>,
+) -> Result<Vec<(u64, u64)>, LavaError> {
+    println!("{:?}", queries);
 
-//     let posting_list_offsets: Vec<u64> =
-//         reader.read_range_and_decompress(posting_list_offsets_offset, (file_size - 16) as u64).await?;
+    let metadata_start = reader.read_usize_from_end(1).await?[0];
 
-//     let mut query_set = JoinSet::new();
+    let metadata: (Vec<usize>, Vec<usize>, Vec<usize>, Vec<usize>, usize) =
+        read_and_decompress(&mut reader, metadata_start as u64, file_size as u64 - metadata_start - 8).await.unwrap();
+    let (offsets, level_offsets, posting_list_offsets, cumulative_counts, n) = metadata;
 
-//     for query in queries {
-//         let mut reader = reader.clone();
+    // let mut query_set = JoinSet::new();
 
-//         let mut res: Vec<(u64, u64)> = vec![];
-//         let mut start: usize = 0;
-//         let mut end: usize = n as usize;
+    let mut res: Vec<(u64, u64)> = vec![];
 
-//         let start_offset = posting_list_offsets[start / FM_CHUNK_TOKS];
-//         let end_offset = posting_list_offsets[end / FM_CHUNK_TOKS + 1];
-//         let total_chunks = end / FM_CHUNK_TOKS - start / FM_CHUNK_TOKS + 1;
+    for query in queries {
+        let mut reader = reader.clone();
+        let (start, end) =
+            search_wavelet_tree_from_reader(&mut reader, &query, n, &offsets, &level_offsets, &cumulative_counts)
+                .await?;
 
-//         let plist_chunks = reader.read_range(start_offset, end_offset).await.unwrap();
+        println!("{} {}", start, end);
 
-//         let mut chunk_set = JoinSet::new();
+        let start_offset = posting_list_offsets[start / FM_CHUNK_TOKS];
+        let end_offset = posting_list_offsets[end / FM_CHUNK_TOKS + 1];
+        let total_chunks = end / FM_CHUNK_TOKS - start / FM_CHUNK_TOKS + 1;
 
-//         for i in 0..total_chunks {
-//             let this_start = posting_list_offsets[start / FM_CHUNK_TOKS + i];
-//             let this_end = posting_list_offsets[start / FM_CHUNK_TOKS + i + 1];
-//             let this_chunk =
-//                 plist_chunks[(this_start - start_offset) as usize..(this_end - start_offset) as usize].to_vec();
+        let plist_chunks = reader.read_range(start_offset as u64, end_offset as u64).await.unwrap();
 
-//             chunk_set.spawn(async move {
-//                 let mut decompressor = Decoder::new(&this_chunk[..]).unwrap();
-//                 let mut serialized_plist_chunk: Vec<u8> = Vec::with_capacity(this_chunk.len());
-//                 decompressor.read_to_end(&mut serialized_plist_chunk).unwrap();
-//                 let plist_chunk: Vec<u64> = bincode::deserialize(&serialized_plist_chunk).unwrap();
+        let mut chunk_set = JoinSet::new();
 
-//                 let chunk_res: Vec<(u64, u64)> = if i == 0 {
-//                     if total_chunks == 1 {
-//                         plist_chunk[start % FM_CHUNK_TOKS..end % FM_CHUNK_TOKS]
-//                             .iter()
-//                             .map(|&uid| (file_id, uid))
-//                             .collect()
-//                     } else {
-//                         plist_chunk[start % FM_CHUNK_TOKS..].iter().map(|&uid| (file_id, uid)).collect()
-//                     }
-//                 } else if i == total_chunks - 1 {
-//                     plist_chunk[..end % FM_CHUNK_TOKS].iter().map(|&uid| (file_id, uid)).collect()
-//                 } else {
-//                     plist_chunk.iter().map(|&uid| (file_id, uid)).collect()
-//                 };
+        for i in 0..total_chunks {
+            let this_start = posting_list_offsets[start / FM_CHUNK_TOKS + i];
+            let this_end = posting_list_offsets[start / FM_CHUNK_TOKS + i + 1];
+            let this_chunk =
+                plist_chunks[(this_start - start_offset) as usize..(this_end - start_offset) as usize].to_vec();
 
-//                 chunk_res
-//             });
-//         }
+            chunk_set.spawn(async move {
+                let mut decompressor = Decoder::new(&this_chunk[..]).unwrap();
+                let mut serialized_plist_chunk: Vec<u8> = Vec::with_capacity(this_chunk.len());
+                decompressor.read_to_end(&mut serialized_plist_chunk).unwrap();
+                let plist_chunk: Vec<u64> = bincode::deserialize(&serialized_plist_chunk).unwrap();
 
-//         while let Some(chunk_res) = chunk_set.join_next().await {
-//             res.extend(chunk_res.unwrap());
-//         }
+                let chunk_res: Vec<(u64, u64)> = if i == 0 {
+                    if total_chunks == 1 {
+                        plist_chunk[start % FM_CHUNK_TOKS..end % FM_CHUNK_TOKS]
+                            .iter()
+                            .map(|&uid| (file_id, uid))
+                            .collect()
+                    } else {
+                        plist_chunk[start % FM_CHUNK_TOKS..].iter().map(|&uid| (file_id, uid)).collect()
+                    }
+                } else if i == total_chunks - 1 {
+                    plist_chunk[..end % FM_CHUNK_TOKS].iter().map(|&uid| (file_id, uid)).collect()
+                } else {
+                    plist_chunk.iter().map(|&uid| (file_id, uid)).collect()
+                };
 
-//         res
-//     }
+                chunk_res
+            });
+        }
 
-//     let mut res = Vec::new();
-//     while let Some(query_res) = query_set.join_next().await {
-//         res.extend(query_res.unwrap());
-//     }
+        while let Some(chunk_res) = chunk_set.join_next().await {
+            res.extend(chunk_res.unwrap());
+        }
+    }
 
-//     Ok(res)
-// }
+    // let mut res = Vec::new();
+    // while let Some(query_res) = query_set.join_next().await {
+    //     res.extend(query_res.unwrap());
+    // }
+
+    Ok(res)
+}
 
 async fn search_substring_one_file<T>(
     file_id: u64,
@@ -345,6 +361,9 @@ async fn search_generic_async(
             }
             QueryParam::SubstringChar(ref value) => {
                 join_set.spawn(search_substring_one_file::<u8>(file_id as u64, reader, file_size, value.clone()));
+            }
+            QueryParam::SubstringCharWavelet(ref value) => {
+                join_set.spawn(search_substring_wavelet(file_id as u64, reader, file_size, value.clone()));
             }
             QueryParam::Uuid(ref value) => {
                 join_set.spawn(search_uuid_one_file(file_id as u64, reader, file_size, value.clone()));
@@ -595,6 +614,7 @@ pub async fn _search_lava_substring_char(
     reader_type: ReaderType,
     token_viable_limit: Option<usize>,
     sample_factor: Option<usize>,
+    wavelet_tree: bool,
 ) -> Result<Vec<(u64, u64)>, LavaError> {
     let lower: String = query.chars().flat_map(|c| c.to_lowercase()).collect();
     let result: Vec<u8> = lower.chars().filter(|id| !SKIP.chars().contains(id)).map(|c| c as u8).collect();
@@ -622,7 +642,13 @@ pub async fn _search_lava_substring_char(
     println!("query {:?}", query);
 
     let (file_sizes, readers) = get_file_sizes_and_readers(&files, reader_type).await?;
-    search_generic_async(file_sizes, readers, QueryParam::SubstringChar(query), k).await
+    search_generic_async(
+        file_sizes,
+        readers,
+        if wavelet_tree { QueryParam::SubstringCharWavelet(query) } else { QueryParam::SubstringChar(query) },
+        k,
+    )
+    .await
 }
 
 #[tokio::main]
@@ -634,7 +660,7 @@ pub async fn search_lava_substring_char(
     token_viable_limit: Option<usize>,
     sample_factor: Option<usize>,
 ) -> Result<Vec<(u64, u64)>, LavaError> {
-    _search_lava_substring_char(files, query, k, reader_type, token_viable_limit, sample_factor).await
+    _search_lava_substring_char(files, query, k, reader_type, token_viable_limit, sample_factor, false).await
 }
 
 fn bytes_to_f32_vec(bytes: &[u8]) -> Vec<f32> {

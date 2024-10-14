@@ -9,7 +9,7 @@ use crate::{
         get_file_size_and_reader, get_file_sizes_and_readers, get_reader, AsyncReader, ClonableAsyncReader, ReaderType,
     },
     lava::{
-        build::_build_lava_substring_char,
+        build::{_build_lava_substring_char, _build_lava_substring_char_wavelet},
         error::LavaError,
         logcloud_common::{get_all_types, get_type, PListChunk, PlistSize},
         search::_search_lava_substring_char,
@@ -26,6 +26,8 @@ use std::{
     io::{self, Read},
 };
 use zstd::stream::{encode_all, read::Decoder};
+
+use super::wavelet_tree;
 
 const BRUTE_THRESHOLD: usize = 5;
 const USE_EXPERIMENTAL_NUMERICS: bool = false;
@@ -548,6 +550,7 @@ pub async fn search_hawaii_oahu(
     oahu_size: usize,
     query: String,
     limit: usize,
+    wavelet_tree: bool,
 ) -> Result<Vec<(usize, PlistSize)>, LavaError> {
     info!("query: {}", query);
 
@@ -566,6 +569,8 @@ pub async fn search_hawaii_oahu(
     .await?;
     let (types, type_offsets, byte_offsets, hawaii_types) = metadata_page;
 
+    println!("Hawaii types: {:?}", hawaii_types);
+
     // see if anything in hawaii_types intersects with type_to_search
 
     let type_intersection =
@@ -577,12 +582,20 @@ pub async fn search_hawaii_oahu(
     let mut chunks: Vec<u64> = if type_intersection.is_empty() {
         vec![]
     } else {
-        _search_lava_substring_char(vec![hawaii_filename], query.clone(), limit, ReaderType::default(), None, None)
-            .await
-            .unwrap()
-            .into_iter()
-            .map(|(_, x)| x)
-            .collect_vec()
+        _search_lava_substring_char(
+            vec![hawaii_filename],
+            query.clone(),
+            limit,
+            ReaderType::default(),
+            None,
+            None,
+            wavelet_tree,
+        )
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|(_, x)| x)
+        .collect_vec()
     };
     println!("chunks {:?}", chunks);
 
@@ -673,11 +686,16 @@ pub async fn search_hawaii_oahu(
 }
 
 #[tokio::main]
-pub async fn index_logcloud(index_name: &str, num_groups: usize) {
+pub async fn index_logcloud(index_name: &str, num_groups: usize, use_wavelet: Option<bool>) {
+    let use_wavelet = use_wavelet.unwrap_or(false);
     let _ = compact(num_groups);
     let _ = write_kauai(index_name, num_groups).unwrap();
     let texts: Vec<(u64, String)> = write_oahu(index_name);
-    let _ = _build_lava_substring_char(format!("{}.hawaii", index_name), texts, 1).await.unwrap();
+    if use_wavelet {
+        let _ = _build_lava_substring_char_wavelet(format!("{}.hawaii", index_name), texts, 1).await.unwrap();
+    } else {
+        let _ = _build_lava_substring_char(format!("{}.hawaii", index_name), texts, 1).await.unwrap();
+    }
 }
 
 #[tokio::main]
@@ -686,6 +704,7 @@ pub async fn search_logcloud(
     query: String,
     limit: usize,
     reader_type: ReaderType,
+    wavelet_tree: bool,
 ) -> Result<(u32, Vec<(usize, PlistSize)>), LavaError> {
     info!("split_index_prefixes: {:?}", split_index_prefixes);
 
@@ -751,12 +770,14 @@ pub async fn search_logcloud(
         let hawaii_filename = hawaii_filenames.remove(0);
         let query_clone = query.clone();
         set.spawn(async move {
-            search_hawaii_oahu(file_id, hawaii_filename, reader_oahu, oahu_size, query_clone, new_limit)
+            search_hawaii_oahu(file_id, hawaii_filename, reader_oahu, oahu_size, query_clone, new_limit, wavelet_tree)
+                .await
+                .unwrap()
         });
     }
 
     while let Some(result) = set.join_next().await {
-        let result = result.unwrap().await.unwrap();
+        let result = result.unwrap();
         all_uids.extend(result);
         if all_uids.len() >= limit {
             return Ok((1, all_uids));

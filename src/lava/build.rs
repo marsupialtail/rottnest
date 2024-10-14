@@ -273,11 +273,17 @@ pub async fn _build_lava_substring_char_wavelet(
         }
     }
 
+    let mut cumulative_counts = vec![0; 256];
+    cumulative_counts[0] = 0;
+    for i in 1..256 {
+        cumulative_counts[i] = cumulative_counts[i - 1] + total_counts[i - 1];
+    }
+
     let wavelet_tree = construct_wavelet_tree(&bwt);
 
     let mut file = File::create(output_file_name)?;
 
-    let _ = write_wavelet_tree_to_disk(&wavelet_tree, &total_counts, bwt.len(), &mut file).unwrap();
+    let (offsets, level_offsets) = write_wavelet_tree_to_disk(&wavelet_tree, &mut file).unwrap();
 
     // print out total file size so far
     println!("total file size: {}", file.seek(SeekFrom::Current(0))?);
@@ -292,15 +298,15 @@ pub async fn _build_lava_substring_char_wavelet(
         posting_list_offsets.push(file.seek(SeekFrom::Current(0))? as usize);
     }
 
+    let metadata: (Vec<usize>, Vec<usize>, Vec<usize>, Vec<usize>, usize) =
+        (offsets, level_offsets, posting_list_offsets, cumulative_counts, bwt.len());
+
     let cache_start = file.seek(SeekFrom::Current(0))? as usize;
 
-    let posting_list_offsets_offset = file.seek(SeekFrom::Current(0))? as usize;
-    let serialized_posting_list_offsets = bincode::serialize(&posting_list_offsets)?;
-    let compressed_posting_list_offsets =
-        encode_all(&serialized_posting_list_offsets[..], 0).expect("Compression failed");
-    file.write_all(&compressed_posting_list_offsets)?;
-    file.write_all(&(posting_list_offsets_offset as u64).to_le_bytes())?;
-    file.write_all(&(bwt.len() as u64).to_le_bytes())?;
+    let serialized_metadata = bincode::serialize(&metadata)?;
+    let compressed_metadata = encode_all(&serialized_metadata[..], 0).expect("Compression failed");
+    file.write_all(&compressed_metadata)?;
+    file.write_all(&cache_start.to_le_bytes())?;
 
     let cache_end = file.seek(SeekFrom::Current(0))? as usize;
 

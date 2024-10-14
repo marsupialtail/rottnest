@@ -45,15 +45,11 @@ fn pack_bits(bits: &[bool]) -> Vec<u8> {
 
 pub(crate) fn write_wavelet_tree_to_disk(
     tree: &WaveletTree,
-    c: &[usize],
-    n: usize,
     file: &mut File,
-) -> std::io::Result<()> {
+) -> std::io::Result<(Vec<usize>, Vec<usize>)> {
     let mut total_length = 0;
     let mut offsets = vec![0];
     let mut level_offsets = vec![0];
-
-    let base_offset = file.stream_position()?;
 
     for (i, bitvector) in tree.iter().enumerate() {
         if bitvector.is_empty() {
@@ -87,30 +83,9 @@ pub(crate) fn write_wavelet_tree_to_disk(
     info!("{}", total_length);
     info!("number of chunks {}", offsets.len());
 
-    let compressed_offsets =
-        encode_all(offsets.iter().flat_map(|&x| x.to_le_bytes()).collect::<Vec<_>>().as_slice(), 0)?;
-    let compressed_offsets_byte_offset = file.stream_position()? - base_offset;
-    file.write_all(&compressed_offsets)?;
-    info!("compressed offsets size {}", compressed_offsets.len());
+    let metadata: (Vec<usize>, Vec<usize>) = (offsets, level_offsets);
 
-    let compressed_level_offsets =
-        encode_all(level_offsets.iter().flat_map(|&x| x.to_le_bytes()).collect::<Vec<_>>().as_slice(), 0)?;
-    let compressed_level_offsets_byte_offset = file.stream_position()? - base_offset;
-    file.write_all(&compressed_level_offsets)?;
-
-    let compressed_c = encode_all(c.iter().flat_map(|&x| x.to_le_bytes()).collect::<Vec<_>>().as_slice(), 0)?;
-    let compressed_c_byte_offset = file.stream_position()? - base_offset;
-    file.write_all(&compressed_c)?;
-
-    file.write_all(&compressed_offsets_byte_offset.to_le_bytes())?;
-    file.write_all(&compressed_level_offsets_byte_offset.to_le_bytes())?;
-    file.write_all(&compressed_c_byte_offset.to_le_bytes())?;
-    file.write_all(&n.to_le_bytes())?;
-
-    let metadata = (offsets, level_offsets, c, n);
-    let compressed_metadata = encode_all(bincode::serialize(&metadata).unwrap().as_slice(), 10)?;
-
-    Ok(())
+    Ok(metadata)
 }
 
 pub(crate) fn search_wavelet_tree(tree: &WaveletTree, c: &[usize], p: &[u8], n: usize) -> (usize, usize) {
@@ -138,50 +113,13 @@ pub(crate) fn search_wavelet_tree(tree: &WaveletTree, c: &[usize], p: &[u8], n: 
     (start, end)
 }
 
-async fn read_metadata_from_file(
+async fn read_chunk_from_reader(
     reader: &mut AsyncReader,
-    file_size: usize,
-) -> std::io::Result<(usize, Vec<usize>, Vec<usize>, Vec<usize>)> {
-    let stuff = reader.read_usize_from_end(4).await.unwrap();
-    let compressed_offsets_byte_offset = stuff[0];
-    let compressed_level_offsets_byte_offset = stuff[1];
-    let compressed_c_byte_offset = stuff[2];
-    let n = stuff[3];
-
-    let buffer = reader.read_range(compressed_offsets_byte_offset, file_size as u64 - 32).await.unwrap();
-
-    let compressed_offsets = &buffer[..compressed_level_offsets_byte_offset - compressed_offsets_byte_offset];
-    let decompressed_offsets = decode_all(compressed_offsets)?;
-    let offsets: Vec<usize> =
-        decompressed_offsets.chunks_exact(8).map(|chunk| usize::from_le_bytes(chunk.try_into().unwrap())).collect();
-
-    let compressed_level_offsets = &buffer[compressed_level_offsets_byte_offset - compressed_offsets_byte_offset
-        ..compressed_c_byte_offset - compressed_offsets_byte_offset];
-    let decompressed_level_offsets = decode_all(compressed_level_offsets)?;
-    let level_offsets: Vec<usize> = decompressed_level_offsets
-        .chunks_exact(8)
-        .map(|chunk| usize::from_le_bytes(chunk.try_into().unwrap()))
-        .collect();
-
-    let compressed_c = &buffer[compressed_c_byte_offset - compressed_offsets_byte_offset..];
-    let decompressed_c = decode_all(compressed_c)?;
-    let c: Vec<usize> =
-        decompressed_c.chunks_exact(8).map(|chunk| usize::from_le_bytes(chunk.try_into().unwrap())).collect();
-
-    file.seek(SeekFrom::Start(0))?;
-    Ok((n, c, level_offsets, offsets))
-}
-
-fn read_chunk_from_file(
-    file: &mut File,
     start_byte: usize,
     end_byte: usize,
-) -> std::io::Result<(usize, usize, Bitvector)> {
-    file.seek(SeekFrom::Start(start_byte as u64))?;
-    let mut compressed_chunk = vec![0u8; end_byte - start_byte];
-    file.read_exact(&mut compressed_chunk)?;
-
-    let decompressed_chunk = decode_all(&compressed_chunk[..])?;
+) -> (usize, usize, Bitvector) {
+    let compressed_chunk = reader.read_range(start_byte as u64, end_byte as u64).await.unwrap();
+    let decompressed_chunk = decode_all(&compressed_chunk[..]).unwrap();
 
     let rank_0 = usize::from_le_bytes(decompressed_chunk[..8].try_into().unwrap());
     let rank_1 = usize::from_le_bytes(decompressed_chunk[8..16].try_into().unwrap());
@@ -192,12 +130,11 @@ fn read_chunk_from_file(
         .take(CHUNK_BITS)
         .collect();
 
-    file.seek(SeekFrom::Start(0))?;
-    Ok((rank_0, rank_1, chunk))
+    (rank_0, rank_1, chunk)
 }
 
-fn wavelet_tree_rank_from_file(
-    file: &mut File,
+async fn wavelet_tree_rank_from_reader(
+    reader: &mut AsyncReader,
     level_offsets: &[usize],
     offsets: &[usize],
     c: u8,
@@ -212,7 +149,7 @@ fn wavelet_tree_rank_from_file(
         let chunk_start = offsets[chunk_id];
         let chunk_end = offsets[chunk_id + 1];
 
-        let (rank_0, rank_1, chunk) = read_chunk_from_file(file, chunk_start, chunk_end)?;
+        let (rank_0, rank_1, chunk) = read_chunk_from_reader(reader, chunk_start, chunk_end).await;
         curr_pos = bitvector_rank(&chunk, bit, curr_pos % CHUNK_BITS) + if bit { rank_1 } else { rank_0 };
 
         counter = counter * 2 + if bit { 1 } else { 0 } + 1;
@@ -221,21 +158,27 @@ fn wavelet_tree_rank_from_file(
     Ok(curr_pos)
 }
 
-fn search_wavelet_tree_file(file: &mut File, p: &[u8]) -> std::io::Result<(usize, usize)> {
-    let (n, c, level_offsets, offsets) = read_metadata_from_file(file)?;
+pub(crate) async fn search_wavelet_tree_from_reader(
+    reader: &mut AsyncReader,
+    p: &[u8],
+    n: usize,
+    offsets: &[usize],
+    level_offsets: &[usize],
+    c: &[usize],
+) -> std::io::Result<(usize, usize)> {
     let mut start = 0;
     let mut end = n + 1;
     let mut previous_range = usize::MAX;
 
     for &ch in p.iter().rev() {
-        info!("c: {}", ch as char);
+        println!("c: {}", ch as char);
 
-        start = c[ch as usize] + wavelet_tree_rank_from_file(file, &level_offsets, &offsets, ch, start)?;
-        end = c[ch as usize] + wavelet_tree_rank_from_file(file, &level_offsets, &offsets, ch, end)?;
+        start = c[ch as usize] + wavelet_tree_rank_from_reader(reader, &level_offsets, &offsets, ch, start).await?;
+        end = c[ch as usize] + wavelet_tree_rank_from_reader(reader, &level_offsets, &offsets, ch, end).await?;
 
-        info!("start: {}", start);
-        info!("end: {}", end);
-        info!("range: {}", end - start);
+        println!("start: {}", start);
+        println!("end: {}", end);
+        println!("range: {}", end - start);
 
         if start >= end {
             info!("not found");
