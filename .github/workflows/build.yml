@@ -6,26 +6,27 @@ jobs:
   build-linux:
     name: Build Rust Project on Linux
     runs-on: ubuntu-latest
-
     container:
       image: ghcr.io/pyo3/maturin
-
     steps:
-      - uses: actions/checkout@v4
-        name: Checkout code
-
+      - name: Clone Repository
+        run: |
+          git clone https://github.com/${GITHUB_REPOSITORY}.git .
+          git checkout ${GITHUB_SHA}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          
       - name: Build with Maturin
         run: |
           yum update -y
           yum install -y openssl openssl-devel
           rustup default stable
           maturin build --release --features py --out dist
-
+          
       - uses: actions/upload-artifact@v4
         with:
           name: wheels-linux
-          path: dist/*
-  
+          path: dist/* 
   build-macos-arm:
     name: Build Rust Project on macOS Arm
     runs-on: macos-14
