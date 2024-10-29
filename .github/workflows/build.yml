@@ -20,7 +20,7 @@ jobs:
       - name: Build with Maturin
         run: |
           yum update -y
-          yum install -y openssl openssl-devel
+          yum install -y openssl openssl-devel perl-IPC-Cmd perl-core
           rustup default stable
           maturin build --release --features py --out dist
           
