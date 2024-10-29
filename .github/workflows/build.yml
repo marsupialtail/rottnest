@@ -23,7 +23,17 @@ jobs:
           yum install -y openssl openssl-devel perl-IPC-Cmd perl-core
           rustup default stable
           maturin build --release --features py --out dist
-          
+ 
+      - name: Create Release
+        run: |
+          RELEASE_RESPONSE=$(curl -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            https://api.github.com/repos/${GITHUB_REPOSITORY}/releases \
+            -d "{\"tag_name\":\"${GITHUB_SHA}\",\"name\":\"Build ${GITHUB_SHA}\",\"draft\":false,\"prerelease\":false}")
+          echo "RELEASE_ID=$(echo $RELEASE_RESPONSE | jq -r .id)" >> $GITHUB_ENV
+
+
       - name: Upload artifacts
         run: |
           cd dist
