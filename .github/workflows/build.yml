@@ -11,7 +11,7 @@ jobs:
       image: ghcr.io/pyo3/maturin
 
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v4
         name: Checkout code
 
       - name: Build with Maturin
@@ -21,7 +21,7 @@ jobs:
           rustup default stable
           maturin build --release --features py --out dist
 
-      - uses: actions/upload-artifact@v2
+      - uses: actions/upload-artifact@v4
         with:
           name: wheels-linux
           path: dist/*
@@ -31,11 +31,11 @@ jobs:
     runs-on: macos-14
 
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v4
         name: Checkout code
 
       - name: Setup Python
-        uses: actions/setup-python@v2
+        uses: actions/setup-python@v4
         with:
           python-version: '3.x'
 
@@ -54,7 +54,7 @@ jobs:
         run: |
           maturin build --release --features py --out dist
 
-      - uses: actions/upload-artifact@v2
+      - uses: actions/upload-artifact@v4
         with:
           name: wheels-macos-arm
           path: dist/*
@@ -64,7 +64,7 @@ jobs:
     runs-on: macos-14
 
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v4
         name: Checkout code
 
       - name: Install Docker
@@ -88,7 +88,7 @@ jobs:
           podman build -t docker.io/library/maturin-linux-arm64:latest -f Dockerfile.build .
           podman run --rm -v $(pwd):/app -w /app maturin-linux-arm64 --release --features py --out dist
 
-      - uses: actions/upload-artifact@v2
+      - uses: actions/upload-artifact@v4
         with:
           name: wheels-linux-arm
           path: dist/*
