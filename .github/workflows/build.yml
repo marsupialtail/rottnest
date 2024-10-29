@@ -11,6 +11,7 @@ jobs:
     steps:
       - name: Clone Repository
         run: |
+          git config --global --add safe.directory /__w/${GITHUB_REPOSITORY#*/}/${GITHUB_REPOSITORY#*/}
           git clone https://github.com/${GITHUB_REPOSITORY}.git .
           git checkout ${GITHUB_SHA}
         env:
@@ -26,7 +27,8 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: wheels-linux
-          path: dist/* 
+          path: dist/*
+
   build-macos-arm:
     name: Build Rust Project on macOS Arm
     runs-on: macos-14
