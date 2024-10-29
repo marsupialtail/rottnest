@@ -6,16 +6,18 @@ use rand::Rng;
 use rayon::slice::ParallelSliceMut;
 use std::collections::{HashMap, HashSet};
 use std::ffi::CString;
-use std::fs;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
+use std::{fs, panic};
 
 use crate::lava::error::LavaError;
 use crate::lava::logcloud_common::{get_all_types, get_type};
 
 const CHUNK_SIZE: usize = 67108864;
-const TOTAL_SAMPLE_LINES: usize = 3000000;
+// const CHUNK_SIZE: usize = 268435456;
+// const TOTAL_SAMPLE_LINES: usize = 3000000;
+const TOTAL_SAMPLE_SIZE: usize = 1_600_000_000;
 const OUTLIER_THRESHOLD: usize = 1000;
 
 extern "C" {
@@ -29,16 +31,24 @@ extern "C" {
 }
 
 fn trainer_wrapper_rust(sample_str: &str, output_path: &str) -> PyResult<()> {
+    let sample_str = remove_null_bytes(&sample_str);
     let sample_str_c =
         CString::new(sample_str).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())).unwrap();
+    // strip blackslashes from the sample_str
     let output_path_c =
         CString::new(output_path).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())).unwrap();
 
-    unsafe {
+    let result = panic::catch_unwind(|| unsafe {
         let result = trainer_wrapper(sample_str_c.as_ptr(), output_path_c.as_ptr());
         if result != 0 {
             return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("trainer_wrapper_c failed"));
         }
+        Ok(())
+    });
+
+    match result {
+        Ok(_) => println!("Function completed successfully"),
+        Err(_) => println!("An exception occurred"),
     }
     Ok(())
 }
@@ -214,11 +224,13 @@ pub async fn compress_logs(
         return Err(LavaError::Parse("The length of the array and the uid array must be the same".to_string()));
     }
 
-    let mut logs = Vec::with_capacity(array.len());
+    let mut logs1 = Vec::with_capacity(array.len());
     for i in 0..array.len() {
-        let log_line = array.value(i).trim();
-        logs.push(log_line);
+        let log_line = array.value(i).trim().replace("\\", "");
+        logs1.push(log_line);
     }
+    let logs: Vec<&str> = logs1.iter().map(|s| s.as_str()).collect();
+
     let mut inds = Vec::with_capacity(array.len());
     for i in 0..uid.len() {
         inds.push(uid.value(i) as usize);
@@ -226,6 +238,7 @@ pub async fn compress_logs(
 
     let template_prefix = format!("compressed/{}_{}", index_name, group_number);
     let mut samples = Vec::new();
+    let mut sample_total = 0;
     let mut chunks = Vec::new();
     let mut current_chunk = String::new();
     let mut chunk_uids = Vec::new();
@@ -237,7 +250,6 @@ pub async fn compress_logs(
     std::fs::create_dir_all(format!("compressed/{}", group_number))?;
 
     let mut epoch_ts_vector = Vec::new();
-    let mut log_vector = Vec::new();
 
     let mut last_timestamp = 0;
 
@@ -278,11 +290,14 @@ pub async fn compress_logs(
             }
             epoch_ts_vector.push(epoch_ts);
         }
-        if samples.len() < TOTAL_SAMPLE_LINES {
+        if sample_total < TOTAL_SAMPLE_SIZE {
             samples.push(line);
+            sample_total += line.len();
         } else {
             let j = rng.gen_range(0..global_line_count);
-            if j < TOTAL_SAMPLE_LINES {
+            if j < samples.len() {
+                sample_total -= samples[j].len();
+                sample_total += line.len();
                 samples[j] = line;
             }
         }
@@ -290,8 +305,6 @@ pub async fn compress_logs(
         current_chunk.push_str(&line);
         current_chunk.push('\n');
         current_uids.push(ind);
-
-        log_vector.push(line);
 
         // Check if the current chunk has reached the maximum size
         if current_chunk.len() >= CHUNK_SIZE {
@@ -308,6 +321,11 @@ pub async fn compress_logs(
     }
 
     let samples_str = samples.join("\n");
+    //write out samples_str to debug file
+    // let mut samples_file = File::create(format!("compressed/{}_samples.txt", group_number))?;
+    // samples_file.write_all(samples_str.as_bytes())?;
+    // samples_file.flush()?;
+
     let _ = trainer_wrapper_rust(&samples_str, &template_prefix).unwrap();
 
     for (chunk_index, chunk) in chunks.iter().enumerate() {

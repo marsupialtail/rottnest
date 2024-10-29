@@ -2,11 +2,13 @@ use itertools::Itertools;
 use log::{info, warn};
 use rand::Rng;
 use rayon::slice::ParallelSliceMut;
+use roaring::RoaringBitmap;
 use tokio::{task::JoinSet, time::sleep};
 
 use crate::{
     formats::readers::{
         get_file_size_and_reader, get_file_sizes_and_readers, get_reader, AsyncReader, ClonableAsyncReader, ReaderType,
+        READ_RANGE_COUNTER,
     },
     lava::{
         build::{_build_lava_substring_char, _build_lava_substring_char_wavelet},
@@ -16,10 +18,13 @@ use crate::{
     },
 };
 use serde::de::DeserializeOwned;
-use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::atomic::Ordering,
+};
 
 use std::{
     fs::{self, read_dir},
@@ -219,6 +224,7 @@ pub fn write_kauai(filename: &str, num_groups: usize) -> std::io::Result<()> {
             .count();
 
         for chunk in 0..total_chunks {
+            println!("Reading chunk {}", chunk);
             let eid_file = File::open(format!("compressed/{}/chunk{:04}.eid", group_number, chunk))?;
             // let mut outlier_file = File::open(format!("compressed/{}/chunk{:04}.outlier", group_number, chunk))?;
             let mut outlier_file: Option<BufReader<File>> =
@@ -284,6 +290,9 @@ pub fn write_kauai(filename: &str, num_groups: usize) -> std::io::Result<()> {
 
     let template_str = templates.join("\n") + "\n";
 
+    // print the length of the template str
+    println!("template length: {}", template_str.len());
+
     let mut outlier_type_str = String::new();
     let mut outlier_type_linenos = Vec::new();
     let outlier_file = File::open("compressed/outlier")?;
@@ -299,6 +308,8 @@ pub fn write_kauai(filename: &str, num_groups: usize) -> std::io::Result<()> {
             line.split_whitespace().filter_map(|s| s.parse().ok()).collect::<HashSet<_>>().into_iter().collect();
         outlier_type_linenos.push(numbers);
     }
+    // print out sum of each outlier length
+    println!("outlier length {:?}", outliers.iter().map(|s| s.len()).sum::<usize>());
     let outlier_str = outliers.join("") + "\n";
 
     let kauai_metadata: (String, String, Vec<Vec<u32>>, String, Vec<Vec<u32>>, String, Vec<Vec<u32>>) = (
@@ -331,6 +342,7 @@ async fn search_kauai(
 ) -> Result<(u32, Vec<(usize, PlistSize)>), LavaError> {
     let metadata_page_length = reader.read_usize_from_end(1).await?[0];
     // Read the metadata page
+    let start_time = std::time::Instant::now();
     let metadata_page: (String, String, Vec<Vec<PlistSize>>, String, Vec<Vec<PlistSize>>, String, Vec<Vec<PlistSize>>) =
         read_and_decompress(
             &mut reader,
@@ -340,6 +352,17 @@ async fn search_kauai(
         .await?;
     let (dictionary, template, template_plist, outlier, outlier_plist, outlier_type, outlier_type_plist) =
         metadata_page;
+
+    // print out all the sizes
+    println!("dictionary length: {}", dictionary.len());
+    println!("template length: {}", template.len());
+    println!("template_pl total size : {}", template_plist.iter().map(|x| x.len()).sum::<usize>());
+    println!("outlier length: {}", outlier.len());
+    println!("outlier_pl total size : {}", outlier_plist.iter().map(|x| x.len()).sum::<usize>());
+    println!("outlier_type length: {}", outlier_type.len());
+    println!("outlier_type_pl total size : {}", outlier_type_plist.iter().map(|x| x.len()).sum::<usize>());
+
+    let end_time = std::time::Instant::now();
 
     for (_, line) in dictionary.lines().enumerate() {
         if line.contains(&query) {
@@ -420,7 +443,7 @@ fn write_block(fp: &mut File, buffer: &str, lineno_buffer: &[Vec<PlistSize>], by
     byte_offsets.push(byte_offsets.last().unwrap() + compressed_buffer.len() + serialized.len() + 8);
 }
 
-const BLOCK_BYTE_LIMIT: usize = 1_000_000;
+const BLOCK_BYTE_LIMIT: usize = 1000000;
 
 pub fn write_oahu(output_name: &str) -> Vec<(u64, String)> {
     // Get all types by listing compressed/compacted_type* files
@@ -551,10 +574,11 @@ pub async fn search_hawaii_oahu(
     query: String,
     limit: usize,
     wavelet_tree: bool,
+    exact: bool,
 ) -> Result<Vec<(usize, PlistSize)>, LavaError> {
     info!("query: {}", query);
 
-    let types_to_search = get_all_types(get_type(&query));
+    let types_to_search = if exact { vec![get_type(&query)] } else { get_all_types(get_type(&query)) };
     for &type_to_search in &types_to_search {
         info!("type to search: {}", type_to_search);
     }
@@ -699,12 +723,128 @@ pub async fn index_logcloud(index_name: &str, num_groups: usize, use_wavelet: Op
 }
 
 #[tokio::main]
+pub async fn index_analysis(split_index_prefixes: Vec<String>, reader_type: ReaderType) -> () {
+    let mut oahu_filenames = split_index_prefixes
+        .iter()
+        .map(|split_index_prefix| format!("{}.oahu", split_index_prefix))
+        .collect::<Vec<_>>();
+
+    let mut hawaii_filenames = split_index_prefixes
+        .iter()
+        .map(|split_index_prefix| format!("{}.hawaii", split_index_prefix))
+        .collect::<Vec<_>>();
+
+    let (oahu_sizes, mut reader_oahus) =
+        get_file_sizes_and_readers(&oahu_filenames, reader_type.clone()).await.unwrap();
+    let (hawaii_sizes, mut reader_hawaiis) =
+        get_file_sizes_and_readers(&hawaii_filenames, reader_type.clone()).await.unwrap();
+
+    let mut total_fm_index_size = 0;
+    let mut total_suffix_array_size = 0;
+    let mut total_compressed_strings_length = 0;
+    let mut total_compressed_plist_length = 0;
+    let mut total_csr_length = 0;
+    let mut total_roaring_length = 0;
+
+    for (hawaii_size, mut reader_hawaii) in hawaii_sizes.into_iter().zip(reader_hawaiis.into_iter()) {
+        let results = reader_hawaii.read_usize_from_end(4).await.unwrap();
+        let posting_list_offsets_offset = results[1];
+        let total_counts_offset = results[2];
+
+        let posting_list_offsets: Vec<u64> =
+            reader_hawaii.read_range_and_decompress(posting_list_offsets_offset, total_counts_offset).await.unwrap();
+
+        total_fm_index_size += posting_list_offsets[0];
+        total_suffix_array_size += posting_list_offsets[posting_list_offsets.len() - 1] - posting_list_offsets[0];
+    }
+
+    for (oahu_size, mut reader_oahu) in oahu_sizes.into_iter().zip(reader_oahus.into_iter()) {
+        let metadata_page_length = reader_oahu.read_usize_from_end(1).await.unwrap()[0];
+        // Read the metadata page
+        let metadata_page: (Vec<i32>, Vec<usize>, Vec<usize>, Vec<i32>) = read_and_decompress(
+            &mut reader_oahu,
+            oahu_size as u64 - metadata_page_length as u64 - 8,
+            metadata_page_length as u64,
+        )
+        .await
+        .unwrap();
+        let (types, type_offsets, byte_offsets, hawaii_types) = metadata_page;
+
+        for i in 0..byte_offsets.len() - 1 {
+            let block = reader_oahu.read_range(byte_offsets[i] as u64, byte_offsets[i + 1] as u64).await.unwrap();
+            let compressed_strings_length = u64::from_le_bytes(block[0..8].try_into().unwrap()) as usize;
+            let compressed_strings = &block[8..8 + compressed_strings_length];
+
+            let mut decompressor = Decoder::new(compressed_strings).unwrap();
+            let mut decompressed_strings: Vec<u8> = Vec::with_capacity(compressed_strings.len() as usize);
+            decompressor.read_to_end(&mut decompressed_strings).unwrap();
+
+            let compressed_plist = &block[8 + compressed_strings_length..];
+            let plist = PListChunk::from_compressed(compressed_plist).unwrap();
+
+            let plist_data = plist.data();
+
+            let mut csr_offsets = vec![0];
+            let mut values = Vec::new();
+
+            let mut block_roaring_length = 0;
+            let mut total_serialized_string = Vec::new();
+            let mut roaring_offsets = vec![0];
+
+            for plist in plist_data {
+                let mut r = RoaringBitmap::new();
+
+                csr_offsets.push(csr_offsets.last().unwrap() + plist.len());
+
+                for &i in plist {
+                    r.insert(i);
+                    values.push(i);
+                }
+
+                let mut serialized_bitmap = vec![];
+                r.serialize_into(&mut serialized_bitmap).unwrap();
+                total_serialized_string.extend_from_slice(&serialized_bitmap);
+                roaring_offsets.push(roaring_offsets.last().unwrap() + serialized_bitmap.len());
+            }
+
+            let compressed_roaring_offsets =
+                encode_all(&bincode::serialize(&roaring_offsets).unwrap()[..], 10).unwrap();
+            block_roaring_length =
+                encode_all(&total_serialized_string[..], 10).unwrap().len() + compressed_roaring_offsets.len();
+
+            // Compress CSR offsets and values
+            let compressed_csr_offsets = encode_all(&bincode::serialize(&csr_offsets).unwrap()[..], 10).unwrap();
+            let compressed_values = encode_all(&bincode::serialize(&values).unwrap()[..], 10).unwrap();
+
+            // println!("Block {} compressed csr offsets length: {}", i, compressed_csr_offsets.len());
+            // println!("Block {} compressed values length: {}", i, compressed_values.len());
+            // println!("Block {} compressed strings length: {}", i, compressed_strings_length);
+            // println!("Block {} compressed plist length: {}", i, compressed_plist.len());
+            // println!("Block {} compressed roaring length: {}", i, block_roaring_length);
+
+            total_compressed_strings_length += compressed_strings_length;
+            total_compressed_plist_length += compressed_plist.len();
+            total_csr_length += compressed_csr_offsets.len() + compressed_values.len();
+            total_roaring_length += block_roaring_length;
+        }
+    }
+
+    println!("Total fm index size: {}", total_fm_index_size);
+    println!("Total suffix array size: {}", total_suffix_array_size);
+    println!("Total compressed strings length: {}", total_compressed_strings_length);
+    println!("Total compressed plist length: {}", total_compressed_plist_length);
+    println!("Total compressed roaring length: {}", total_roaring_length);
+    println!("Total compressed csr length: {}", total_csr_length);
+}
+
+#[tokio::main]
 pub async fn search_logcloud(
     split_index_prefixes: Vec<String>,
     query: String,
     limit: usize,
     reader_type: ReaderType,
     wavelet_tree: bool,
+    exact: bool,
 ) -> Result<(u32, Vec<(usize, PlistSize)>), LavaError> {
     info!("split_index_prefixes: {:?}", split_index_prefixes);
 
@@ -770,9 +910,18 @@ pub async fn search_logcloud(
         let hawaii_filename = hawaii_filenames.remove(0);
         let query_clone = query.clone();
         set.spawn(async move {
-            search_hawaii_oahu(file_id, hawaii_filename, reader_oahu, oahu_size, query_clone, new_limit, wavelet_tree)
-                .await
-                .unwrap()
+            search_hawaii_oahu(
+                file_id,
+                hawaii_filename,
+                reader_oahu,
+                oahu_size,
+                query_clone,
+                new_limit,
+                wavelet_tree,
+                exact,
+            )
+            .await
+            .unwrap()
         });
     }
 
@@ -786,7 +935,10 @@ pub async fn search_logcloud(
 
     println!("oahu time {:?}", start_time.elapsed());
 
-    println!("all_uids {:?}", all_uids);
+    let count = READ_RANGE_COUNTER.load(Ordering::SeqCst);
+    println!("read_range has been called {} times", count);
+
+    // println!("all_uids {:?}", all_uids);
 
     Ok((1, all_uids))
 }

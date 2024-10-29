@@ -14,6 +14,12 @@ pub fn index_logcloud(py: Python, index_name: String, num_groups: usize, wavelet
 }
 
 #[pyfunction]
+pub fn index_analysis(py: Python, split_index_prefixes: Vec<String>, reader_type: Option<&PyString>) -> () {
+    let reader_type = reader_type.map(|x| x.to_string()).unwrap_or_default();
+    py.allow_threads(|| lava::index_analysis(split_index_prefixes, reader_type.into()))
+}
+
+#[pyfunction]
 pub fn search_logcloud(
     py: Python,
     split_index_prefixes: Vec<String>,
@@ -21,10 +27,18 @@ pub fn search_logcloud(
     limit: usize,
     reader_type: Option<&PyString>,
     wavelet_tree: Option<bool>,
+    exact: Option<bool>,
 ) -> Result<(u32, Vec<(usize, u32)>), LavaError> {
     let reader_type = reader_type.map(|x| x.to_string()).unwrap_or_default();
     py.allow_threads(|| {
-        lava::search_logcloud(split_index_prefixes, query, limit, reader_type.into(), wavelet_tree.unwrap_or(false))
+        lava::search_logcloud(
+            split_index_prefixes,
+            query,
+            limit,
+            reader_type.into(),
+            wavelet_tree.unwrap_or(false),
+            exact.unwrap_or(false),
+        )
     })
 }
 

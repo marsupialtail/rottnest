@@ -42,6 +42,7 @@ lazy_static = "1"
 bytes = "1"
 thiserror = "1"
 log = "0.4"
+roaring = "0.10"
 
 arrow-array = "52.0.0"
 arrow-select = "52.0.0"

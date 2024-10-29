@@ -11,6 +11,8 @@ import pyarrow.compute as pac
 import json
 import daft
 import multiprocessing
+import time
+
 
 from .nlp import query_expansion_keyword, query_expansion_llm
 from .utils import get_daft_io_config_from_file_path, get_fs_from_file_path, get_physical_layout, get_virtual_layout, read_columns, read_metadata_file,\
@@ -18,7 +20,7 @@ from .utils import get_daft_io_config_from_file_path, get_fs_from_file_path, get
 
 
 def index_files_logcloud(file_paths: List[str], column_name: str, name = uuid.uuid4().hex, remote = None, 
-                         prefix_bytes = None, prefix_format = None, batch_files = 8):
+                         prefix_bytes = None, prefix_format = None, batch_files = 8, wavelet = False):
     from tqdm import tqdm
     num_groups = 0
     curr_max = 0
@@ -39,7 +41,7 @@ def index_files_logcloud(file_paths: List[str], column_name: str, name = uuid.uu
         num_groups += 1
     
     polars.concat([polars.read_parquet(f"{i}.maui") for i in range(num_groups)]).write_parquet(f"{name}.maui")
-    rottnest.index_logcloud(name, num_groups)
+    rottnest.index_logcloud(name, num_groups, wavelet_tree = wavelet)
 
 def index_files_bm25(file_paths: list[str], column_name: str, name = uuid.uuid4().hex, index_mode = "physical", tokenizer_file = None):
 
@@ -291,27 +293,31 @@ def search_index_uuid(indices: List[str], query: str, K: int, columns = []):
     return return_full_result(result, metadata, column_name, columns)
 
 
-def search_index_logcloud(indices: List[str], query: str, K: int, columns = []):
+def search_index_logcloud(indices: List[str], query: str, K: int, columns = [], wavelet_tree = False, exact = False):
 
+    start = time.time()
     metadata = get_metadata_and_populate_cache(indices, suffix="maui")
-    
-    index_search_results = rottnest.search_logcloud(indices, query, K)
-    print(index_search_results)
+    index_search_results = rottnest.search_logcloud(indices, query, K, None, wavelet_tree, exact)
+    print("INDEX SEARCH TIME", time.time() - start)
+    # print(index_search_results)
 
     flag, index_search_results = index_search_results
 
     if flag == 1:
         if len(index_search_results) == 0:
             return None
-
+        index_search_results = index_search_results[:K]
+        
+        start = time.time()
         result, column_name, metadata = get_result_from_index_result(metadata, index_search_results)
         result =  polars.from_arrow(result).filter(polars.col(column_name).str.contains(query))
-
-        return return_full_result(result, metadata, column_name, columns)
-
+        result = return_full_result(result, metadata, column_name, columns)
+        print("PARQUET LOAD TIME", time.time() - start)
+        return result
     elif flag == 0:
-        reversed_filenames = metadata['file_path'].unique().to_list()[::-1]
+        reversed_filenames = sorted(metadata['file_path'].unique().to_list())[::-1]
         results = []
+        start_time = time.time()
         # you should search in reverse order in batches of 10
         for start in range(0, len(reversed_filenames), 10):
             batch = reversed_filenames[start:start+10]
@@ -323,7 +329,8 @@ def search_index_logcloud(indices: List[str], query: str, K: int, columns = []):
                 results.append(result)
                 if sum([len(r) for r in results]) > K:
                     break
-        
+
+        print("PARQUET LOAD TIME", time.time() - start_time)
         if len(results) > 0:
             return polars.concat(results)
         else:

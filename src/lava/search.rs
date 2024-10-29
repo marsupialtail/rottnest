@@ -205,6 +205,10 @@ async fn search_substring_wavelet(
 
         println!("{} {}", start, end);
 
+        if start == end {
+            continue;
+        }
+
         let start_offset = posting_list_offsets[start / FM_CHUNK_TOKS];
         let end_offset = posting_list_offsets[end / FM_CHUNK_TOKS + 1];
         let total_chunks = end / FM_CHUNK_TOKS - start / FM_CHUNK_TOKS + 1;
@@ -318,7 +322,6 @@ where
     while let Some(query_res) = query_set.join_next().await {
         res.extend(query_res.unwrap());
     }
-
     Ok(res)
 }
 
@@ -590,7 +593,7 @@ pub async fn search_lava_substring(
         vec![result]
     };
 
-    println!("query {:?}", query);
+    // println!("query {:?}", query);
 
     // query = [i[-token_viable_limit:] for i in query]
     if let Some(token_viable_limit) = token_viable_limit {
@@ -601,7 +604,7 @@ pub async fn search_lava_substring(
         });
     }
 
-    println!("query {:?}", query);
+    // println!("query {:?}", query);
 
     let (file_sizes, readers) = get_file_sizes_and_readers(&files, reader_type).await?;
     search_generic_async(file_sizes, readers, QueryParam::Substring(query), k).await
@@ -628,7 +631,7 @@ pub async fn _search_lava_substring_char(
         vec![result]
     };
 
-    println!("query {:?}", query);
+    // println!("query {:?}", query);
 
     // query = [i[-token_viable_limit:] for i in query]
     if let Some(token_viable_limit) = token_viable_limit {
@@ -639,7 +642,7 @@ pub async fn _search_lava_substring_char(
         });
     }
 
-    println!("query {:?}", query);
+    // println!("query {:?}", query);
 
     let (file_sizes, readers) = get_file_sizes_and_readers(&files, reader_type).await?;
     search_generic_async(

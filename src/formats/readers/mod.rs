@@ -87,6 +87,10 @@ impl DerefMut for ClonableAsyncReader {
     }
 }
 
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+pub static READ_RANGE_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
 impl AsyncReader {
     pub fn new(reader: ClonableAsyncReader, filename: String) -> Self {
         Self { reader, filename }
@@ -100,14 +104,11 @@ impl AsyncReader {
         if from >= to {
             return Err(LavaError::Io(std::io::ErrorKind::InvalidData.into()));
         }
+        READ_RANGE_COUNTER.fetch_add(1, Ordering::SeqCst);
 
         // only check the cache if self.filename has extension .lava
         if self.filename.ends_with(".lava") {
-            if "true"
-                == env::var_os("CACHE_ENABLE")
-                    .map(|s| s.to_ascii_lowercase())
-                    .unwrap_or_default()
-            {
+            if "true" == env::var_os("CACHE_ENABLE").map(|s| s.to_ascii_lowercase()).unwrap_or_default() {
                 // let path = std::path::Path::new(&value);
                 // find path/filename.cache
                 let mut conn = cache::get_redis_connection().await?;
@@ -120,9 +121,7 @@ impl AsyncReader {
                         if from >= start as u64 && to <= end as u64 {
                             println!("cache hit");
                             let data = conn.get_data(&self.filename, from, to).await?;
-                            let data = data
-                                [(from - start as u64) as usize..(to - start as u64) as usize]
-                                .to_vec();
+                            let data = data[(from - start as u64) as usize..(to - start as u64) as usize].to_vec();
                             return Ok(Bytes::from(data));
                         }
                     }
@@ -134,11 +133,7 @@ impl AsyncReader {
     }
 
     // theoretically we should try to return different types here, but Vec<u64> is def. the most common
-    pub async fn read_range_and_decompress(
-        &mut self,
-        from: u64,
-        to: u64,
-    ) -> Result<Vec<u64>, LavaError> {
+    pub async fn read_range_and_decompress(&mut self, from: u64, to: u64) -> Result<Vec<u64>, LavaError> {
         let compressed_posting_list_offsets = self.read_range(from, to).await?;
         let mut decompressor = Decoder::new(&compressed_posting_list_offsets[..])?;
         let mut serialized_posting_list_offsets: Vec<u8> =
@@ -149,9 +144,7 @@ impl AsyncReader {
     }
 
     pub async fn read_usize_from_end(&mut self, n: u64) -> Result<Vec<u64>, LavaError> {
-        self.deref_mut()
-            .read_usize_from_end(-8 * (n as i64), n)
-            .await
+        self.deref_mut().read_usize_from_end(-8 * (n as i64), n).await
     }
 }
 
@@ -201,22 +194,14 @@ pub async fn get_file_sizes_and_readers(
                 readers.push(reader);
             }
             Ok(Err(e)) => return Err(e), // Handle error from inner task
-            Err(e) => {
-                return Err(LavaError::Parse(format!(
-                    "Task join error: {}",
-                    e.to_string()
-                )))
-            } // Handle join error
+            Err(e) => return Err(LavaError::Parse(format!("Task join error: {}", e.to_string()))), // Handle join error
         }
     }
 
     Ok((file_sizes, readers))
 }
 
-pub async fn get_readers(
-    files: &[String],
-    reader_type: ReaderType,
-) -> Result<Vec<AsyncReader>, LavaError> {
+pub async fn get_readers(files: &[String], reader_type: ReaderType) -> Result<Vec<AsyncReader>, LavaError> {
     let tasks: Vec<_> = files
         .iter()
         .map(|file| {
@@ -238,12 +223,7 @@ pub async fn get_readers(
                 readers.push(reader);
             }
             Ok(Err(e)) => return Err(e), // Handle error from inner task
-            Err(e) => {
-                return Err(LavaError::Parse(format!(
-                    "Task join error: {}",
-                    e.to_string()
-                )))
-            } // Handle join error
+            Err(e) => return Err(LavaError::Parse(format!("Task join error: {}", e.to_string()))), // Handle join error
         }
     }
 

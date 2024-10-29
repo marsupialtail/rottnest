@@ -26,6 +26,7 @@ pub use search::search_lava_substring_char;
 pub use search::search_lava_uuid;
 pub use search::search_lava_vector;
 
+pub use logcloud::index_analysis;
 pub use logcloud::index_logcloud;
 pub use logcloud::search_logcloud;
 pub use logcloud_rex::compress_logs;

@@ -23,6 +23,7 @@ fn rottnest(_py: Python, m: &PyModule) -> PyResult<()> {
 
     m.add_function(wrap_pyfunction!(logcloud::index_logcloud, m)?)?;
     m.add_function(wrap_pyfunction!(logcloud::search_logcloud, m)?)?;
+    m.add_function(wrap_pyfunction!(logcloud::index_analysis, m)?)?;
     m.add_function(wrap_pyfunction!(logcloud::compress_logs, m)?)?;
 
     Ok(())
