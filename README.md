@@ -1,5 +1,7 @@
 # Rottnest : Data Lake Indices
 
+**Despite our affiliations, this is not an official Anthropic-supported project!** Please raise issues here on Github.
+
 You don't need ElasticSearch or some vector database to do full text search or vector search. Parquet + Rottnest is all you need. Rottnest is like Postgres indices for Parquet. Read more on what it can do for e.g. logs [here](LogCloud.pdf).
 
 ## Installation
