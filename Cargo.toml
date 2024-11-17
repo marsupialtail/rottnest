@@ -1,6 +1,6 @@
 [package]
 name = "rottnest"
-version = "1.4.0"
+version = "1.5.0"
 edition = "2021"
 build = "build.rs"
 
@@ -13,6 +13,7 @@ crate-type = ["cdylib"]
 default = []                                 #['py']
 py = ["dep:pyo3", "pyarrow", "dep:pyo3-log"]
 pyarrow = ["arrow/pyarrow"]
+logcloud = ["dep:libc"]
 
 
 [dependencies]
@@ -86,7 +87,7 @@ ordered-float = "4.2.0"
 reqwest = "0.12.4"
 redis = {version = "0", features = ["aio", "tokio-comp"] }
 divsufsort = "2.0.0"
-libc = "0.2.158"
+libc = { version = "0.2.158", optional = true }
 
 [profile.release]
 lto = false

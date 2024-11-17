@@ -11,8 +11,8 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::{fs, panic};
 
+use super::logcloud_common::{get_all_types, get_type};
 use crate::lava::error::LavaError;
-use crate::lava::logcloud_common::{get_all_types, get_type};
 
 const CHUNK_SIZE: usize = 67108864;
 // const CHUNK_SIZE: usize = 268435456;
@@ -32,16 +32,20 @@ extern "C" {
 
 fn trainer_wrapper_rust(sample_str: &str, output_path: &str) -> PyResult<()> {
     let sample_str = remove_null_bytes(&sample_str);
-    let sample_str_c =
-        CString::new(sample_str).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())).unwrap();
+    let sample_str_c = CString::new(sample_str)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
+        .unwrap();
     // strip blackslashes from the sample_str
-    let output_path_c =
-        CString::new(output_path).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())).unwrap();
+    let output_path_c = CString::new(output_path)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
+        .unwrap();
 
     let result = panic::catch_unwind(|| unsafe {
         let result = trainer_wrapper(sample_str_c.as_ptr(), output_path_c.as_ptr());
         if result != 0 {
-            return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("trainer_wrapper_c failed"));
+            return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "trainer_wrapper_c failed",
+            ));
         }
         Ok(())
     });
@@ -61,21 +65,33 @@ fn remove_null_bytes(s: &str) -> String {
     }
 }
 
-fn compressor_wrapper_rust(chunk: &str, output_path: &str, template_path: &str, prefix: i32) -> PyResult<()> {
+fn compressor_wrapper_rust(
+    chunk: &str,
+    output_path: &str,
+    template_path: &str,
+    prefix: i32,
+) -> PyResult<()> {
     let chunk_c = CString::new(remove_null_bytes(chunk))
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
         .unwrap();
-    let output_path_c =
-        CString::new(output_path).map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string())).unwrap();
+    let output_path_c = CString::new(output_path)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
+        .unwrap();
     let template_path_c = CString::new(template_path)
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))
         .unwrap();
 
     unsafe {
-        let result =
-            compressor_wrapper(chunk_c.as_ptr(), output_path_c.as_ptr(), template_path_c.as_ptr(), prefix as c_int);
+        let result = compressor_wrapper(
+            chunk_c.as_ptr(),
+            output_path_c.as_ptr(),
+            template_path_c.as_ptr(),
+            prefix as c_int,
+        );
         if result != 0 {
-            return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>("compressor_wrapper_c failed"));
+            return Err(PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(
+                "compressor_wrapper_c failed",
+            ));
         }
     }
     println!("compressor_wrapper_rust done");
@@ -85,7 +101,10 @@ fn compressor_wrapper_rust(chunk: &str, output_path: &str, template_path: &str, 
 fn get_variable_info(
     total_chunks: usize,
     group_number: usize,
-) -> PyResult<(HashMap<usize, HashSet<(i32, i32)>>, HashMap<i32, Vec<(i32, i32)>>)> {
+) -> PyResult<(
+    HashMap<usize, HashSet<(i32, i32)>>,
+    HashMap<i32, Vec<(i32, i32)>>,
+)> {
     let mut variable_to_type = HashMap::new();
     let mut chunk_variables: HashMap<usize, HashSet<(i32, i32)>> = HashMap::new();
     let mut eid_to_variables: HashMap<i32, HashSet<(i32, i32)>> = HashMap::new();
@@ -98,9 +117,9 @@ fn get_variable_info(
         for line in reader.lines() {
             let line = line?;
             let mut parts = line.split_whitespace();
-            let variable_str = parts
-                .next()
-                .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyValueError, _>("Invalid variable string"))?;
+            let variable_str = parts.next().ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>("Invalid variable string")
+            })?;
             let tag = parts
                 .next()
                 .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyValueError, _>("Invalid tag"))?
@@ -108,20 +127,32 @@ fn get_variable_info(
 
             let mut var_parts = variable_str.split('_');
 
-            let a_part = var_parts
-                .next()
-                .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyValueError, _>("Invalid variable format"))?;
-            let a =
-                a_part.chars().skip_while(|c| !c.is_digit(10)).collect::<String>().parse::<i32>().map_err(|_| {
-                    PyErr::new::<pyo3::exceptions::PyValueError, _>("Invalid integer in variable format")
+            let a_part = var_parts.next().ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>("Invalid variable format")
+            })?;
+            let a = a_part
+                .chars()
+                .skip_while(|c| !c.is_digit(10))
+                .collect::<String>()
+                .parse::<i32>()
+                .map_err(|_| {
+                    PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                        "Invalid integer in variable format",
+                    )
                 })?;
 
-            let b_part = var_parts
-                .next()
-                .ok_or_else(|| PyErr::new::<pyo3::exceptions::PyValueError, _>("Invalid variable format"))?;
-            let b =
-                b_part.chars().skip_while(|c| !c.is_digit(10)).collect::<String>().parse::<i32>().map_err(|_| {
-                    PyErr::new::<pyo3::exceptions::PyValueError, _>("Invalid integer in variable format")
+            let b_part = var_parts.next().ok_or_else(|| {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>("Invalid variable format")
+            })?;
+            let b = b_part
+                .chars()
+                .skip_while(|c| !c.is_digit(10))
+                .collect::<String>()
+                .parse::<i32>()
+                .map_err(|_| {
+                    PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                        "Invalid integer in variable format",
+                    )
                 })?;
 
             let variable = (a, b);
@@ -131,7 +162,10 @@ fn get_variable_info(
         }
     }
 
-    let eid_to_variables = eid_to_variables.into_iter().map(|(k, v)| (k, v.into_iter().collect())).collect();
+    let eid_to_variables = eid_to_variables
+        .into_iter()
+        .map(|(k, v)| (k, v.into_iter().collect()))
+        .collect();
 
     Ok((chunk_variables, eid_to_variables))
 }
@@ -161,19 +195,26 @@ fn compress_chunk(
     println!("compressing chunk");
 
     let chunk_filename = format!("compressed/{}/chunk{:04}", group_number, chunk_file_counter);
-    compressor_wrapper_rust(current_chunk, &chunk_filename, template_name, chunk_file_counter as i32)?;
+    compressor_wrapper_rust(
+        current_chunk,
+        &chunk_filename,
+        template_name,
+        chunk_file_counter as i32,
+    )?;
 
     // Rename files
     let source_dir = dir_path;
-    let target_dir =
-        Path::new("compressed").join(group_number.to_string()).join(format!("variable_{}", chunk_file_counter));
+    let target_dir = Path::new("compressed")
+        .join(group_number.to_string())
+        .join(format!("variable_{}", chunk_file_counter));
     println!("source_dir: {:?}", source_dir);
     println!("target_dir: {:?}", target_dir);
     std::fs::rename(&source_dir, &target_dir)?;
 
     let source_tag = tag_path;
-    let target_tag =
-        Path::new("compressed").join(group_number.to_string()).join(format!("variable_{}_tag.txt", chunk_file_counter));
+    let target_tag = Path::new("compressed")
+        .join(group_number.to_string())
+        .join(format!("variable_{}_tag.txt", chunk_file_counter));
 
     if !source_tag.exists() {
         return Err(format!("Source tag file does not exist: {:?}", source_tag).into());
@@ -213,15 +254,21 @@ pub async fn compress_logs(
     let array: &arrow_array::GenericByteArray<arrow_array::types::GenericStringType<i64>> = array
         .as_any()
         .downcast_ref::<LargeStringArray>()
-        .ok_or(LavaError::Parse("Expects string array as first argument".to_string()))?;
+        .ok_or(LavaError::Parse(
+            "Expects string array as first argument".to_string(),
+        ))?;
 
     let uid: &arrow_array::PrimitiveArray<arrow::datatypes::UInt64Type> = uid
         .as_any()
         .downcast_ref::<UInt64Array>()
-        .ok_or(LavaError::Parse("Expects uint64 array as second argument".to_string()))?;
+        .ok_or(LavaError::Parse(
+            "Expects uint64 array as second argument".to_string(),
+        ))?;
 
     if array.len() != uid.len() {
-        return Err(LavaError::Parse("The length of the array and the uid array must be the same".to_string()));
+        return Err(LavaError::Parse(
+            "The length of the array and the uid array must be the same".to_string(),
+        ));
     }
 
     let mut logs1 = Vec::with_capacity(array.len());
@@ -263,7 +310,10 @@ pub async fn compress_logs(
             // Attempt to parse the timestamp
             let mut epoch_ts = if line.len() >= timestamp_bytes {
                 let extract_timestamp_from_this_line = &line[..timestamp_bytes];
-                match NaiveDateTime::parse_from_str(extract_timestamp_from_this_line.trim(), &timestamp_format) {
+                match NaiveDateTime::parse_from_str(
+                    extract_timestamp_from_this_line.trim(),
+                    &timestamp_format,
+                ) {
                     Ok(dt) => dt.timestamp() as u64,
                     Err(_) => last_timestamp,
                 }
@@ -338,22 +388,34 @@ pub async fn compress_logs(
     */
 
     let total_chunks = chunk_uids.len();
-    let (chunk_variables, eid_to_variables) = get_variable_info(total_chunks, group_number).unwrap();
+    let (chunk_variables, eid_to_variables) =
+        get_variable_info(total_chunks, group_number).unwrap();
 
     let mut touched_types = std::collections::HashSet::new();
 
-    let mut expanded_items: std::collections::HashMap<i32, Vec<String>> = std::collections::HashMap::new();
-    let mut expanded_lineno: std::collections::HashMap<i32, Vec<usize>> = std::collections::HashMap::new();
+    let mut expanded_items: std::collections::HashMap<i32, Vec<String>> =
+        std::collections::HashMap::new();
+    let mut expanded_lineno: std::collections::HashMap<i32, Vec<usize>> =
+        std::collections::HashMap::new();
 
     println!("total_chunks: {}", total_chunks);
 
     for chunk in 0..total_chunks {
         let mut variable_files = std::collections::HashMap::new();
         let mut variable_idx = std::collections::HashMap::new();
-        for &variable in chunk_variables.get(&chunk).unwrap_or(&std::collections::HashSet::new()) {
-            let file_path = format!("compressed/{}/variable_{}/E{}_V{}", group_number, chunk, variable.0, variable.1);
+        for &variable in chunk_variables
+            .get(&chunk)
+            .unwrap_or(&std::collections::HashSet::new())
+        {
+            let file_path = format!(
+                "compressed/{}/variable_{}/E{}_V{}",
+                group_number, chunk, variable.0, variable.1
+            );
             let file_content = fs::read_to_string(file_path).unwrap();
-            let lines = file_content.lines().map(String::from).collect::<Vec<String>>();
+            let lines = file_content
+                .lines()
+                .map(String::from)
+                .collect::<Vec<String>>();
             variable_files.insert(variable, lines);
             variable_idx.insert(variable, 0);
         }
@@ -371,7 +433,8 @@ pub async fn compress_logs(
             let mut type_vars = std::collections::HashMap::new();
 
             for &variable in this_variables {
-                let item = variable_files.get_mut(&variable).unwrap()[variable_idx[&variable]].to_string();
+                let item =
+                    variable_files.get_mut(&variable).unwrap()[variable_idx[&variable]].to_string();
                 variable_idx.entry(variable).and_modify(|v| *v += 1);
                 let t = get_type(&item);
                 if t == 0 {
@@ -387,7 +450,10 @@ pub async fn compress_logs(
 
             for (&t, items) in &type_vars {
                 // println!("{} {} {}", chunk, t, items.len());
-                expanded_items.entry(t).or_default().extend(items.iter().cloned());
+                expanded_items
+                    .entry(t)
+                    .or_default()
+                    .extend(items.iter().cloned());
                 expanded_lineno
                     .entry(t)
                     .or_default()
@@ -399,17 +465,25 @@ pub async fn compress_logs(
     // Process and write compacted types and outliers
     let mut compacted_type_files = std::collections::HashMap::new();
     let mut compacted_lineno_files = std::collections::HashMap::new();
-    let mut outlier_file = std::fs::File::create(format!("compressed/{}/outlier", group_number)).unwrap();
-    let mut outlier_lineno_file = std::fs::File::create(format!("compressed/{}/outlier_lineno", group_number)).unwrap();
+    let mut outlier_file =
+        std::fs::File::create(format!("compressed/{}/outlier", group_number)).unwrap();
+    let mut outlier_lineno_file =
+        std::fs::File::create(format!("compressed/{}/outlier_lineno", group_number)).unwrap();
     let mut outlier_items = Vec::new();
     let mut outlier_lineno = Vec::new();
 
     for &t in &touched_types {
         if expanded_items[&t].is_empty() {
-            panic!("Error in variable extraction. No items detected for type {}", t);
+            panic!(
+                "Error in variable extraction. No items detected for type {}",
+                t
+            );
         }
 
-        let mut paired: Vec<_> = expanded_items[&t].iter().zip(expanded_lineno[&t].iter()).collect();
+        let mut paired: Vec<_> = expanded_items[&t]
+            .iter()
+            .zip(expanded_lineno[&t].iter())
+            .collect();
         paired.par_sort_unstable_by(|a, b| a.0.cmp(b.0).then_with(|| a.1.cmp(b.1)));
 
         let mut compacted_items = Vec::new();
@@ -428,16 +502,29 @@ pub async fn compress_logs(
 
         if compacted_items.len() > OUTLIER_THRESHOLD {
             let type_file = compacted_type_files.entry(t).or_insert_with(|| {
-                std::fs::File::create(format!("compressed/{}/compacted_type_{}", group_number, t)).unwrap()
+                std::fs::File::create(format!("compressed/{}/compacted_type_{}", group_number, t))
+                    .unwrap()
             });
             let lineno_file = compacted_lineno_files.entry(t).or_insert_with(|| {
-                std::fs::File::create(format!("compressed/{}/compacted_type_{}_lineno", group_number, t)).unwrap()
+                std::fs::File::create(format!(
+                    "compressed/{}/compacted_type_{}_lineno",
+                    group_number, t
+                ))
+                .unwrap()
             });
 
             for (item, linenos) in compacted_items.iter().zip(compacted_lineno.iter()) {
                 writeln!(type_file, "{}", item).unwrap();
-                writeln!(lineno_file, "{}", linenos.iter().map(|&n| n.to_string()).collect::<Vec<_>>().join(" "))
-                    .unwrap();
+                writeln!(
+                    lineno_file,
+                    "{}",
+                    linenos
+                        .iter()
+                        .map(|&n| n.to_string())
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                )
+                .unwrap();
             }
         } else {
             outlier_items.extend(compacted_items);
@@ -446,12 +533,23 @@ pub async fn compress_logs(
     }
 
     // Sort and write outliers
-    let mut paired: Vec<_> = outlier_items.into_iter().zip(outlier_lineno.into_iter()).collect();
+    let mut paired: Vec<_> = outlier_items
+        .into_iter()
+        .zip(outlier_lineno.into_iter())
+        .collect();
     paired.par_sort_unstable_by(|a, b| a.0.cmp(&b.0));
     for (item, linenos) in paired {
         writeln!(outlier_file, "{}", item).unwrap();
-        writeln!(outlier_lineno_file, "{}", linenos.iter().map(|&n| n.to_string()).collect::<Vec<_>>().join(" "))
-            .unwrap();
+        writeln!(
+            outlier_lineno_file,
+            "{}",
+            linenos
+                .iter()
+                .map(|&n| n.to_string())
+                .collect::<Vec<_>>()
+                .join(" ")
+        )
+        .unwrap();
     }
 
     // flush the files

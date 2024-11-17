@@ -1,4 +1,4 @@
-use super::error::LavaError;
+use crate::lava::error::LavaError;
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -27,22 +27,28 @@ where
         let counts: HashMap<T, u64> = bincode::deserialize(&serialized_counts)?;
         let compressed_fm_chunk = &chunk[(compressed_counts_size + 8) as usize..];
         let mut decompressor = Decoder::new(compressed_fm_chunk)?;
-        let mut serialized_fm_chunk: Vec<u8> = Vec::with_capacity(compressed_fm_chunk.len() as usize);
+        let mut serialized_fm_chunk: Vec<u8> =
+            Vec::with_capacity(compressed_fm_chunk.len() as usize);
         decompressor.read_to_end(&mut serialized_fm_chunk)?;
         let fm_chunk: Vec<T> = bincode::deserialize(&serialized_fm_chunk)?;
 
-        Ok(Self { counts_so_far: counts, bwt_chunk: fm_chunk })
+        Ok(Self {
+            counts_so_far: counts,
+            bwt_chunk: fm_chunk,
+        })
     }
 
     #[allow(dead_code)]
     pub fn serialize(&mut self) -> Result<Vec<u8>, LavaError> {
         let serialized_counts = bincode::serialize(&self.counts_so_far)?;
-        let mut compressed_counts = encode_all(&serialized_counts[..], 0).expect("Compression failed");
+        let mut compressed_counts =
+            encode_all(&serialized_counts[..], 0).expect("Compression failed");
         let mut result: Vec<u8> = vec![];
         result.append(&mut (compressed_counts.len() as u64).to_le_bytes().to_vec());
         result.append(&mut compressed_counts);
         let serialized_chunk = bincode::serialize(&self.bwt_chunk)?;
-        let mut compressed_chunk = encode_all(&serialized_chunk[..], 0).expect("Compression failed");
+        let mut compressed_chunk =
+            encode_all(&serialized_chunk[..], 0).expect("Compression failed");
         result.append(&mut compressed_chunk);
         Ok(result)
     }

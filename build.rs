@@ -1,9 +1,10 @@
-use std::env;
-use std::path::PathBuf;
-
+#[cfg(feature = "logcloud")]
 fn main() {
+    use std::env;
+    use std::path::PathBuf;
+
     let dir = env::var("CARGO_MANIFEST_DIR").unwrap();
-    let path = PathBuf::from(dir);
+    let path = PathBuf::from(dir).join("src").join("lava").join("logcloud");
 
     // Specify the directory containing the .a files
     println!("cargo:rustc-link-search=native={}", path.display());
@@ -18,6 +19,9 @@ fn main() {
     println!("cargo:rustc-link-lib=dylib=stdc++");
 
     // Rerun the build script if the static libraries change
-    println!("cargo:rerun-if-changed=libCompressor.a");
-    println!("cargo:rerun-if-changed=libTrainer.a");
+    println!("cargo:rerun-if-changed=src/lava/logcloud/libCompressor.a");
+    println!("cargo:rerun-if-changed=src/lava/logcloud/libTrainer.a");
 }
+
+#[cfg(not(feature = "logcloud"))]
+fn main() {}
