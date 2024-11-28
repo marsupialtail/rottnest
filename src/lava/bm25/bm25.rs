@@ -1,16 +1,23 @@
-use crate::formats::readers::get_file_size_and_reader;
+use crate::formats::readers::{
+    get_file_size_and_reader, get_file_sizes_and_readers, AsyncReader, ClonableAsyncReader,
+    ReaderType,
+};
 use crate::lava::error::LavaError;
 use crate::lava::plist::PListChunk;
 use arrow::array::{make_array, Array, ArrayData, LargeStringArray, UInt64Array};
 use bincode;
+use tokio::task::JoinSet;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use std::fs::File;
-use std::io::Read;
-use std::io::{BufWriter, Seek, SeekFrom, Write};
+use std::io::{BufRead, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
+use std::sync::Arc;
 use tokenizers::parallelism::MaybeParallelIterator;
 use zstd::stream::encode_all;
+use zstd::stream::Decoder;
+
+use super::super::get_tokenizer;
 
 /*
 Structure of the lava file
@@ -18,26 +25,6 @@ It is important to put the posting lists first. Just trust me bro.
 compressed_serialized_tokenizer | compressed posting lists line by line | compressed term dictionary | compressed posting list offsets|
 8 bytes = offsets of compressed term dict | 8 bytes = offset of compressed posting list offsets
 */
-
-fn get_tokenizer(tokenizer_file: Option<String>) -> Result<(Tokenizer, Vec<u8>), LavaError> {
-    // if the tokenizer file is provided, check if the file exists. If it does not exist, raise an Error
-    let tokenizer = if let Some(tokenizer_file) = tokenizer_file {
-        if !std::path::Path::new(&tokenizer_file).exists() {
-            return Err(LavaError::Parse(
-                "Tokenizer file does not exist".to_string(),
-            ));
-        }
-        println!("Tokenizer file: {}", tokenizer_file);
-        Tokenizer::from_file(tokenizer_file).unwrap()
-    } else {
-        Tokenizer::from_pretrained("bert-base-uncased", None).unwrap()
-    };
-
-    let serialized_tokenizer = serde_json::to_string(&tokenizer).unwrap();
-    let compressed_tokenizer =
-        encode_all(serialized_tokenizer.as_bytes(), 0).expect("Compression failed");
-    Ok((tokenizer, compressed_tokenizer))
-}
 
 /// Function that tokenizes the input text and returns a list of tokens.
 #[tokio::main]
@@ -578,4 +565,53 @@ pub(crate) async fn search_bm25_async(
     }
 
     Ok(plist_result)
+}
+
+#[tokio::main]
+pub async fn search_lava_bm25(
+    files: Vec<String>,
+    query_tokens: Vec<u32>,
+    query_weights: Vec<f32>,
+    k: usize,
+    reader_type: ReaderType,
+) -> Result<Vec<(u64, u64)>, LavaError> {
+    let (file_sizes, readers) = get_file_sizes_and_readers(&files, reader_type).await?;
+    search_bm25_async(file_sizes, readers, query_tokens, query_weights, k).await
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::formats::readers::ReaderType;
+
+    use super::search_lava_bm25;
+
+    #[test]
+    pub fn test_search_lava_one() {
+        let file = "msmarco_index/1.lava";
+
+        let res = search_lava_bm25(
+            vec![file.to_string()],
+            vec![6300, 15050],
+            vec![0.1, 0.2],
+            10,
+            ReaderType::default(),
+        )
+        .unwrap();
+
+        println!("{:?}", res);
+    }
+
+    #[test]
+    pub fn test_search_lava_two() {
+        let res = search_lava_bm25(
+            vec!["bump1.lava".to_string(), "bump2.lava".to_string()],
+            vec![6300, 15050],
+            vec![0.1, 0.2],
+            10,
+            ReaderType::default(),
+        )
+        .unwrap();
+
+        println!("{:?}", res);
+    }
 }

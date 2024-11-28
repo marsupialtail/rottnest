@@ -13,7 +13,7 @@ use crate::{
     lava::{
         error::LavaError,
         logcloud::logcloud_common::{get_all_types, get_type, PListChunk, PlistSize},
-        search::_search_lava_substring_char,
+        substring::_search_lava_substring_char,
         substring::{_build_lava_substring_char, _build_lava_substring_char_wavelet},
     },
 };

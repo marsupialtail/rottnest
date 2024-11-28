@@ -101,7 +101,7 @@ def get_physical_layout(file_paths: list, column_name: str, type = "str", remote
                 "dictionary_page_sizes": [-1] + layout.dictionary_page_sizes,
                 "row_groups": np.hstack([[-1] , np.repeat(np.arange(layout.num_row_groups), layout.row_group_data_pages)]),
                 "page_row_offset_in_row_group": np.hstack([[-1], page_row_offsets_in_row_group]).astype(np.int64)
-            }
+            } # type: ignore
         )
 
         metadatas.append(metadata)

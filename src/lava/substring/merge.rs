@@ -1,8 +1,13 @@
+use std::{collections::HashMap, io::Seek, io::SeekFrom, io::Write};
+
 use super::constants::*;
 use super::fm_chunk::FMChunk;
-use crate::formats::readers::{
-    get_file_size_and_reader, get_file_sizes_and_readers, AsyncReader, ReaderType,
+use crate::{
+    formats::readers::{get_file_size_and_reader, AsyncReader, ReaderType},
+    lava::error::LavaError,
 };
+use bit_vec::BitVec;
+use std::fs::File;
 use zstd::stream::encode_all;
 
 struct PListIterator {
@@ -19,8 +24,8 @@ impl PListIterator {
             .read_range_and_decompress(plist_offsets[0], plist_offsets[1])
             .await?;
         Ok(Self {
-            reader: reader,
-            plist_offsets: plist_offsets,
+            reader,
+            plist_offsets,
             current_chunk_offset: 0,
             current_chunk: plist_chunk,
         })
@@ -61,10 +66,10 @@ impl FMChunkIterator {
         let current_chunk = FMChunk::new(buffer3)?;
 
         Ok(Self {
-            reader: reader,
-            fm_chunk_offsets: fm_chunk_offsets,
+            reader,
+            fm_chunk_offsets,
             current_chunk_offset: 0,
-            current_chunk: current_chunk,
+            current_chunk,
         })
     }
 

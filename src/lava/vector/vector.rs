@@ -1,6 +1,14 @@
+use crate::{
+    formats::readers::{get_file_sizes_and_readers, get_reader, ReaderType},
+    lava::error::LavaError,
+};
+use byteorder::{ByteOrder, LittleEndian, ReadBytesExt};
+use futures::stream::{FuturesUnordered, StreamExt};
 use ndarray::{concatenate, stack, Array1, Array2, Axis};
-
-use crate::formats::readers::{get_file_sizes_and_readers, get_reader};
+use std::cmp::Ordering;
+use std::io::{self, Cursor, Read};
+use std::time::Instant;
+use zstd::stream::Decoder;
 fn bytes_to_f32_vec(bytes: &[u8]) -> Vec<f32> {
     let mut vec = Vec::with_capacity(bytes.len() / 4);
     let mut i = 0;
