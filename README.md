@@ -6,12 +6,14 @@ You don't need ElasticSearch or some vector database to do full text search or v
 
 ## Installation
 
-Local installation: `pip install rottnest`.
-
-Rottnest supports many different index types. Currently you need to install separate dependencies for each index type. I also don't yet support installation like `pip install rottnest[bm25]` because the dependencies are still being finalized. For the time being you can:
-- **BM25**: `pip install duckdb openai` if you want to rely on OpenAI embeddings for query expansion or if you want to use the [FlagEmbedding](https://github.com/bytedance/FlagEmbedding) library, `pip install duckdb FlagEmbedding`, it will be free but the quality will be lacking.
-- **Phrase search**: Nothing more needed.
-- **Vector**: `pip install faiss` (I am still working on properly supporting this, but most likely I will heavily rely on faiss to build a PQ-IVF index with SOAR). 
+Currently, the recommended installation is build from source.
+```
+maturin develop --release --features py
+```
+Rottnest supports an extension for compressing and searching log data (very experimental)
+```
+maturin develop --release --features "py,logcloud"
+```
 
 ## How to use
 
