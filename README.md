@@ -2,7 +2,7 @@
 
 **Despite our affiliations, this is not an official Anthropic-supported project!** Please raise issues here on Github.
 
-You don't need ElasticSearch or some vector database to do full text search or vector search. Parquet + Rottnest is all you need. Rottnest is like Postgres indices for Parquet. Read more on what it can do for e.g. logs [here](LogCloud.pdf).
+You don't need ElasticSearch or some vector database to do full text search or vector search. Parquet + Rottnest is all you need. Rottnest is like Postgres indices for Parquet..
 
 ## Installation
 
@@ -10,7 +10,9 @@ Currently, the recommended installation is build from source.
 ```
 maturin develop --release --features py
 ```
-Rottnest supports an extension for compressing and searching log data (very experimental)
+
+## LogCloud
+Rottnest supports the LogCloud index, a tool for compressing and searching log data.
 ```
 maturin develop --release --features "py,logcloud"
 ```
@@ -48,35 +50,10 @@ export AWS_ENDPOINT_URL=https://tos-s3-cn-beijing.volces.com
 export AWS_VIRTUAL_HOST_STYLE=true
 ```
 
-Rottnest not only supports BM25 indices but also other indices, like regex and vector searches. More documentation will be forthcoming.
-
-### Phrase Matches
-
-Unlike BM25 which works on single terms, you can also build exact substring match indices which rely on the FM-index (for the moment). This is based on *exact match*. We are working on a Kmer-hash based method with minimizers to reduce the storage size. The code is here:
-
-```
-import rottnest
-rottnest.index_file_substring("example_data/0.parquet", "body", "index0")
-rottnest.index_file_substring("example_data/1.parquet", "body", "index1")
-rottnest.merge_index_substring("merged_index", ["index0", "index1"])
-result = rottnest.search_index_substring(["merged_index"], "cell phones", K = 10)
-```
-
-### Vector Approximate Nearest Neighbor
+Rottnest not only supports BM25 indices but also other indices, like the LogCloud index. More documentation will be forthcoming.
 
 ## Serverless Search Engine Architecture
 
 ![Architecture](assets/arch.png)
 
 Rottnest can be used to build a serverless search engine. The client will use the index to search against the Parquet files on S3 directly, or Parquet files hosted by somebody else, like Huggingface. More documentation will be forthcoming. The (simplest possible) searcher Lambda code can be found in lambda/ directory.
-
-## Development
-
-### Build Python wheel
-```bash
-maturin develop --features "py,opendal"
-```
-or 
-```bash
-maturin develop --features "py,aws_sdk"
-```
