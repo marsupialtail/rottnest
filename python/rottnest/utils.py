@@ -8,7 +8,6 @@ from botocore.config import Config
 import os
 from pyarrow.fs import S3FileSystem, LocalFileSystem
 import json
-import daft
 from concurrent.futures import ThreadPoolExecutor
 
 def get_fs_from_file_path(filepath):
@@ -25,15 +24,6 @@ def get_fs_from_file_path(filepath):
         s3fs = LocalFileSystem()
 
     return s3fs
-
-def get_daft_io_config_from_file_path(filepath):
-    
-    if filepath.startswith("s3://"):
-        fs = daft.io.IOConfig(s3 = daft.io.S3Config(force_virtual_addressing = (True if os.getenv('AWS_VIRTUAL_HOST_STYLE') else False), endpoint_url = os.getenv('AWS_ENDPOINT_URL')))
-    else:
-        fs = daft.io.IOConfig()
-
-    return fs
 
 def read_metadata_file(file_path: str):
 
@@ -135,16 +125,17 @@ def get_virtual_layout(file_paths: list, column_name: str, key_column_name: str,
 
 def get_metadata_and_populate_cache(indices: List[str], suffix = "meta"):
     
-    metadatas = daft.table.read_parquet_into_pyarrow_bulk([f"{index_name}.{suffix}" for index_name in indices], io_config = get_daft_io_config_from_file_path(indices[0]))
+    # Read parquet files using PyArrow instead of Daft
+    fs = get_fs_from_file_path(indices[0])
+    metadatas = [pq.read_table(f"{index_name}.{suffix}".replace("s3://", ""), filesystem=fs) for index_name in indices]
     
-   
     if os.getenv("CACHE_ENABLE") and os.getenv("CACHE_ENABLE").lower() == "true":
         metadatas = [(polars.from_arrow(i), json.loads(i.schema.metadata[b'cache_ranges'].decode())) for i in metadatas]
         metadata = polars.concat([f[0].with_columns(polars.lit(i).alias("file_id").cast(polars.Int64)) for i, f in enumerate(metadatas)])
         cache_ranges = {f"{indices[i]}.lava": f[1] for i, f in enumerate(metadatas) if len(f[1]) > 0}
         cached_files = list(cache_ranges.keys())
         ranges = [[tuple(k) for k in cache_ranges[f]] for f in cached_files]
-        rottnest.populate_cache(cached_files, ranges,  "aws")
+        rottnest.populate_cache(cached_files, ranges, "aws")
     else:
         metadatas = [polars.from_arrow(i) for i in metadatas]
         metadata = polars.concat([f.with_columns(polars.lit(i).alias("file_id").cast(polars.Int64)) for i, f in enumerate(metadatas)])

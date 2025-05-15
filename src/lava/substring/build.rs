@@ -207,13 +207,13 @@ pub async fn _build_lava_substring_char(
             let compressed_chunk =
                 encode_all(&serialized_chunk[..], 10).expect("Compression failed");
             file.write_all(&compressed_chunk)?;
-            fm_chunk_offsets.push(file.seek(SeekFrom::Current(0))? as usize);
+            fm_chunk_offsets.push(file.stream_position()? as usize);
             current_chunk_counts = next_chunk_counts.clone();
             current_chunk = vec![];
         }
     }
     // print out total file size so far
-    println!("total file size: {}", file.seek(SeekFrom::Current(0))?);
+    println!("total file size: {}", file.stream_position()?);
 
     let mut cumulative_counts: Vec<u64> = vec![0];
     for i in 0..256 {
@@ -300,9 +300,8 @@ pub async fn build_lava_substring_char(
         texts.push((uid.value(i), text.to_string()));
     }
 
-    println!("made it to this point");
-    // _build_lava_substring_char(output_file_name, texts, char_skip_factor).await
-    _build_lava_substring_char_wavelet(output_file_name, texts, char_skip_factor).await
+    _build_lava_substring_char(output_file_name, texts, char_skip_factor).await
+    // _build_lava_substring_char_wavelet(output_file_name, texts, char_skip_factor).await
 }
 
 #[tokio::main]

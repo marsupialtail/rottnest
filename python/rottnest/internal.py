@@ -9,13 +9,12 @@ import numpy as np
 import os
 import pyarrow.compute as pac
 import json
-import daft
 import multiprocessing
 import time
 
 
 from .nlp import query_expansion_keyword, query_expansion_llm
-from .utils import get_daft_io_config_from_file_path, get_fs_from_file_path, get_physical_layout, get_virtual_layout, read_columns, read_metadata_file,\
+from .utils import get_fs_from_file_path, get_physical_layout, get_virtual_layout, read_columns, read_metadata_file,\
     get_metadata_and_populate_cache, get_result_from_index_result, return_full_result
 
 
