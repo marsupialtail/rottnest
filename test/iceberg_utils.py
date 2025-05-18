@@ -8,7 +8,8 @@ import pyarrow.parquet as pq
 import os
 
 # Configuration
-BUCKET_NAME = 'rottnest-iceberg-test'  # Replace with your S3 bucket name
+BUCKET_NAME = os.environ.get('ROTTNEST_BUCKET_NAME', None)  # Read from env or use default
+assert BUCKET_NAME is not None, "ROTTNEST_BUCKET_NAME environment variable must be set"
 DATABASE_NAME = 'rottnest'    # Replace with your Glue database name
 S3_PREFIX = f's3://{BUCKET_NAME}/iceberg_data/test/'
 
@@ -24,23 +25,29 @@ def upload_to_s3():
         print(f"Error uploading file to S3: {e}")
         raise
 
-def delete_if_exists(catalog, table_name):
+def get_catalog():
+    catalog = load_catalog(
+        "glue",
+        **{
+            "type": "glue",
+            "warehouse": S3_PREFIX,
+            "region": s3.meta.region_name
+        }
+    )
+    return catalog
+
+def delete_if_exists(table_name: str, catalog = get_catalog()):
     """Delete table if it already exists"""
-    if table_name in [i[1] for i in catalog.list_tables(DATABASE_NAME)]:
-        catalog.drop_table(identifier=(DATABASE_NAME, table_name))
+    database_name, table_name = table_name.split('.')[0], table_name.split('.')[1]
+    if table_name in [i[1] for i in catalog.list_tables(database_name)]:
+        print(f"Deleting table {database_name}.{table_name}")
+        catalog.drop_table(identifier=(database_name, table_name))
 
 def create_iceberg_table(table_name: str, total_files: int = 1):
     """Create an Iceberg table and load data from the parquet file"""
     try:
         # Create catalog
-        catalog = load_catalog(
-            "glue",
-            **{
-                "type": "glue",
-                "warehouse": S3_PREFIX,
-                "region": s3.meta.region_name
-            }
-        )
+        catalog = get_catalog()
         
         # Create namespace if it doesn't exist
         if DATABASE_NAME not in [i[0] for i in catalog.list_namespaces()]:
@@ -89,14 +96,7 @@ def read_iceberg_table(table_name: str):
     """Read the Iceberg table back to a local PyArrow table"""
     try:
         # Create catalog
-        catalog = load_catalog(
-            "glue",
-            **{
-                "type": "glue",
-                "warehouse": S3_PREFIX,
-                "region": s3.meta.region_name
-            }
-        )
+        catalog = get_catalog()
         
         # Load the table
         table = catalog.load_table((DATABASE_NAME, table_name))

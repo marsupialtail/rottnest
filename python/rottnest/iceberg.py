@@ -15,6 +15,7 @@ from pyiceberg.catalog.glue import (
 )
 from pyiceberg.exceptions import NoSuchTableError
 from pyiceberg.io.pyarrow import pyarrow_to_schema
+from pyiceberg.catalog import load_catalog
 from .utils import get_fs_from_file_path, get_physical_layout
 from .internal import index_files_bm25, index_files_substring, index_files_vector, index_files_uuid, merge_index_bm25, merge_index_substring, merge_index_uuid
 import boto3
@@ -28,8 +29,7 @@ log = logging.getLogger(__name__)
 log.setLevel(logging.INFO)
 
 def default_catalog():
-    from pyiceberg.catalog import load_catalog
-
+    
     return load_catalog(
         CATALOG_NAME,
         type="glue",
@@ -404,16 +404,20 @@ def vacuum_iceberg_indices(table: str, index_table: str, index_prefix: str, hist
     # schema is committed_at ┆ snapshot_id ┆ parent_id ┆ operation ┆ manifest_list ┆ summary   
 
     # filter for snapshots whose committed_at is > now - history
+    # but always include the latest snapshot
     now = datetime.now()
     cutoff_time = now - timedelta(days=history)
     live_snapshots = iceberg_snapshots_df.filter(polars.col('committed_at') > cutoff_time)
+    if len(live_snapshots) == 0:
+        live_snapshots = iceberg_snapshots_df.sort('committed_at', descending=True).head(1)
+    
     live_files = set()
-    for snapshot in live_snapshots:
-        files = iceberg_table.inspect.data_files(snapshot.snapshot_id)['file_path'].to_pylist()
+    for snapshot_id in live_snapshots['snapshot_id']:
+        files = iceberg_table.inspect.data_files(snapshot_id)['file_path'].to_pylist()
         live_files.update(files)
     
     # load the index_table into polars dataframe
-    metadata_table = polars.from_arrow(load_table(index_table).to_arrow())
+    metadata_table = load_table(index_table).scan().to_polars()
     # figure out what index files can be dropped
     keep_rows = []
     to_delete_index_files = []
@@ -424,10 +428,12 @@ def vacuum_iceberg_indices(table: str, index_table: str, index_prefix: str, hist
         else:
             to_delete_index_files.append(metadata_table['index_file'][i])
     
+
     metadata_table = metadata_table[keep_rows]
 
-    temp_str = ",".join(["'" + file + "'" for file in to_delete_index_files])
-    load_table(index_table).delete(delete_filter = f"index_file in ({temp_str})")
+    if len(to_delete_index_files) > 0:
+        temp_str = ",".join(["'" + file + "'" for file in to_delete_index_files])
+        load_table(index_table).delete(delete_filter = f"index_file in ({temp_str})")
 
     # list all the files in index_prefix
     index_prefix = index_prefix.rstrip('/')
@@ -455,7 +461,10 @@ def vacuum_iceberg_indices(table: str, index_table: str, index_prefix: str, hist
     # Now index_files contains all the keys from all pages
     # Filter out index files that are still in the metadata table
     live_index_files = set(metadata_table['index_file'])
+    # expand live index files to include the .lava and .meta suffix for each file
+    live_index_files = set([f + ".lava" for f in live_index_files] + [f + ".meta" for f in live_index_files])
     files_to_delete = [f for f in index_files if f"s3://{bucket_name}/{f}" not in live_index_files]
+
     
     if files_to_delete:
         log.info(f"Deleting {len(files_to_delete)} obsolete index files")
@@ -478,15 +487,12 @@ def vacuum_iceberg_indices(table: str, index_table: str, index_prefix: str, hist
     else:
         log.info("No obsolete index files to delete")
     
-    
+    print(f"Vacuuming complete, deleted {to_delete_index_files}")
 
 def compact_iceberg_indices(table: str, column: str, index_table: str, index_prefix: str,
                             type: str, index_impl = 'physical', binpack_row_threshold = 10, extra_configs = {}):
     """
     Compact Rottnest indices
-    
-    Returns:
-        The search results as a DataFrame
     """
 
     # load the index_table into polars dataframe
@@ -521,11 +527,15 @@ def compact_iceberg_indices(table: str, column: str, index_table: str, index_pre
             record_counts[-1].extend(row['record_counts'])
             covered_files[-1].extend(row['file_path'])
             current_group_row_count += record_count
-    
-    if len(index_groups) < 2:
+
+    # get rid of index_groups that have only one file
+    index_groups = [i for i, group in enumerate(index_groups) if len(group) > 1]
+    if len(index_groups) == 0:
         print("No indices to merge")
         return
-
+    record_counts = [record_counts[i] for i in index_groups]
+    covered_files = [covered_files[i] for i in index_groups]
+    
     index_file_paths = []
 
     for group, record_count in zip(index_groups, record_counts):
