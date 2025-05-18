@@ -203,9 +203,13 @@ def index_files_vector(file_paths: list[str], column_name: str, name = uuid.uuid
 
 def merge_metadatas(index_names: List[str], suffix = "meta"):
     assert len(index_names) > 1
-    metadatas = daft.table.read_parquet_into_pyarrow_bulk([f"{index_name}.{suffix}" for index_name in index_names], io_config = get_daft_io_config_from_file_path(index_names[0]))
-    # discard cache ranges in metadata, don't need them
-    metadatas = [polars.from_arrow(i) for i in metadatas]
+    
+    metadatas = []
+    for index_name in index_names:
+        fs = get_fs_from_file_path(f"{index_name}.{suffix}")
+        table = pq.read_table(f"{index_name.replace('s3://', '')}.{suffix}", filesystem=fs)
+        metadatas.append(polars.from_arrow(table))
+    
     metadata_lens = [len(metadata) for metadata in metadatas]
     offsets = np.cumsum([0] + metadata_lens)[:-1]
     metadatas = [metadata.with_columns(polars.col("uid") + offsets[i]) for i, metadata in enumerate(metadatas)]
@@ -220,11 +224,11 @@ def merge_index_bm25(new_index_name: str, index_names: List[str]):
     file_data = file_data.to_arrow().replace_schema_metadata({"cache_ranges": json.dumps(cache_ranges)})
     pq.write_table(file_data, f"{new_index_name}.meta", write_statistics = False, compression = 'zstd')
 
-def merge_index_substring(new_index_name: str, index_names: List[str]):
+def merge_index_substring(new_index_name: str, index_names: List[str], char_index = False):
     
     offsets, file_data = merge_metadatas(index_names)
     
-    cache_ranges = rottnest.merge_lava_generic(f"{new_index_name}.lava", [f"{name}.lava" for name in index_names], offsets, 1)
+    cache_ranges = rottnest.merge_lava_generic(f"{new_index_name}.lava", [f"{name}.lava" for name in index_names], offsets, 3 if char_index else 1)
     
     file_data = file_data.to_arrow().replace_schema_metadata({"cache_ranges": json.dumps(cache_ranges)})
     pq.write_table(file_data, f"{new_index_name}.meta", write_statistics = False, compression = 'zstd')

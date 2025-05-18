@@ -9,6 +9,7 @@ use crate::formats::readers::ReaderType;
 use crate::lava::bm25::merge_lava_bm25;
 use crate::lava::error::LavaError;
 use crate::lava::substring::merge_lava_substring;
+use crate::lava::substring::merge_lava_substring_char;
 use crate::lava::uuid::merge_lava_uuid;
 
 // @Rain chore: we need to simplify all the iterator impls
@@ -20,12 +21,12 @@ async fn async_parallel_merge_files(
     do_not_delete: BTreeSet<String>,
     uid_offsets: Vec<u64>,
     k: usize,
-    mode: usize, // 0 for bm25 1 for substring 2 for uuid
+    mode: usize, // 0 for bm25 1 for substring 2 for uuid 3 for substring_char
     reader_type: ReaderType,
     cache_ranges: Option<Vec<Vec<(usize, usize)>>>,
 ) -> Result<Vec<(usize, usize)>, LavaError> {
-    assert!(mode == 1 || mode == 0 || mode == 2);
-    if mode == 2 || mode == 1 {
+    assert!(mode == 0 || mode == 1 || mode == 2 || mode == 3);
+    if mode == 1 || mode == 2 || mode == 3 {
         assert_eq!(k, 2);
     }
 
@@ -114,6 +115,15 @@ async fn async_parallel_merge_files(
                             )
                             .await
                         }
+                        3 => {
+                            merge_lava_substring_char(
+                                &merged_filename,
+                                file_chunk.to_vec(),
+                                uid_chunk.to_vec(),
+                                reader_type.clone(),
+                            )
+                            .await
+                        }
                         _ => unreachable!(),
                     }
                     .unwrap();
@@ -176,7 +186,7 @@ pub async fn parallel_merge_files(
     files: Vec<String>,
     uid_offsets: Vec<u64>,
     k: usize,
-    mode: usize, // 0 for bm25 1 for substring 2 for uuid
+    mode: usize, // 0 for bm25 1 for substring 2 for uuid 3 for substring_char
     reader_type: ReaderType,
 ) -> Result<Vec<(usize, usize)>, LavaError> {
     let do_not_delete = BTreeSet::from_iter(files.clone().into_iter());
