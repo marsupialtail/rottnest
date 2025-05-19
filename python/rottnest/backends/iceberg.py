@@ -18,7 +18,7 @@ import boto3
 from datetime import datetime, timezone, timedelta
 from rottnest.indices.index_interface import RottnestIndex
 from dataclasses import dataclass, field
-
+from .s3_utils import list_files
 CATALOG_NAME = os.getenv("CATALOG_NAME")
 CATALOG_AWS_REGION = os.getenv("CATALOG_AWS_REGION")
 
@@ -288,8 +288,7 @@ def search_iceberg(config: IcebergConfig, query: Any, index: RottnestIndex, K: i
     # Get the list of data files in the current snapshot
     data_files = polars.from_arrow(iceberg_table.inspect.data_files())
     if len(data_files.filter(polars.col('content') != 0)) > 0:
-        print("Does not support searching tables with position deletion files or equality delete files yet.")
-        exit()
+        raise Exception("Does not support searching tables with deletion vectors or equality delete files yet.")
     data_files = list(data_files.filter(polars.col('content') == 0)['file_path'])
     if not data_files:
         log.info(f"No data files found in the snapshot of {config.table}")
@@ -417,24 +416,11 @@ def vacuum_iceberg_indices(config: IcebergConfig, history: int = 30):
         load_table(config.index_table).delete(delete_filter = f"index_file in ({temp_str})")
 
     # list all the files in index_prefix
-    s3 = boto3.client('s3')
+    
     bucket_name = config.index_prefix.split('/')[2]
     key_prefix = '/'.join(config.index_prefix.split('/')[3:])
     
-    # Use pagination to get all objects and filter by age
-    index_files = []
-    current_time = datetime.now(timezone.utc)  # S3 timestamps are in UTC
-    timeout_threshold = current_time - timedelta(seconds=config.index_timeout)
-    
-    paginator = s3.get_paginator('list_objects_v2')
-    for page in paginator.paginate(Bucket=bucket_name, Prefix=key_prefix):
-        if 'Contents' in page:  # Check if the page has any contents
-            # Only include files older than INDEX_TIMEOUT
-            old_files = [
-                file for file in page['Contents'] 
-                if file['LastModified'] < timeout_threshold
-            ]
-            index_files.extend([file['Key'] for file in old_files])
+    index_files = list_files(bucket_name, key_prefix, config.index_timeout)
     
     log.info(f"Found {len(index_files)} index files older than {config.index_timeout} seconds in {config.index_prefix}")
     
