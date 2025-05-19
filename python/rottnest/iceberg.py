@@ -2,11 +2,9 @@ import os
 import time
 import logging
 import uuid
-import json
-import pyarrow
+
 import pyarrow.parquet as pq
 import polars
-import numpy as np
 import threading
 from typing import List, Dict, Any, Optional, Tuple
 from pyiceberg.catalog.glue import (
@@ -14,12 +12,13 @@ from pyiceberg.catalog.glue import (
     GLUE_REGION as ICEBERG_GLUE_PROPERTY_KEY_GLUE_REGION,
 )
 from pyiceberg.exceptions import NoSuchTableError
-from pyiceberg.io.pyarrow import pyarrow_to_schema
 from pyiceberg.catalog import load_catalog
-from .utils import get_fs_from_file_path, get_physical_layout
-from .internal import index_files_bm25, index_files_substring, index_files_vector, index_files_uuid, merge_index_bm25, merge_index_substring, merge_index_uuid
+from .utils import get_fs_from_file_path, get_physical_layout, index_files, merge_indices, search_index
 import boto3
 from datetime import datetime, timezone, timedelta
+from rottnest.indices.index_interface import RottnestIndex
+
+
 CATALOG_NAME = os.getenv("CATALOG_NAME")
 CATALOG_AWS_REGION = os.getenv("CATALOG_AWS_REGION")
 
@@ -52,7 +51,7 @@ def load_table(table_name: str, retries = 10):
             time.sleep(2)
 
 def index_iceberg(table: str, column: str, index_table: str, iceberg_location: str, 
-    index_prefix: str, type: str, index_impl = 'physical', binpack_row_threshold = 10000, extra_configs = {}):
+    index_prefix: str, index: RottnestIndex, binpack_row_threshold = 10000, extra_configs = {}):
     """
     Index an Iceberg table with Rottnest.
     
@@ -70,7 +69,6 @@ def index_iceberg(table: str, column: str, index_table: str, iceberg_location: s
 
     index_prefix = index_prefix.rstrip('/')
     assert 's3://' in index_prefix, "Index prefix must be an S3 path"
-    assert type.lower() in ['bm25', 'substring', 'vector', 'uuid'], "Unsupported index type"
     
     # Step 1: Plan - Find Parquet files in the current snapshot that aren't indexed yet
     iceberg_table = load_table(table)
@@ -146,23 +144,7 @@ def index_iceberg(table: str, column: str, index_table: str, iceberg_location: s
         # Define the worker function that will run in a separate thread
         def indexing_worker():
             try:
-                # Call the appropriate indexing function based on the type
-                if type.lower() == 'bm25':
-                    index_files_bm25(group, column, index_file_path, index_mode=index_impl)
-                elif type.lower() == 'substring':
-                    token_skip_factor = extra_configs.get('token_skip_factor', None)
-                    char_index = extra_configs.get('char_index', False)
-                    index_files_substring(group, column, index_file_path, index_mode=index_impl, 
-                                        token_skip_factor=token_skip_factor, char_index=char_index)
-                elif type.lower() == 'vector':
-                    dtype = extra_configs.get('dtype', 'f32')
-                    gpu = extra_configs.get('gpu', False)
-                    index_files_vector(group, column, index_file_path, dtype=dtype, 
-                                    index_mode=index_impl, gpu=gpu)
-                elif type.lower() == 'uuid':
-                    index_files_uuid(group, column, index_file_path, index_mode=index_impl)
-                else:
-                    raise ValueError(f"Unsupported index type: {type}")
+                index_files(index, group, column, index_file_path, index_mode = "physical", remote = None)
                 
                 # If we get here, indexing was successful
                 indexing_success[0] = True
@@ -215,8 +197,8 @@ def index_iceberg(table: str, column: str, index_table: str, iceberg_location: s
             'file_path': group,
             'record_counts': record_count,
             'index_file': f"{index_prefix}/{index_file_path}",
-            'index_type': type,
-            'index_impl': index_impl,
+            'index_type': index.name,
+            'index_impl': index.index_mode,
             'rows_indexed': 0,  # This could be populated with actual count if needed
             'index_timestamp': int(time.time())
         } for group, index_file_path in zip(index_groups, index_file_paths)]
@@ -250,7 +232,7 @@ def index_iceberg(table: str, column: str, index_table: str, iceberg_location: s
         return None
 
 
-def search_iceberg(table: str, column: str, index_table: str, query: Any, type: str, K: int = 10, extra_configs = {}):
+def search_iceberg(table: str, column: str, index_table: str, query: Any, index: RottnestIndex, K: int = 10, extra_configs = {}):
     """
     Search an Iceberg table using Rottnest indices.
     
@@ -301,22 +283,9 @@ def search_iceberg(table: str, column: str, index_table: str, query: Any, type: 
 
     if len(indexed_files) > 0:
         log.info(f"Searching {len(indexed_files)} indexed files")
-    
-        if type.lower() == 'bm25':
-            from .internal import search_index_bm25
-            results = search_index_bm25(index_files, query, K * 2)  # Get more results to account for filtering
-        elif type.lower() == 'substring':
-            from .internal import search_index_substring
-            results = search_index_substring(index_files, query, K * 2, **extra_configs)
-        elif type.lower() == 'vector':
-            from .internal import search_index_vector
-            results = search_index_vector(index_files, query, K * 2)
-        elif type.lower() == 'uuid':
-            from .internal import search_index_uuid
-            results = search_index_uuid(index_files, query, K * 2)
-        else:
-            raise ValueError(f"Unsupported index type: {type}")
-                
+
+        results = search_index(index, index_files, query, K , **extra_configs)
+        
         all_results.append(results)
     
     print(all_results)
@@ -336,22 +305,7 @@ def search_iceberg(table: str, column: str, index_table: str, query: Any, type: 
                     # Use PyArrow to read the file
                     fs = get_fs_from_file_path(file_path)
                     table = pq.read_table(file_path.replace("s3://", ""), columns=[column], filesystem=fs)
-                    df = polars.from_arrow(table)
-                    
-                    # Apply the search predicate based on the index type
-                    if type.lower() == 'bm25':
-                        # Simple contains for demonstration - in practice, would use a proper BM25 implementation
-                        filtered = df.filter(polars.col(column).str.contains(query))
-                    elif type.lower() == 'substring':
-                        filtered = df.filter(polars.col(column).str.contains(query))
-                    elif type.lower() == 'vector':
-                        # Vector search would require computing distances - simplified here
-                        log.warning("Vector search on unindexed files not fully implemented")
-                        filtered = df.head(0)  # Empty dataframe as placeholder
-                    elif type.lower() == 'uuid':
-                        filtered = df.filter(polars.col(column) == query)
-                    else:
-                        filtered = df.head(0)  # Empty dataframe as placeholder
+                    filtered = polars.from_arrow(index.brute_force(table, column, query, K))
                     
                     # Add file path information
                     if not filtered.is_empty():
@@ -370,12 +324,6 @@ def search_iceberg(table: str, column: str, index_table: str, query: Any, type: 
         return polars.DataFrame()
     
     final_results = polars.concat(all_results)
-    
-    # Sort and limit to top K results
-    if type.lower() in ['bm25', 'vector']:
-        # These types have a score column
-        if 'score' in final_results.columns:
-            final_results = final_results.sort('score', descending=True).head(K)
     
     return final_results.head(K)
 
@@ -465,6 +413,7 @@ def vacuum_iceberg_indices(table: str, index_table: str, index_prefix: str, hist
     live_index_files = set([f + ".lava" for f in live_index_files] + [f + ".meta" for f in live_index_files])
     files_to_delete = [f for f in index_files if f"s3://{bucket_name}/{f}" not in live_index_files]
 
+    import pdb; pdb.set_trace()
     
     if files_to_delete:
         log.info(f"Deleting {len(files_to_delete)} obsolete index files")
@@ -490,7 +439,7 @@ def vacuum_iceberg_indices(table: str, index_table: str, index_prefix: str, hist
     print(f"Vacuuming complete, deleted {to_delete_index_files}")
 
 def compact_iceberg_indices(table: str, column: str, index_table: str, index_prefix: str,
-                            type: str, index_impl = 'physical', binpack_row_threshold = 10, extra_configs = {}):
+                            index: RottnestIndex, binpack_row_threshold = 10, extra_configs = {}):
     """
     Compact Rottnest indices
     """
@@ -529,12 +478,13 @@ def compact_iceberg_indices(table: str, column: str, index_table: str, index_pre
             current_group_row_count += record_count
 
     # get rid of index_groups that have only one file
-    index_groups = [i for i, group in enumerate(index_groups) if len(group) > 1]
-    if len(index_groups) == 0:
+    index_groups_to_keep = [i for i, group in enumerate(index_groups) if len(group) > 1]
+    if len(index_groups_to_keep) == 0:
         print("No indices to merge")
         return
-    record_counts = [record_counts[i] for i in index_groups]
-    covered_files = [covered_files[i] for i in index_groups]
+    record_counts = [record_counts[i] for i in index_groups_to_keep]
+    covered_files = [covered_files[i] for i in index_groups_to_keep]
+    index_groups = [index_groups[i] for i in index_groups_to_keep]
     
     index_file_paths = []
 
@@ -554,17 +504,7 @@ def compact_iceberg_indices(table: str, column: str, index_table: str, index_pre
         # Define the worker function that will run in a separate thread
         def indexing_worker():
             try:
-                # Call the appropriate indexing function based on the type
-                if type.lower() == 'bm25':
-                    merge_index_bm25(index_file_path, group)
-                elif type.lower() == 'substring':
-                    merge_index_substring(index_file_path, group, extra_configs.get('char_index', False))
-                elif type.lower() == 'vector':
-                    raise Exception("Vector search not supported for merging")
-                elif type.lower() == 'uuid':
-                    merge_index_uuid(index_file_path, group)
-                else:
-                    raise ValueError(f"Unsupported index type: {type}")
+                merge_indices(index, index_file_path, group)
                 
                 # If we get here, indexing was successful
                 indexing_success[0] = True
@@ -617,8 +557,8 @@ def compact_iceberg_indices(table: str, column: str, index_table: str, index_pre
             'file_path': covered_files,
             'record_counts': record_count,
             'index_file': f"{index_prefix}/{index_file_path}",
-            'index_type': type,
-            'index_impl': index_impl,
+            'index_type': index.name,
+            'index_impl': index.index_mode,
             'rows_indexed': 0,  # This could be populated with actual count if needed
             'index_timestamp': int(time.time())
         } for index_file_path, record_count, covered_files in zip(index_file_paths, record_counts, covered_files)]

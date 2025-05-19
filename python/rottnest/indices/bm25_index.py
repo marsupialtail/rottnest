@@ -1,7 +1,12 @@
+from rottnest.indices.index_interface import RottnestIndex, CacheRanges
+import rottnest.rottnest as rottnest
+import pyarrow
+import polars
+from typing import List
+import numpy as np
 import os, pickle
 from typing import List
 from tqdm import tqdm
-import numpy as np
 import hashlib
 
 def embed_batch_bgem3(tokens: List[str]):
@@ -88,3 +93,72 @@ def query_expansion_keyword(tokenizer_vocab: List[str], query: str):
 
     print("Expanded tokens: ", tokens)
     return tokens, token_ids, weights
+
+
+class Bm25Index(RottnestIndex):
+    def __init__(self, index_mode: str = 'physical', brute_force_threshold: int = 1000, tokenizer_file: str | None = None):
+        super().__init__('bm25', index_mode, 'str', brute_force_threshold)
+        self.tokenizer_file = tokenizer_file
+        self.tokens = None
+    
+    def brute_force(self, data: pyarrow.Table, column_name: str, query: str, K: int) -> pyarrow.Table:
+        import duckdb
+        con = duckdb.connect()
+        con.register('test_table', data)
+        con.execute("CREATE TABLE table_copy AS (SELECT * FROM test_table)")
+
+        con.execute("""
+        PRAGMA create_fts_index(
+            'table_copy', 'row_nr', 'text'
+        );
+        """)
+
+        result = con.execute(f"""
+            SELECT row_nr, text, score
+            FROM (
+                SELECT *, fts_main_table_copy.match_bm25(
+                        row_nr,
+                        '{" ".join(self.tokens)}',
+                        fields := 'text'
+                    ) AS score
+                    FROM table_copy
+            ) sq
+            WHERE score IS NOT NULL
+            ORDER BY score DESC
+            LIMIT {K};
+            """).arrow()
+
+        # reset the tokens to none after consuming it.
+        # this assumes brute force inv. directly follow search_index inv. that sets this.    
+        self.tokens = None
+
+        return result
+
+    def build_index(self, data_arr: pyarrow.Array, uid_arr: pyarrow.Array, index_name: str) -> CacheRanges:
+        return CacheRanges(rottnest.build_lava_bm25(index_name, data_arr, uid_arr, self.tokenizer_file))
+
+    def search_index(self, indices: List[str], query: str, K: int, query_expansion = "bge", quality_factor = 0.2, expansion_tokens = 20, cache_dir = None) -> List[tuple[int, int]]:
+        assert query_expansion in {"bge", "openai", "keyword", "none"}
+        
+        tokenizer_vocab = rottnest.get_tokenizer_vocab([f"{index_name}.lava" for index_name in indices])
+
+        if query_expansion in {"bge","openai"}:
+            tokens, token_ids, weights = query_expansion_llm(tokenizer_vocab, query, method = query_expansion, expansion_tokens=expansion_tokens, cache_dir = cache_dir)
+        elif query_expansion == "keyword":
+            tokens, token_ids, weights = query_expansion_keyword(tokenizer_vocab, query)
+        else:
+            from tokenizers import Tokenizer
+            tok = Tokenizer.from_file("../tok/tokenizer.json")
+            token_ids = tok.encode(query).ids
+            tokens = [tokenizer_vocab[i] for i in token_ids]
+            weights = [1] * len(token_ids)
+            print(tokens)
+
+        # metadata_file = f"{index_name}.meta"
+        index_search_results = rottnest.search_lava_bm25([f"{index_name}.lava" for index_name in indices], token_ids, weights, int(K * quality_factor), reader_type = reader_type)
+        self.tokens = tokens
+        return index_search_results
+    
+    def compact_indices(self, new_index_name: str, indices: List[str], offsets: np.array) -> CacheRanges:
+        cache_ranges = rottnest.merge_lava_generic(f"{new_index_name}.lava", [f"{name}.lava" for name in indices], offsets, 0)
+        return CacheRanges(cache_ranges)

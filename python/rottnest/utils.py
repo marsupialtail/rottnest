@@ -9,6 +9,8 @@ import os
 from pyarrow.fs import S3FileSystem, LocalFileSystem
 import json
 from concurrent.futures import ThreadPoolExecutor
+from rottnest.indices.index_interface import RottnestIndex
+import uuid
 
 def get_fs_from_file_path(filepath):
 
@@ -181,3 +183,48 @@ def return_full_result(result: polars.DataFrame, metadata: polars.DataFrame, col
         return result.select(columns + [column_name])
     else:
         return result.select([column_name])
+
+def index_files(index: RottnestIndex, file_paths: list[str], column_name: str, name = uuid.uuid4().hex, index_mode = "physical", remote = None):
+    
+    arr, uid, file_data = get_physical_layout(file_paths, column_name, type=index.data_type, remote = remote) if index_mode == "physical" else get_virtual_layout(file_paths, column_name, "uid", remote = remote)
+    cache_ranges = index.build_index(arr, uid, f"{name}.lava")
+    file_data = file_data.to_arrow()
+    file_data = file_data.replace_schema_metadata({"cache_ranges": json.dumps(cache_ranges.cache_ranges)})
+    pq.write_table(file_data, f"{name}.meta", write_statistics = False, compression = 'zstd')
+
+def merge_metadatas(index_names: List[str], suffix = "meta"):
+    assert len(index_names) > 1
+    
+    metadatas = []
+    for index_name in index_names:
+        fs = get_fs_from_file_path(f"{index_name}.{suffix}")
+        table = pq.read_table(f"{index_name.replace('s3://', '')}.{suffix}", filesystem=fs)
+        metadatas.append(polars.from_arrow(table))
+    
+    metadata_lens = [len(metadata) for metadata in metadatas]
+    offsets = np.cumsum([0] + metadata_lens)[:-1]
+    metadatas = [metadata.with_columns(polars.col("uid") + offsets[i]) for i, metadata in enumerate(metadatas)]
+    return offsets, polars.concat(metadatas)
+
+def merge_indices(index: RottnestIndex, new_index_name: str, indices: List[str]):
+    offsets, file_data = merge_metadatas(indices)
+    cache_ranges = index.compact_indices(new_index_name, indices, offsets)
+    file_data = file_data.to_arrow().replace_schema_metadata({"cache_ranges": json.dumps(cache_ranges.cache_ranges)})
+    pq.write_table(file_data, f"{new_index_name}.meta", write_statistics = False, compression = 'zstd')
+
+def search_index(index: RottnestIndex, indices: List[str], query: str, K: int, columns: list[str] = [], **kwargs):
+    metadata = get_metadata_and_populate_cache(indices)
+    index_search_results = index.search_index([f"{index_name}.lava" for index_name in indices], query, K, **kwargs)
+
+    print(index_search_results)
+
+    if len(index_search_results) == 0:
+        return None
+    
+    if len(index_search_results) > index.brute_force_threshold:
+        return "Brute Force Everything Please"
+
+    result, column_name, metadata = get_result_from_index_result(metadata, index_search_results)
+    result =  polars.from_arrow(index.brute_force(result, column_name, query, K))
+
+    return return_full_result(result, metadata, column_name, columns)
