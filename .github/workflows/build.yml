@@ -6,47 +6,35 @@ jobs:
   build-linux:
     name: Build Rust Project on Linux
     runs-on: ubuntu-latest
-    container:
-      image: ghcr.io/pyo3/maturin
+
     steps:
-      - name: Clone Repository
+      - uses: actions/checkout@v4
+        name: Checkout code
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.x'
+
+      - name: Install Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          default: true
+          profile: minimal
+
+      - name: Install Maturin
         run: |
-          git config --global --add safe.directory /__w/${GITHUB_REPOSITORY#*/}/${GITHUB_REPOSITORY#*/}
-          git clone https://github.com/${GITHUB_REPOSITORY}.git .
-          git checkout ${GITHUB_SHA}
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          
+          python -m pip install maturin
+
       - name: Build with Maturin
         run: |
-          yum update -y
-          yum install -y openssl openssl-devel perl-IPC-Cmd perl-core
-          rustup default stable
           maturin build --release --features py --out dist
- 
-      - name: Create Release
-        run: |
-          RELEASE_RESPONSE=$(curl -X POST \
-            -H "Accept: application/vnd.github+json" \
-            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
-            https://api.github.com/repos/${GITHUB_REPOSITORY}/releases \
-            -d "{\"tag_name\":\"${GITHUB_SHA}\",\"name\":\"Build ${GITHUB_SHA}\",\"draft\":false,\"prerelease\":false}")
-          echo "RELEASE_ID=$(echo $RELEASE_RESPONSE | jq -r .id)" >> $GITHUB_ENV
 
-
-      - name: Upload artifacts
-        run: |
-          cd dist
-          for file in *; do
-            curl -X POST \
-              -H "Accept: application/vnd.github+json" \
-              -H "Authorization: Bearer ${GITHUB_TOKEN}" \
-              -H "Content-Type: $(file -b --mime-type $file)" \
-              --data-binary @"$file" \
-              "https://uploads.github.com/repos/${GITHUB_REPOSITORY}/releases/${GITHUB_RUN_ID}/assets?name=$file"
-          done
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-linux-amd64
+          path: dist/*
   
   build-macos-arm:
     name: Build Rust Project on macOS Arm
@@ -82,33 +70,32 @@ jobs:
           path: dist/*
 
   build-linux-arm64:
-    name: Build Rust Project on macOS Arm with Linux to make linux arm64
-    runs-on: macos-14
+    name: Build Rust Project on Linux arm64
+    runs-on: ubuntu-24.04-arm
 
     steps:
       - uses: actions/checkout@v4
         name: Checkout code
 
-      - name: Install Docker
-        run: |
-          brew install podman
-          
-      - name: Start colima
-        run: | 
-          podman machine init
-          podman machine start
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.x'
 
-      - name: Create Dockerfile.build
-        run: |
-          cat <<EOF > Dockerfile.build
-          FROM ghcr.io/pyo3/maturin
-          RUN yum update -y && yum install -y openssl-devel
-          EOF
+      - name: Install Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          default: true
+          profile: minimal
 
-      - name: Build build image
+      - name: Install Maturin
         run: |
-          podman build -t docker.io/library/maturin-linux-arm64:latest -f Dockerfile.build .
-          podman run --rm -v $(pwd):/app -w /app maturin-linux-arm64 --release --features py --out dist
+          python -m pip install maturin
+
+      - name: Build with Maturin
+        run: |
+          maturin build --release --features py --out dist
 
       - uses: actions/upload-artifact@v4
         with:
