@@ -21,7 +21,7 @@ maturin develop --release --features "py,logcloud"
 
 ## How to use
 
-Build indices on your Parquet files, merge them, and query them. Very simple. Let's walk through a very simple example, in `demo.py`. It builds a BM25 index on two Parquet files, merges the indices, and searches the merged index for records related to cell phones. The code is here:
+Currently Rottnest's API is expected to be relatively stable, pending a formal release soon.
 
 ```
 from rottnest import iceberg
