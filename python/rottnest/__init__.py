@@ -1,5 +1,5 @@
 import rottnest as rottnest
-from . import iceberg
+from .backends import iceberg
 from .indices.index_interface import RottnestIndex
 from .indices.bm25_index import Bm25Index
 from .indices.substring_index import SubstringIndex

@@ -8,7 +8,7 @@ import uuid
 import pyarrow.compute as pac
 import time
 import multiprocessing
-from rottnest.utils import get_physical_layout, get_metadata_and_populate_cache, get_result_from_index_result, return_full_result
+from rottnest.backends.utils import get_physical_layout, get_metadata_and_populate_cache, get_result_from_index_result, return_full_result
 # refactor later 
 
 def index_files_logcloud(file_paths: List[str], column_name: str, name = uuid.uuid4().hex, remote = None, 

@@ -17,12 +17,10 @@ from .utils import get_fs_from_file_path, get_physical_layout, index_files, merg
 import boto3
 from datetime import datetime, timezone, timedelta
 from rottnest.indices.index_interface import RottnestIndex
-
+from dataclasses import dataclass, field
 
 CATALOG_NAME = os.getenv("CATALOG_NAME")
 CATALOG_AWS_REGION = os.getenv("CATALOG_AWS_REGION")
-
-INDEX_TIMEOUT = 3600
 
 log = logging.getLogger(__name__)
 log.setLevel(logging.INFO)
@@ -50,54 +48,92 @@ def load_table(table_name: str, retries = 10):
                 raise
             time.sleep(2)
 
-def index_iceberg(table: str, column: str, index_table: str, iceberg_location: str, 
-    index_prefix: str, index: RottnestIndex, binpack_row_threshold = 10000, extra_configs = {}):
+@dataclass
+class IcebergConfig:
+    """Configuration class for Iceberg table indexing operations.
+
+    This class holds all necessary configuration parameters for creating, managing,
+    and searching Rottnest indices on Iceberg tables.
+
+    Attributes:
+        table (str): The fully qualified name of the Iceberg table (e.g., 'database.table_name').
+        column (str): The name of the column to be indexed.
+        index_table (str): The fully qualified name of the table that stores index metadata.
+        iceberg_location (str): The S3 path where Iceberg table data is stored.
+        index_prefix (str): The S3 prefix where index files will be stored (trailing slashes are automatically stripped).
+        binpack_row_threshold (int, optional): Maximum number of rows covered by a single index file. 
+            Defaults to 10000.
+        index_timeout (int, optional): Timeout in seconds for indexing operations. (For more info, see: https://www.computer.org/csdl/proceedings-article/icde/2025/360300b814/26FZAoq0tXy) 
+            Defaults to 3600 (1 hour).
+        extra_configs (dict, optional): Additional configuration parameters for specific index types.
+            Defaults to empty dict.
+
+    Example:
+        >>> config = IcebergConfig(
+        ...     table="mydb.mytable",
+        ...     column="text_column",
+        ...     index_table="mydb.myindex",
+        ...     iceberg_location="s3://mybucket/warehouse/",
+        ...     index_prefix="s3://mybucket/indices/",
+        ...     binpack_row_threshold=5000
+        ... )
+    """
+    table: str
+    column: str
+    index_table: str
+    iceberg_location: str
+    index_prefix: str
+    binpack_row_threshold: int = 10000
+    index_timeout: int = 3600
+    extra_configs: dict = field(default_factory=dict)
+
+    def __post_init__(self):
+        """Post-initialization processing.
+        
+        Strips trailing slashes from index_prefix to ensure consistent path handling.
+        """
+        self.index_prefix = self.index_prefix.rstrip('/')
+
+def index_iceberg(config: IcebergConfig, index: RottnestIndex, extra_index_kwargs = {}):
     """
     Index an Iceberg table with Rottnest.
     
     Args:
-        table: The name of the Iceberg table to index
-        column: The column to index
-        index_table: The name of the Iceberg table to store index metadata
-        type: The type of index to build ('bm25', 'substring', 'vector', 'uuid')
-        index_impl: The implementation of the index ('physical' or 'virtual')
-        extra_configs: Additional configuration parameters for the indexing
+        config: IcebergConfig
+        index: RottnestIndex
     
     Returns:
         The name of the index file created
     """
-
-    index_prefix = index_prefix.rstrip('/')
-    assert 's3://' in index_prefix, "Index prefix must be an S3 path"
     
     # Step 1: Plan - Find Parquet files in the current snapshot that aren't indexed yet
-    iceberg_table = load_table(table)
-    assert iceberg_table is not None, f"Table {table} not found"
+    iceberg_table = load_table(config.table)
+    assert iceberg_table is not None, f"Table {config.table} not found"
     
     data_files = polars.from_arrow(iceberg_table.inspect.data_files())
     # only index data files, not position deletion files or equality delete files.
     data_files = data_files.filter(polars.col('content') == 0).select(['file_path','record_count'])
 
     if len(data_files) == 0:
-        log.info(f"No Parquet files found in the current snapshot of {table}")
+        log.info(f"No Parquet files found in the current snapshot of {config.table}")
         return None
     
     # Get the list of files that have already been indexed
     metadata_table = None
     try:
-        metadata_table = load_table(index_table, retries=1)
+        metadata_table = load_table(config.index_table, retries=1)
         indexed_files_df = polars.from_pandas(metadata_table.scan(selected_fields=("file_path",)).to_pandas())
         indexed_files = set(indexed_files_df.explode('file_path')['file_path'])
-        log.info(f"Found {len(indexed_files)} indexed files in {index_table}")
+        log.info(f"Found {len(indexed_files)} indexed files in {config.index_table}")
     except NoSuchTableError:
-        log.error(f"Failed to load metadata table {index_table}, no existing index, constructing new index.")
+        log.error(f"Failed to load metadata table {config.index_table}, no existing index, constructing new index.")
         indexed_files = set()
     
     # Find files that need to be indexed
     files_to_index = data_files.filter(~polars.col('file_path').is_in(indexed_files))
 
     if len(files_to_index) == 0:
-        log.info(f"All files in the current snapshot of {table} are already indexed")
+        log.info(f"All files in the current snapshot of {config.table} are already indexed")
         return None
 
     index_groups = [[]]
@@ -110,7 +146,7 @@ def index_iceberg(table: str, column: str, index_table: str, iceberg_location: s
             record_counts[-1].append(row['record_count'])
             current_group_row_count = row['record_count']
         # If adding this file would exceed threshold and current group has files
-        elif current_group_row_count + row['record_count'] > binpack_row_threshold and len(index_groups[-1]) > 0:
+        elif current_group_row_count + row['record_count'] > config.binpack_row_threshold and len(index_groups[-1]) > 0:
             index_groups.append([row['file_path']])  # Start new group with current file
             record_counts.append([row['record_count']])
             current_group_row_count = row['record_count']
@@ -135,16 +171,13 @@ def index_iceberg(table: str, column: str, index_table: str, iceberg_location: s
         index_file_path = f"{uuid.uuid4().hex[:8]}"
         index_file_paths.append(index_file_path)
         
-        # Set timeout for the indexing operation
-        timeout = extra_configs.get('timeout', INDEX_TIMEOUT)  # Default timeout: 1 hour
-        
         worker_exception = None
         indexing_success = [False]
 
         # Define the worker function that will run in a separate thread
         def indexing_worker():
             try:
-                index_files(index, group, column, index_file_path, index_mode = "physical", remote = None)
+                index_files(index, group, config.column, index_file_path, index_mode = "physical", remote = None)
                 
                 # If we get here, indexing was successful
                 indexing_success[0] = True
@@ -152,7 +185,7 @@ def index_iceberg(table: str, column: str, index_table: str, iceberg_location: s
                 # copy the index file to the specified prefix
                 s3 = boto3.client('s3')
                 # Parse the S3 path to extract bucket and key
-                index_prefix_without_s3 = index_prefix.replace('s3://', '')
+                index_prefix_without_s3 = config.index_prefix.replace('s3://', '')
                 bucket_name = index_prefix_without_s3.split('/')[0]
                 key_prefix = '/'.join(index_prefix_without_s3.split('/')[1:])
                 key = f"{key_prefix}/{index_file_path}" if key_prefix else index_file_path
@@ -174,11 +207,11 @@ def index_iceberg(table: str, column: str, index_table: str, iceberg_location: s
         worker_thread.start()
         
         # Wait for the worker to complete or timeout
-        worker_thread.join(timeout)
+        worker_thread.join(config.index_timeout)
         
         # Check if the thread is still alive (timeout occurred)
         if worker_thread.is_alive():
-            log.error(f"Indexing operation timed out after {timeout} seconds")
+            log.error(f"Indexing operation timed out after {config.index_timeout} seconds")
             # We can't forcibly terminate the thread in Python, but we can proceed
             # and let it run in the background
             return None
@@ -192,11 +225,11 @@ def index_iceberg(table: str, column: str, index_table: str, iceberg_location: s
     try:
     # Step 3: Commit - Insert records into the metadata table
         metadata_records = [{
-            'table_name': table,
-            'column_name': column,
+            'table_name': config.table,
+            'column_name': config.column,
             'file_path': group,
             'record_counts': record_count,
-            'index_file': f"{index_prefix}/{index_file_path}",
+            'index_file': f"{config.index_prefix}/{index_file_path}",
             'index_type': index.name,
             'index_impl': index.index_mode,
             'rows_indexed': 0,  # This could be populated with actual count if needed
@@ -210,13 +243,13 @@ def index_iceberg(table: str, column: str, index_table: str, iceberg_location: s
         if metadata_table is None:
             catalog = default_catalog()
             # Create the table with the schema from our metadata DataFrame
-            iceberg_location = iceberg_location.rstrip('/')
-            db, table = index_table.split('.')
-            metadata_table = catalog.create_table(index_table, location = f"{iceberg_location}/{db}.db/{table}", schema=metadata_df.schema, properties={})
+            iceberg_location = config.iceberg_location.rstrip('/')
+            db, table = config.index_table.split('.')
+            metadata_table = catalog.create_table(config.index_table, location = f"{iceberg_location}/{db}.db/{table}", schema=metadata_df.schema, properties={})
 
         metadata_table.append(metadata_df)
         
-        log.info(f"Successfully indexed {len(files_to_index)} files for {table}.{column} with index {index_file_path}")
+        log.info(f"Successfully indexed {len(files_to_index)} files for {config.table}.{config.column} with index {index_file_path}")
         return index_file_paths      
         
     except Exception as e:
@@ -232,7 +265,7 @@ def index_iceberg(table: str, column: str, index_table: str, iceberg_location: s
         return None
 
 
-def search_iceberg(table: str, column: str, index_table: str, query: Any, index: RottnestIndex, K: int = 10, extra_configs = {}):
+def search_iceberg(config: IcebergConfig, query: Any, index: RottnestIndex, K: int = 10, extra_search_configs = {}):
     """
     Search an Iceberg table using Rottnest indices.
     
@@ -249,8 +282,8 @@ def search_iceberg(table: str, column: str, index_table: str, query: Any, index:
         The search results as a DataFrame
     """
     # Step 1: Plan - Find which index files cover the Parquet files in the snapshot
-    iceberg_table = load_table(table)
-    metadata_table = load_table(index_table)
+    iceberg_table = load_table(config.table)
+    metadata_table = load_table(config.index_table)
     
     # Get the list of data files in the current snapshot
     data_files = polars.from_arrow(iceberg_table.inspect.data_files())
@@ -259,7 +292,7 @@ def search_iceberg(table: str, column: str, index_table: str, query: Any, index:
         exit()
     data_files = list(data_files.filter(polars.col('content') == 0)['file_path'])
     if not data_files:
-        log.info(f"No data files found in the snapshot of {table}")
+        log.info(f"No data files found in the snapshot of {config.table}")
         return polars.DataFrame()
     
     # Get the list of indexed files and their corresponding index files
@@ -271,7 +304,7 @@ def search_iceberg(table: str, column: str, index_table: str, query: Any, index:
         index_files = list(indexed_df['index_file'])
         
     except NoSuchTableError:
-        log.error(f"No index has been built at {index_table}")
+        log.error(f"No index has been built at {config.index_table}")
         indexed_files = set()
     
     # Determine which files are indexed and which need to be scanned
@@ -284,7 +317,7 @@ def search_iceberg(table: str, column: str, index_table: str, query: Any, index:
     if len(indexed_files) > 0:
         log.info(f"Searching {len(indexed_files)} indexed files")
 
-        results = search_index(index, index_files, query, K , **extra_configs)
+        results = search_index(index, index_files, query, K , **extra_search_configs)
         
         all_results.append(results)
     
@@ -304,8 +337,8 @@ def search_iceberg(table: str, column: str, index_table: str, query: Any, index:
                 try:
                     # Use PyArrow to read the file
                     fs = get_fs_from_file_path(file_path)
-                    table = pq.read_table(file_path.replace("s3://", ""), columns=[column], filesystem=fs)
-                    filtered = polars.from_arrow(index.brute_force(table, column, query, K))
+                    table = pq.read_table(file_path.replace("s3://", ""), columns=[config.column], filesystem=fs)
+                    filtered = polars.from_arrow(index.brute_force(table, config.column, query, K))
                     
                     # Add file path information
                     if not filtered.is_empty():
@@ -327,7 +360,7 @@ def search_iceberg(table: str, column: str, index_table: str, query: Any, index:
     
     return final_results.head(K)
 
-def vacuum_iceberg_indices(table: str, index_table: str, index_prefix: str, history: int = 30):
+def vacuum_iceberg_indices(config: IcebergConfig, history: int = 30):
     """
     1) Plan: determine which index files in the metadata table
     to keep based on snapshot_id. Rottnest currently
@@ -344,7 +377,7 @@ def vacuum_iceberg_indices(table: str, index_table: str, index_prefix: str, hist
         index_prefix: The prefix of the index files
     """
 
-    iceberg_table = load_table(table)
+    iceberg_table = load_table(config.table)
     iceberg_snapshots = iceberg_table.inspect.snapshots()
     # get all the files associated with a snapshot 
     iceberg_snapshots_df = polars.from_arrow(iceberg_snapshots)
@@ -365,7 +398,7 @@ def vacuum_iceberg_indices(table: str, index_table: str, index_prefix: str, hist
         live_files.update(files)
     
     # load the index_table into polars dataframe
-    metadata_table = load_table(index_table).scan().to_polars()
+    metadata_table = load_table(config.index_table).scan().to_polars()
     # figure out what index files can be dropped
     keep_rows = []
     to_delete_index_files = []
@@ -381,18 +414,17 @@ def vacuum_iceberg_indices(table: str, index_table: str, index_prefix: str, hist
 
     if len(to_delete_index_files) > 0:
         temp_str = ",".join(["'" + file + "'" for file in to_delete_index_files])
-        load_table(index_table).delete(delete_filter = f"index_file in ({temp_str})")
+        load_table(config.index_table).delete(delete_filter = f"index_file in ({temp_str})")
 
     # list all the files in index_prefix
-    index_prefix = index_prefix.rstrip('/')
     s3 = boto3.client('s3')
-    bucket_name = index_prefix.split('/')[2]
-    key_prefix = '/'.join(index_prefix.split('/')[3:])
+    bucket_name = config.index_prefix.split('/')[2]
+    key_prefix = '/'.join(config.index_prefix.split('/')[3:])
     
     # Use pagination to get all objects and filter by age
     index_files = []
     current_time = datetime.now(timezone.utc)  # S3 timestamps are in UTC
-    timeout_threshold = current_time - timedelta(seconds=INDEX_TIMEOUT)
+    timeout_threshold = current_time - timedelta(seconds=config.index_timeout)
     
     paginator = s3.get_paginator('list_objects_v2')
     for page in paginator.paginate(Bucket=bucket_name, Prefix=key_prefix):
@@ -404,7 +436,7 @@ def vacuum_iceberg_indices(table: str, index_table: str, index_prefix: str, hist
             ]
             index_files.extend([file['Key'] for file in old_files])
     
-    log.info(f"Found {len(index_files)} index files older than {INDEX_TIMEOUT} seconds in {index_prefix}")
+    log.info(f"Found {len(index_files)} index files older than {config.index_timeout} seconds in {config.index_prefix}")
     
     # Now index_files contains all the keys from all pages
     # Filter out index files that are still in the metadata table
@@ -412,8 +444,6 @@ def vacuum_iceberg_indices(table: str, index_table: str, index_prefix: str, hist
     # expand live index files to include the .lava and .meta suffix for each file
     live_index_files = set([f + ".lava" for f in live_index_files] + [f + ".meta" for f in live_index_files])
     files_to_delete = [f for f in index_files if f"s3://{bucket_name}/{f}" not in live_index_files]
-
-    import pdb; pdb.set_trace()
     
     if files_to_delete:
         log.info(f"Deleting {len(files_to_delete)} obsolete index files")
@@ -438,19 +468,16 @@ def vacuum_iceberg_indices(table: str, index_table: str, index_prefix: str, hist
     
     print(f"Vacuuming complete, deleted {to_delete_index_files}")
 
-def compact_iceberg_indices(table: str, column: str, index_table: str, index_prefix: str,
-                            index: RottnestIndex, binpack_row_threshold = 10, extra_configs = {}):
+def compact_iceberg_indices(config: IcebergConfig, index: RottnestIndex, extra_configs = {}):
     """
     Compact Rottnest indices
     """
 
     # load the index_table into polars dataframe
 
-    index_prefix = index_prefix.rstrip('/')
+    metadata_table = load_table(config.index_table).scan().to_polars()
 
-    metadata_table = load_table(index_table).scan().to_polars()
-
-    mergeable_indices = metadata_table.filter(polars.col('record_counts').list.sum() < binpack_row_threshold)
+    mergeable_indices = metadata_table.filter(polars.col('record_counts').list.sum() < config.binpack_row_threshold)
 
     index_groups = [[]]
     record_counts = [[]]
@@ -465,7 +492,7 @@ def compact_iceberg_indices(table: str, column: str, index_table: str, index_pre
             covered_files[-1].extend(row['file_path'])
             current_group_row_count = record_count
         # If adding this file would exceed threshold and current group has files
-        elif current_group_row_count + record_count > binpack_row_threshold and len(index_groups[-1]) > 0:
+        elif current_group_row_count + record_count > config.binpack_row_threshold and len(index_groups[-1]) > 0:
             index_groups.append([row['index_file']])  # Start new group with current file
             record_counts.extend(row['record_counts'])
             covered_files.extend(row['file_path'])
@@ -496,7 +523,7 @@ def compact_iceberg_indices(table: str, column: str, index_table: str, index_pre
         index_file_paths.append(index_file_path)
         
         # Set timeout for the indexing operation
-        timeout = extra_configs.get('timeout', INDEX_TIMEOUT)  # Default timeout: 1 hour
+        timeout = config.index_timeout
         
         worker_exception = None
         indexing_success = [False]
@@ -512,7 +539,7 @@ def compact_iceberg_indices(table: str, column: str, index_table: str, index_pre
                 # copy the index file to the specified prefix
                 s3 = boto3.client('s3')
                 # Parse the S3 path to extract bucket and key
-                index_prefix_without_s3 = index_prefix.replace('s3://', '')
+                index_prefix_without_s3 = config.index_prefix.replace('s3://', '')
                 bucket_name = index_prefix_without_s3.split('/')[0]
                 key_prefix = '/'.join(index_prefix_without_s3.split('/')[1:])
                 key = f"{key_prefix}/{index_file_path}" if key_prefix else index_file_path
@@ -552,11 +579,11 @@ def compact_iceberg_indices(table: str, column: str, index_table: str, index_pre
     try:
     # Step 3: Commit - Insert records into the metadata table
         metadata_records = [{
-            'table_name': table,
-            'column_name': column,
+            'table_name': config.table,
+            'column_name': config.column,
             'file_path': covered_files,
             'record_counts': record_count,
-            'index_file': f"{index_prefix}/{index_file_path}",
+            'index_file': f"{config.index_prefix}/{index_file_path}",
             'index_type': index.name,
             'index_impl': index.index_mode,
             'rows_indexed': 0,  # This could be populated with actual count if needed
@@ -564,7 +591,7 @@ def compact_iceberg_indices(table: str, column: str, index_table: str, index_pre
         } for index_file_path, record_count, covered_files in zip(index_file_paths, record_counts, covered_files)]
         
         metadata_df = polars.DataFrame(metadata_records).to_arrow()       
-        load_table(index_table).append(metadata_df)
+        load_table(config.index_table).append(metadata_df)
         
         # you also have to delete rows associated with the old index files
         # this must happen after you do the append transaction. If the process fails in between the two transactions,
@@ -574,7 +601,7 @@ def compact_iceberg_indices(table: str, column: str, index_table: str, index_pre
 
         index_groups = [item for sublist in index_groups for item in sublist]
         temp_str = ",".join(["'" + file + "'" for file in index_groups])
-        load_table(index_table).delete(delete_filter = f"index_file in ({temp_str})")
+        load_table(config.index_table).delete(delete_filter = f"index_file in ({temp_str})")
         
         return index_file_paths      
         
