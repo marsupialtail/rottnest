@@ -1,7 +1,7 @@
 import pyarrow
 import pyarrow.parquet as pq
 import rottnest.rottnest as rottnest
-from typing import List, Optional
+from typing import List, Optional, Tuple
 import polars
 import numpy as np
 from botocore.config import Config
@@ -228,3 +228,104 @@ def search_index(index: RottnestIndex, indices: List[str], query: str, K: int, c
     result =  polars.from_arrow(index.brute_force(result, column_name, query, K))
 
     return return_full_result(result, metadata, column_name, columns)
+
+import logging
+from logging import Logger
+
+def search_parquet_lake(index_files: list[str], indexed_files: list[str], unindexed_files: list[str], column: str, query: str, index: RottnestIndex, 
+                        K: int = 10, extra_search_configs = {}, log: Logger = logging.getLogger(__name__)) -> polars.DataFrame:
+    
+    # Step 2: Query Index - Search each index file in parallel
+    all_results = []
+
+    if len(indexed_files) > 0:
+        log.info(f"Searching {len(indexed_files)} indexed files")
+        results = search_index(index, index_files, query, K , **extra_search_configs)
+        all_results.append(results)
+    
+    print(all_results)
+    
+    # Step 3: In-situ Probing - Scan unindexed files if necessary
+    if unindexed_files and (not all_results or len(all_results[0]) < K):
+        log.info(f"Scanning {len(unindexed_files)} unindexed files")
+        
+        # Scan unindexed files
+        try:
+            # Create a temporary table with just the unindexed files
+            scan_results = []
+            
+            # Read and scan each unindexed file
+            for file_path in unindexed_files:
+                try:
+                    # Use PyArrow to read the file
+                    fs = get_fs_from_file_path(file_path)
+                    table = pq.read_table(file_path.replace("s3://", ""), columns=[column], filesystem=fs)
+                    filtered = polars.from_arrow(index.brute_force(table, column, query, K))
+                    
+                    # Add file path information
+                    if not filtered.is_empty():
+                        filtered = filtered.with_columns(polars.lit(file_path).alias("file_path"))
+                        scan_results.append(filtered)
+                except Exception as e:
+                    log.error(f"Error scanning file {file_path}: {e}")
+            
+            if scan_results:
+                all_results.append(polars.concat(scan_results))
+        except Exception as e:
+            log.error(f"Error during unindexed file scan: {e}")
+    
+    # Combine all results and apply top-K
+    if not all_results:
+        return polars.DataFrame()
+    
+    final_results = polars.concat(all_results)
+    return final_results
+
+def group_mergeable_indices(mergeable_indices: polars.DataFrame, binpack_row_threshold: int) -> Tuple[List[List[str]], List[List[int]], List[List[str]]]:
+    """Group mergeable indices based on row count threshold.
+    
+    Args:
+        mergeable_indices: DataFrame containing index files and their record counts
+        binpack_row_threshold: Maximum number of rows allowed in a group
+        
+    Returns:
+        Tuple containing:
+        - List of index file groups
+        - List of record count groups
+        - List of covered file groups
+    """
+    index_groups = [[]]
+    record_counts = [[]]
+    covered_files = [[]]
+
+    for row in mergeable_indices.iter_rows(named=True):
+        # If current group is empty, always add the file regardless of size
+        record_count = sum(row['record_counts'])
+        if not index_groups[-1]:
+            index_groups[-1].append(row['index_file'])
+            record_counts[-1].extend(row['record_counts'])
+            covered_files[-1].extend(row['file_path'])
+            current_group_row_count = record_count
+        # If adding this file would exceed threshold and current group has files
+        elif current_group_row_count + record_count > binpack_row_threshold and len(index_groups[-1]) > 0:
+            index_groups.append([row['index_file']])  # Start new group with current file
+            record_counts.append(row['record_counts'])
+            covered_files.append(row['file_path'])
+            current_group_row_count = record_count
+        else:
+            # Add to current group
+            index_groups[-1].append(row['index_file'])
+            record_counts[-1].extend(row['record_counts'])
+            covered_files[-1].extend(row['file_path'])
+            current_group_row_count += record_count
+
+    # Filter out groups that have only one file
+    index_groups_to_keep = [i for i, group in enumerate(index_groups) if len(group) > 1]
+    if len(index_groups_to_keep) == 0:
+        return [], [], []
+        
+    record_counts = [record_counts[i] for i in index_groups_to_keep]
+    covered_files = [covered_files[i] for i in index_groups_to_keep]
+    index_groups = [index_groups[i] for i in index_groups_to_keep]
+    
+    return index_groups, record_counts, covered_files

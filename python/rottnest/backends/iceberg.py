@@ -13,12 +13,15 @@ from pyiceberg.catalog.glue import (
 )
 from pyiceberg.exceptions import NoSuchTableError
 from pyiceberg.catalog import load_catalog
-from .utils import get_fs_from_file_path, get_physical_layout, index_files, merge_indices, search_index
+from .utils import (
+    get_fs_from_file_path, get_physical_layout, index_files, merge_indices, 
+    search_index, search_parquet_lake, group_mergeable_indices
+)
 import boto3
 from datetime import datetime, timezone, timedelta
 from rottnest.indices.index_interface import RottnestIndex
 from dataclasses import dataclass, field
-from .s3_utils import list_files
+from .s3_utils import list_files, upload_index_files, delete_s3_files
 CATALOG_NAME = os.getenv("CATALOG_NAME")
 CATALOG_AWS_REGION = os.getenv("CATALOG_AWS_REGION")
 
@@ -182,19 +185,8 @@ def index_iceberg(config: IcebergConfig, index: RottnestIndex, extra_index_kwarg
                 # If we get here, indexing was successful
                 indexing_success[0] = True
 
-                # copy the index file to the specified prefix
-                s3 = boto3.client('s3')
-                # Parse the S3 path to extract bucket and key
-                index_prefix_without_s3 = config.index_prefix.replace('s3://', '')
-                bucket_name = index_prefix_without_s3.split('/')[0]
-                key_prefix = '/'.join(index_prefix_without_s3.split('/')[1:])
-                key = f"{key_prefix}/{index_file_path}" if key_prefix else index_file_path
-                s3.upload_file(index_file_path + ".lava", bucket_name, key + ".lava")
-                s3.upload_file(index_file_path + ".meta", bucket_name, key + ".meta")
-                log.info(f"Index file {index_file_path} uploaded to s3://{bucket_name}/{key}")
-                # Remove the local index file after uploading
-                os.remove(index_file_path + ".lava")
-                os.remove(index_file_path + ".meta")
+                # Upload index files to S3 and clean up local files
+                upload_index_files(index_file_path, config.index_prefix)
 
             except Exception as e:
                 # Store the exception
@@ -310,52 +302,8 @@ def search_iceberg(config: IcebergConfig, query: Any, index: RottnestIndex, K: i
     indexed_files = set(indexed_files)
     unindexed_files = [file for file in data_files if file not in indexed_files]
     
-    # Step 2: Query Index - Search each index file in parallel
-    all_results = []
-
-    if len(indexed_files) > 0:
-        log.info(f"Searching {len(indexed_files)} indexed files")
-
-        results = search_index(index, index_files, query, K , **extra_search_configs)
-        
-        all_results.append(results)
-    
-    print(all_results)
-    
-    # Step 3: In-situ Probing - Scan unindexed files if necessary
-    if unindexed_files and (not all_results or len(all_results[0]) < K):
-        log.info(f"Scanning {len(unindexed_files)} unindexed files")
-        
-        # Scan unindexed files
-        try:
-            # Create a temporary table with just the unindexed files
-            scan_results = []
-            
-            # Read and scan each unindexed file
-            for file_path in unindexed_files:
-                try:
-                    # Use PyArrow to read the file
-                    fs = get_fs_from_file_path(file_path)
-                    table = pq.read_table(file_path.replace("s3://", ""), columns=[config.column], filesystem=fs)
-                    filtered = polars.from_arrow(index.brute_force(table, config.column, query, K))
-                    
-                    # Add file path information
-                    if not filtered.is_empty():
-                        filtered = filtered.with_columns(polars.lit(file_path).alias("file_path"))
-                        scan_results.append(filtered)
-                except Exception as e:
-                    log.error(f"Error scanning file {file_path}: {e}")
-            
-            if scan_results:
-                all_results.append(polars.concat(scan_results))
-        except Exception as e:
-            log.error(f"Error during unindexed file scan: {e}")
-    
-    # Combine all results and apply top-K
-    if not all_results:
-        return polars.DataFrame()
-    
-    final_results = polars.concat(all_results)
+    final_results = search_parquet_lake(index_files,indexed_files, unindexed_files, config.column, 
+                                        query, index, K, extra_search_configs)
     
     return final_results.head(K)
 
@@ -407,7 +355,6 @@ def vacuum_iceberg_indices(config: IcebergConfig, history: int = 30):
             keep_rows.append(i)
         else:
             to_delete_index_files.append(metadata_table['index_file'][i])
-    
 
     metadata_table = metadata_table[keep_rows]
 
@@ -433,22 +380,7 @@ def vacuum_iceberg_indices(config: IcebergConfig, history: int = 30):
     
     if files_to_delete:
         log.info(f"Deleting {len(files_to_delete)} obsolete index files")
-        # S3 delete_objects requires keys to be in a specific format
-        objects_to_delete = [{'Key': key} for key in files_to_delete]
-        
-        # S3 can only delete up to 1000 objects in one call, so we need to batch
-        batch_size = 1000
-        for i in range(0, len(objects_to_delete), batch_size):
-            batch = objects_to_delete[i:i + batch_size]
-            s3.delete_objects(
-                Bucket=bucket_name,
-                Delete={
-                    'Objects': batch,
-                    'Quiet': True  # Don't return the result of each deletion
-                }
-            )
-        
-        log.info(f"Successfully deleted {len(files_to_delete)} obsolete index files")
+        delete_s3_files(bucket_name, files_to_delete)
     else:
         log.info("No obsolete index files to delete")
     
@@ -465,43 +397,14 @@ def compact_iceberg_indices(config: IcebergConfig, index: RottnestIndex, extra_c
 
     mergeable_indices = metadata_table.filter(polars.col('record_counts').list.sum() < config.binpack_row_threshold)
 
-    index_groups = [[]]
-    record_counts = [[]]
-    covered_files = [[]]
-
-    for i, row in enumerate(mergeable_indices.iter_rows(named=True)):
-        # If current group is empty, always add the file regardless of size
-        record_count = sum(row['record_counts'])
-        if not index_groups[-1]:
-            index_groups[-1].append(row['index_file'])
-            record_counts[-1].extend(row['record_counts'])
-            covered_files[-1].extend(row['file_path'])
-            current_group_row_count = record_count
-        # If adding this file would exceed threshold and current group has files
-        elif current_group_row_count + record_count > config.binpack_row_threshold and len(index_groups[-1]) > 0:
-            index_groups.append([row['index_file']])  # Start new group with current file
-            record_counts.extend(row['record_counts'])
-            covered_files.extend(row['file_path'])
-            current_group_row_count = record_count
-        else:
-            # Add to current group
-            index_groups[-1].append(row['index_file'])
-            record_counts[-1].extend(row['record_counts'])
-            covered_files[-1].extend(row['file_path'])
-            current_group_row_count += record_count
-
-    # get rid of index_groups that have only one file
-    index_groups_to_keep = [i for i, group in enumerate(index_groups) if len(group) > 1]
-    if len(index_groups_to_keep) == 0:
+    index_groups, record_counts, covered_files = group_mergeable_indices(mergeable_indices, config.binpack_row_threshold)
+    if not index_groups:
         print("No indices to merge")
         return
-    record_counts = [record_counts[i] for i in index_groups_to_keep]
-    covered_files = [covered_files[i] for i in index_groups_to_keep]
-    index_groups = [index_groups[i] for i in index_groups_to_keep]
-    
+
     index_file_paths = []
 
-    for group, record_count in zip(index_groups, record_counts):
+    for group in index_groups:
         log.info(f"Indexing group of {len(group)} files")
         
         # Step 2: Index - Build an index for the new files
@@ -522,19 +425,8 @@ def compact_iceberg_indices(config: IcebergConfig, index: RottnestIndex, extra_c
                 # If we get here, indexing was successful
                 indexing_success[0] = True
 
-                # copy the index file to the specified prefix
-                s3 = boto3.client('s3')
-                # Parse the S3 path to extract bucket and key
-                index_prefix_without_s3 = config.index_prefix.replace('s3://', '')
-                bucket_name = index_prefix_without_s3.split('/')[0]
-                key_prefix = '/'.join(index_prefix_without_s3.split('/')[1:])
-                key = f"{key_prefix}/{index_file_path}" if key_prefix else index_file_path
-                s3.upload_file(index_file_path + ".lava", bucket_name, key + ".lava")
-                s3.upload_file(index_file_path + ".meta", bucket_name, key + ".meta")
-                log.info(f"Index file {index_file_path} uploaded to s3://{bucket_name}/{key}")
-                # Remove the local index file after uploading
-                os.remove(index_file_path + ".lava")
-                os.remove(index_file_path + ".meta")
+                # Upload index files to S3 and clean up local files
+                upload_index_files(index_file_path, config.index_prefix)
 
             except Exception as e:
                 # Store the exception
