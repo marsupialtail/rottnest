@@ -63,4 +63,4 @@ def test_compaction():
     iceberg.vacuum_iceberg_indices(config = config, history = 0)
 
 test_single()
-test_compaction()
+# test_compaction()

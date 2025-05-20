@@ -12,6 +12,9 @@ def list_files(bucket_name, key_prefix, index_timeout_seconds: int | None = None
 
     results = []
 
+    if index_timeout_seconds is None:
+        index_timeout_seconds = 0
+
     s3 = boto3.client('s3')
     current_time = datetime.now(timezone.utc)  # S3 timestamps are in UTC
     timeout_threshold = current_time - timedelta(seconds=index_timeout_seconds)

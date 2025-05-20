@@ -91,13 +91,13 @@ def read_parquet_table():
         print(f"Error reading parquet files: {e}")
         raise
 
-def cleanup_parquet_table():
+def cleanup_parquet_table(prefix: str = 'parquet_data/test/'):
     """Delete all parquet files in the S3 prefix"""
     try:
         # List all objects in the prefix
         response = s3.list_objects_v2(
             Bucket=BUCKET_NAME,
-            Prefix='parquet_data/test/'
+            Prefix=prefix
         )
         
         if 'Contents' not in response:
@@ -111,7 +111,7 @@ def cleanup_parquet_table():
                 Key=obj['Key']
             )
             
-        print(f"Successfully deleted all files in {S3_PREFIX}")
+        print(f"Successfully deleted all files in {prefix}")
         
     except Exception as e:
         print(f"Error cleaning up parquet files: {e}")

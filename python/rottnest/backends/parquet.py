@@ -85,22 +85,22 @@ def index_parquet(config: ParquetConfig, index: RottnestIndex, extra_index_kwarg
     index_groups = [[]]
     record_counts = [[]]
     current_group_row_count = 0 
-    for i, row in enumerate(files_to_index.iter_rows(named=True)):
+    for file_path, record_count in zip(files_to_index, record_counts):
         # If current group is empty, always add the file regardless of size
         if not index_groups[-1]:
-            index_groups[-1].append(row['file_path'])
-            record_counts[-1].append(row['record_count'])
-            current_group_row_count = row['record_count']
+            index_groups[-1].append(file_path)
+            record_counts[-1].append(record_count)
+            current_group_row_count = record_count
         # If adding this file would exceed threshold and current group has files
-        elif current_group_row_count + row['record_count'] > config.binpack_row_threshold and len(index_groups[-1]) > 0:
-            index_groups.append([row['file_path']])  # Start new group with current file
-            record_counts.append([row['record_count']])
-            current_group_row_count = row['record_count']
+        elif current_group_row_count + record_count > config.binpack_row_threshold and len(index_groups[-1]) > 0:
+            index_groups.append([file_path])  # Start new group with current file
+            record_counts.append([record_count])
+            current_group_row_count = record_count
         else:
             # Add to current group
-            index_groups[-1].append(row['file_path'])
-            record_counts[-1].append(row['record_count'])
-            current_group_row_count += row['record_count']
+            index_groups[-1].append(file_path)
+            record_counts[-1].append(record_count)
+            current_group_row_count += record_count
         
         
     print(index_groups)
@@ -222,7 +222,7 @@ def search_parquet(config: ParquetConfig, query: str, index: RottnestIndex, K: i
     
     return final_results.head(K)
 
-def vacuum_iceberg_indices(config: ParquetConfig):
+def vacuum_parquet_indices(config: ParquetConfig):
     """
     1) Plan: determine which index files in the metadata table
     to keep based on snapshot_id. Rottnest currently
