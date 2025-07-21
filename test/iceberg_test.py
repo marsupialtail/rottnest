@@ -16,7 +16,7 @@ def test_single():
     INDEX_TABLE_NAME = 'test_index_4'
     delete_if_exists(f"{DATABASE_NAME}.{INDEX_TABLE_NAME}")
 
-    config = iceberg.IcebergConfig(
+    config = iceberg.IcebergBackend(
         table = f"{DATABASE_NAME}.{TABLE_NAME}", 
         column = "text", 
         index_table = f"{DATABASE_NAME}.{INDEX_TABLE_NAME}", 
@@ -24,9 +24,9 @@ def test_single():
         index_prefix = f"s3://{BUCKET_NAME}/rottnest_data/", 
     )
 
-    iceberg.index_iceberg(config = config, index = index)
+    config.index_iceberg(index = index)
 
-    iceberg.search_iceberg(config = config, query = "We want to welcome you", index = index, K = 10)
+    config.search_iceberg(query = "We want to welcome you", index = index, K = 10)
 
 def test_compaction():
 
@@ -45,22 +45,21 @@ def test_compaction():
         binpack_row_threshold=10,
     )
 
-    iceberg.index_iceberg(
-        config = config,
+    config.index_iceberg(
         index = index,
     )
 
-    iceberg.search_iceberg(config = config, query = "We want to welcome you", index = index, K = 10)
+    config.search_iceberg(query = "We want to welcome you", index = index, K = 10)
 
     config.binpack_row_threshold = 10_000
 
-    iceberg.compact_iceberg_indices(config = config, index = index)
+    config.compact_iceberg_indices(index = index)
 
-    iceberg.search_iceberg(config = config, query = "We want to welcome you", index = index, K = 10)
+    config.search_iceberg(query = "We want to welcome you", index = index, K = 10)
 
     config.index_timeout = 1
 
-    iceberg.vacuum_iceberg_indices(config = config, history = 0)
+    config.vacuum_iceberg_indices(history = 0)
 
 test_single()
 # test_compaction()
