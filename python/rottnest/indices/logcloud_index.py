@@ -4,6 +4,7 @@ import pyarrow
 import polars
 from typing import List
 import numpy as np
+import os
 import uuid
 import pyarrow.compute as pac
 import time
@@ -33,6 +34,10 @@ def index_files_logcloud(file_paths: List[str], column_name: str, name = uuid.uu
         num_groups += 1
     
     polars.concat([polars.read_parquet(f"{i}.maui") for i in range(num_groups)]).write_parquet(f"{name}.maui")
+    # clean up compressed folder and all the {num_groups}.maui files
+    for i in range(num_groups):
+        os.remove(f"{i}.maui")
+    os.rmdir(f"compressed_{name}")
     rottnest.index_logcloud(name, num_groups, wavelet_tree = wavelet)
 
 
@@ -59,6 +64,14 @@ def search_index_logcloud(indices: List[str], query: str, K: int, columns = [], 
         print("PARQUET LOAD TIME", time.time() - start)
         return result
     elif flag == 0:
+        try:
+            import daft
+        except ImportError:
+            raise ImportError(
+                "getdaft is required for LogCloud search functionality. "
+                "Install it with: pip install rottnest[logcloud]"
+            )
+        
         reversed_filenames = sorted(metadata['file_path'].unique().to_list())[::-1]
         results = []
         start_time = time.time()

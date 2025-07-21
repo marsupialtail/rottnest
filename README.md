@@ -15,9 +15,18 @@ maturin develop --release --features py
 
 ## LogCloud
 Rottnest supports the LogCloud index, a tool for compressing and searching log data.
+
+### Building with LogCloud
 ```
 maturin develop --release --features "py,logcloud"
 ```
+
+### Installing with LogCloud dependencies
+```
+pip install -e ".[logcloud]"
+```
+
+This will automatically install `getdaft` which is required for LogCloud search functionality.
 
 ## How to use
 
