@@ -503,12 +503,13 @@ pub(crate) async fn search_bm25_async(
     {
         let reader_type = match readers[file_id].reader {
             ClonableAsyncReader::AwsSdk(_) => ReaderType::AwsSdk,
+            ClonableAsyncReader::Gcs(_) => ReaderType::Gcs,
             ClonableAsyncReader::Http(_) => ReaderType::Http,
             ClonableAsyncReader::Local(_) => ReaderType::Local,
         };
 
         let mut reader = match reader_type {
-            ReaderType::AwsSdk | ReaderType::Http => readers[file_id].clone(),
+            ReaderType::AwsSdk | ReaderType::Gcs | ReaderType::Http => readers[file_id].clone(),
             ReaderType::Local => {
                 get_file_size_and_reader(readers[file_id].filename.clone(), reader_type)
                     .await

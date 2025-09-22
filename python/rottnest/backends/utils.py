@@ -6,7 +6,7 @@ import polars
 import numpy as np
 from botocore.config import Config
 import os
-from pyarrow.fs import S3FileSystem, LocalFileSystem
+from pyarrow.fs import S3FileSystem, GcsFileSystem, LocalFileSystem
 import json
 from concurrent.futures import ThreadPoolExecutor
 from rottnest.indices.index_interface import RottnestIndex
@@ -17,19 +17,23 @@ def get_fs_from_file_path(filepath):
     if filepath.startswith("s3://"):
         if os.getenv('AWS_VIRTUAL_HOST_STYLE'):
             try:
-                s3fs = S3FileSystem(endpoint_override = os.getenv('AWS_ENDPOINT_URL'), force_virtual_addressing = True )
+                fs = S3FileSystem(endpoint_override = os.getenv('AWS_ENDPOINT_URL'), force_virtual_addressing = True )
             except:
                 raise ValueError("Requires pyarrow >= 16.0.0 for virtual addressing.")
         else:
-            s3fs = S3FileSystem(endpoint_override = os.getenv('AWS_ENDPOINT_URL'))
+            fs = S3FileSystem(endpoint_override = os.getenv('AWS_ENDPOINT_URL'))
+    elif filepath.startswith("gs://") or filepath.startswith("gcs://"):
+        fs = GcsFileSystem()
     else:
-        s3fs = LocalFileSystem()
+        fs = LocalFileSystem()
 
-    return s3fs
+    return fs
 
 def read_metadata_file(file_path: str):
 
-    table = pq.read_table(file_path.replace("s3://",''), filesystem = get_fs_from_file_path(file_path))
+    # Remove the protocol prefix for pyarrow filesystem
+    path = file_path.replace("s3://",'').replace("gs://",'').replace("gcs://",'')
+    table = pq.read_table(path, filesystem = get_fs_from_file_path(file_path))
 
     try:
         cache_ranges = json.loads(table.schema.metadata[b'cache_ranges'].decode())
@@ -41,7 +45,8 @@ def read_metadata_file(file_path: str):
 def read_columns(file_paths: list, row_groups: list, row_nr: list):
 
     def read_parquet_file(file, row_group, row_nr):
-        f = pq.ParquetFile(file.replace("s3://",''), filesystem=get_fs_from_file_path(file))
+        path = file.replace("s3://",'').replace("gs://",'').replace("gcs://",'')
+        f = pq.ParquetFile(path, filesystem=get_fs_from_file_path(file))
         return f.read_row_group(row_group, columns=['id']).take(row_nr)
 
     with ThreadPoolExecutor(max_workers=os.cpu_count()) as executor:  # Control the number of parallel threads
@@ -52,7 +57,8 @@ def read_columns(file_paths: list, row_groups: list, row_nr: list):
 def read_row_groups(file_paths: list, row_groups: list, row_ranges: list, column: str):
 
     def read_parquet_file(file, row_group, row_range):
-        f = pq.ParquetFile(file.replace("s3://",''), filesystem=get_fs_from_file_path(file))
+        path = file.replace("s3://",'').replace("gs://",'').replace("gcs://",'')
+        f = pq.ParquetFile(path, filesystem=get_fs_from_file_path(file))
         return f.read_row_group(row_group, columns=[column])[column].combine_chunks()[row_range[0]:row_range[1]]
 
     with ThreadPoolExecutor(max_workers=os.cpu_count()) as executor:  # Control the number of parallel threads
@@ -129,7 +135,10 @@ def get_metadata_and_populate_cache(indices: List[str], suffix = "meta"):
     
     # Read parquet files using PyArrow instead of Daft
     fs = get_fs_from_file_path(indices[0])
-    metadatas = [pq.read_table(f"{index_name}.{suffix}".replace("s3://", ""), filesystem=fs) for index_name in indices]
+    metadatas = []
+    for index_name in indices:
+        path = f"{index_name}.{suffix}".replace("s3://", "").replace("gs://", "").replace("gcs://", "")
+        metadatas.append(pq.read_table(path, filesystem=fs))
     
     if os.getenv("CACHE_ENABLE") and os.getenv("CACHE_ENABLE").lower() == "true":
         metadatas = [(polars.from_arrow(i), json.loads(i.schema.metadata[b'cache_ranges'].decode())) for i in metadatas]
@@ -137,7 +146,9 @@ def get_metadata_and_populate_cache(indices: List[str], suffix = "meta"):
         cache_ranges = {f"{indices[i]}.lava": f[1] for i, f in enumerate(metadatas) if len(f[1]) > 0}
         cached_files = list(cache_ranges.keys())
         ranges = [[tuple(k) for k in cache_ranges[f]] for f in cached_files]
-        rottnest.populate_cache(cached_files, ranges, "aws")
+        # Determine reader type based on file prefix
+        reader_type = "aws" if indices[0].startswith("s3://") else "gcs" if (indices[0].startswith("gs://") or indices[0].startswith("gcs://")) else "local"
+        rottnest.populate_cache(cached_files, ranges, reader_type)
     else:
         metadatas = [polars.from_arrow(i) for i in metadatas]
         metadata = polars.concat([f.with_columns(polars.lit(i).alias("file_id").cast(polars.Int64)) for i, f in enumerate(metadatas)])
@@ -155,9 +166,13 @@ def get_result_from_index_result(metadata: polars.DataFrame, index_search_result
 
     file_metadatas = {d["file_path"]: d["metadata_bytes"] for d in file_metadatas.to_dicts()}
 
+    # Determine reader type from file paths
+    file_path = metadata["file_path"].to_list()[0] if metadata["file_path"].to_list() else ""
+    reader_type = "aws" if file_path.startswith("s3://") else "gcs" if (file_path.startswith("gs://") or file_path.startswith("gcs://")) else "local"
+    
     result = rottnest.read_indexed_pages(column_name, metadata["file_path"].to_list(), metadata["row_groups"].to_list(),
                                      metadata["data_page_offsets"].to_list(), metadata["data_page_sizes"].to_list(), metadata["dictionary_page_sizes"].to_list(),
-                                     "aws", file_metadatas)
+                                     reader_type, file_metadatas)
     
     # magic number 2044 for vetors
     # result = read_row_groups(metadata["file_path"].to_list(), metadata["row_groups"].to_list(), [(i, i + 2044) for i in metadata['page_row_offset_in_row_group'].to_list()], column_name)
@@ -198,7 +213,8 @@ def merge_metadatas(index_names: List[str], suffix = "meta"):
     metadatas = []
     for index_name in index_names:
         fs = get_fs_from_file_path(f"{index_name}.{suffix}")
-        table = pq.read_table(f"{index_name.replace('s3://', '')}.{suffix}", filesystem=fs)
+        path = f"{index_name}.{suffix}".replace('s3://', '').replace('gs://', '').replace('gcs://', '')
+        table = pq.read_table(path, filesystem=fs)
         metadatas.append(polars.from_arrow(table))
     
     metadata_lens = [len(metadata) for metadata in metadatas]
@@ -259,7 +275,8 @@ def search_parquet_lake(index_files: list[str], indexed_files: list[str], uninde
                 try:
                     # Use PyArrow to read the file
                     fs = get_fs_from_file_path(file_path)
-                    table = pq.read_table(file_path.replace("s3://", ""), columns=[column], filesystem=fs)
+                    path = file_path.replace("s3://", "").replace("gs://", "").replace("gcs://", "")
+                    table = pq.read_table(path, columns=[column], filesystem=fs)
                     filtered = polars.from_arrow(index.brute_force(table, column, query, K))
                     
                     # Add file path information

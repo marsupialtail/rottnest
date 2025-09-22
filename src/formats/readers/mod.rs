@@ -12,8 +12,9 @@ use std::{
 };
 use zstd::stream::read::Decoder;
 
-use self::{aws_reader::AsyncAwsReader, http_reader::AsyncHttpReader};
+use self::{aws_reader::AsyncAwsReader, gcs_reader::AsyncGcsReader, http_reader::AsyncHttpReader};
 mod aws_reader;
+mod gcs_reader;
 mod http_reader;
 mod local_reader;
 
@@ -53,6 +54,7 @@ impl Clone for AsyncReader {
             reader: match &self.reader {
                 ClonableAsyncReader::Local(reader) => ClonableAsyncReader::Local(reader.clone()),
                 ClonableAsyncReader::AwsSdk(reader) => ClonableAsyncReader::AwsSdk(reader.clone()),
+                ClonableAsyncReader::Gcs(reader) => ClonableAsyncReader::Gcs(reader.clone()),
                 ClonableAsyncReader::Http(reader) => ClonableAsyncReader::Http(reader.clone()),
             },
             filename: self.filename.clone(),
@@ -63,6 +65,7 @@ impl Clone for AsyncReader {
 pub enum ClonableAsyncReader {
     Local(AsyncLocalReader),
     AwsSdk(AsyncAwsReader),
+    Gcs(AsyncGcsReader),
     Http(AsyncHttpReader),
 }
 
@@ -73,6 +76,7 @@ impl Deref for ClonableAsyncReader {
         match self {
             ClonableAsyncReader::Local(reader) => reader,
             ClonableAsyncReader::AwsSdk(reader) => reader,
+            ClonableAsyncReader::Gcs(reader) => reader,
             ClonableAsyncReader::Http(reader) => reader,
         }
     }
@@ -83,6 +87,7 @@ impl DerefMut for ClonableAsyncReader {
         match self {
             ClonableAsyncReader::Local(reader) => reader,
             ClonableAsyncReader::AwsSdk(reader) => reader,
+            ClonableAsyncReader::Gcs(reader) => reader,
             ClonableAsyncReader::Http(reader) => reader,
         }
     }
@@ -166,6 +171,7 @@ pub enum ReaderType {
     #[default]
     Local,
     AwsSdk,
+    Gcs,
     Http,
 }
 
@@ -174,6 +180,7 @@ impl From<String> for ReaderType {
         match value.to_lowercase().as_str() {
             "local" => ReaderType::Local,
             "aws" => ReaderType::AwsSdk,
+            "gcs" => ReaderType::Gcs,
             "http" => ReaderType::Http,
             _ => Default::default(),
         }
@@ -265,6 +272,8 @@ pub async fn get_file_size_and_reader(
         ReaderType::Http
     } else if file.starts_with("s3://") {
         ReaderType::AwsSdk
+    } else if file.starts_with("gs://") || file.starts_with("gcs://") {
+        ReaderType::Gcs
     } else {
         Default::default()
     };
@@ -280,6 +289,12 @@ pub async fn get_file_size_and_reader(
             let (file_size, reader) = aws_reader::get_file_size_and_reader(file).await?;
             let filename = reader.filename.clone();
             let async_reader = AsyncReader::new(ClonableAsyncReader::AwsSdk(reader), filename);
+            (file_size, async_reader)
+        }
+        ReaderType::Gcs => {
+            let (file_size, reader) = gcs_reader::get_file_size_and_reader(file).await?;
+            let filename = reader.filename.clone();
+            let async_reader = AsyncReader::new(ClonableAsyncReader::Gcs(reader), filename);
             (file_size, async_reader)
         }
         ReaderType::Http => {
@@ -299,6 +314,8 @@ pub async fn get_reader(file: String, reader_type: ReaderType) -> Result<AsyncRe
         ReaderType::Http
     } else if file.starts_with("s3://") {
         ReaderType::AwsSdk
+    } else if file.starts_with("gs://") || file.starts_with("gcs://") {
+        ReaderType::Gcs
     } else {
         Default::default()
     };
@@ -314,6 +331,12 @@ pub async fn get_reader(file: String, reader_type: ReaderType) -> Result<AsyncRe
             let reader = aws_reader::get_reader(file).await?;
             let filename = reader.filename.clone();
             let async_reader = AsyncReader::new(ClonableAsyncReader::AwsSdk(reader), filename);
+            async_reader
+        }
+        ReaderType::Gcs => {
+            let reader = gcs_reader::get_reader(file).await?;
+            let filename = reader.filename.clone();
+            let async_reader = AsyncReader::new(ClonableAsyncReader::Gcs(reader), filename);
             async_reader
         }
         ReaderType::Http => {
